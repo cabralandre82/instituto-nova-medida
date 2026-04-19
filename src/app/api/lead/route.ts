@@ -89,10 +89,16 @@ export async function POST(req: Request) {
     console.log("[instituto-nova-medida][lead] inserted:", data?.id);
 
     // Disparar MSG 1 (boas-vindas) via WhatsApp Cloud API.
-    // Não bloqueia a resposta ao cliente — falha é registrada e tratada
-    // assincronamente. A persistência do lead é o que importa nesse
-    // endpoint; o WhatsApp é "best-effort" no momento do POST.
-    void (async () => {
+    //
+    // Importante: em runtime serverless (Vercel), promises "fire-and-forget"
+    // após `return` são abortadas pela plataforma. Por isso fazemos `await`
+    // antes de responder. Custo: ~300-800ms a mais na resposta. Benefício:
+    // disparo confiável e status registrado no mesmo ciclo.
+    //
+    // Falha do WhatsApp não derruba a resposta de sucesso do lead — a
+    // persistência é o que importa pra captura. O erro fica gravado pra
+    // retry posterior.
+    try {
       const wa = await sendBoasVindas({
         to: lead.phone,
         firstName: lead.name,
@@ -112,23 +118,36 @@ export async function POST(req: Request) {
             }`,
           })
           .eq("id", data?.id);
-        return;
+      } else {
+        console.log("[instituto-nova-medida][lead][whatsapp] MSG 1 enviada:", {
+          leadId: data?.id,
+          messageId: wa.messageId,
+          waId: wa.waId,
+        });
+        await supabase
+          .from("leads")
+          .update({
+            whatsapp_msg1_status: "sent",
+            whatsapp_msg1_message_id: wa.messageId,
+            whatsapp_msg1_sent_at: new Date().toISOString(),
+          })
+          .eq("id", data?.id);
       }
-
-      console.log("[instituto-nova-medida][lead][whatsapp] MSG 1 enviada:", {
-        leadId: data?.id,
-        messageId: wa.messageId,
-        waId: wa.waId,
-      });
+    } catch (waErr) {
+      console.error(
+        "[instituto-nova-medida][lead][whatsapp] exception:",
+        waErr
+      );
       await supabase
         .from("leads")
         .update({
-          whatsapp_msg1_status: "sent",
-          whatsapp_msg1_message_id: wa.messageId,
-          whatsapp_msg1_sent_at: new Date().toISOString(),
+          whatsapp_msg1_status: "failed",
+          whatsapp_msg1_error: `exception: ${
+            waErr instanceof Error ? waErr.message : String(waErr)
+          }`,
         })
         .eq("id", data?.id);
-    })();
+    }
 
     // TODO Sprint 5: enviar evento de conversão para Meta CAPI
 
