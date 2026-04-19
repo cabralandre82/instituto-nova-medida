@@ -7,21 +7,70 @@
 ✅ App "Instituto Nova Medida" criado em developers.facebook.com
 ✅ Permissões selecionadas: WhatsApp + API de Marketing
 ✅ App ID, App Secret e Client Token recebidos
-✅ Access Token temporário recebido (24h, gravado em `.env.local`)
+✅ Access Token temporário recebido (24h, gravado em `.env.local` e Vercel)
 ✅ **WABA ID + Phone Number ID do TEST NUMBER recebidos e gravados:**
    - `WHATSAPP_BUSINESS_ACCOUNT_ID=3610674345738807`
    - `WHATSAPP_PHONE_NUMBER_ID=1093315577192606`
 ✅ **Destinatário verificado: +55 21 99885-1851** (chip do operador)
-✅ **Pipeline ponta-a-ponta entregando mensagem real no WhatsApp:**
-   - Curl direto pra Meta → 🟢 entregue
-   - POST /api/lead → lead persistido + WhatsApp 🟢 entregue
-   - status='sent' + message_id gravados no Supabase
+✅ **Pipeline ponta-a-ponta entregando mensagem real no WhatsApp** (em
+   ambiente local, via curl): `hello_world` chega no WhatsApp do
+   operador.
+✅ **Site no ar:** `https://instituto-nova-medida.vercel.app` —
+   pronto pra Meta verificar.
 ⚠️ Número `+55 21 99732-2906` **com restrição na Meta** (erro `#2655121`)
-   pra usar como REMETENTE — não é bloqueio, estamos usando o test number.
+   pra usar como REMETENTE — usando test number enquanto isso.
+🔴 **WhatsApp em PRODUÇÃO bloqueado** (erro `131005 Access denied`).
+   Causa identificada: User AT temporário não funciona em servidores
+   cloud. Solução: trocar pra System User Token. Bloqueio: precisa do
+   Business Manager destravado primeiro. Ver bloco abaixo.
 
-❌ Access Token permanente — só quando formos pra produção
+❌ Business Manager **DESATIVADO** pela Meta (site não verificado) —
+   solução: passos no bloco abaixo
+❌ System User Token (permanente) — só depois de destravar o BM
 ❌ Template `boas_vindas_inicial` em pt_BR — a submeter no WhatsApp Manager
-❌ Webhook `/api/wa/webhook` pra receber delivered/read/respostas
+❌ Webhook `/api/wa/webhook` em produção — endpoint pronto, falta
+   apontar a Meta pra `https://instituto-nova-medida.vercel.app/api/wa/webhook`
+
+---
+
+## 🚨 AÇÃO PRIORITÁRIA — destravar Business Manager (operador)
+
+Sem isso, todo envio de WhatsApp em produção retorna `131005`.
+
+1. Acesse https://business.facebook.com → seu Business Manager
+2. **Configurações da Empresa** → **Informações da Empresa**
+3. Em **Site da Empresa**, cole: `https://instituto-nova-medida.vercel.app`
+4. Salve. Aparecerá um banner amarelo dizendo que a conta está em
+   análise.
+5. Clique em **Solicitar nova análise** (ou "Resolver" no banner
+   vermelho de desativação)
+6. Meta verifica em 24-48h. Você recebe email quando aprovar.
+
+### Quando o BM reativar — gerar System User Token
+
+7. Em **Business Manager** → **Configurações da Empresa** →
+   **Usuários** → **Usuários do Sistema**
+8. **Adicionar** → nome: `Instituto Nova Medida API`, função: **Admin**
+9. No usuário criado: **Adicionar Ativos** → selecione o app
+   "Instituto Nova Medida" + a WhatsApp Business Account → marcar
+   **Controle Total**
+10. Clique em **Gerar Token** → escolha o app → permissões:
+    - ☑ `whatsapp_business_management`
+    - ☑ `whatsapp_business_messaging`
+    - ☑ `business_management`
+11. **Validade: nunca expira** (recomendado pra produção)
+12. **Copia o token gerado** (você só vê uma vez)
+13. Atualiza no Vercel:
+    ```bash
+    printf "%s" "EAA...token..." | vercel env add WHATSAPP_ACCESS_TOKEN production
+    vercel deploy --prod
+    ```
+    (ou pela UI: Settings → Environment Variables → Edit
+    `WHATSAPP_ACCESS_TOKEN` → cole o novo → Redeploy)
+
+Pronto: `/api/lead` em produção começa a entregar WhatsApp de verdade.
+
+---
 
 ---
 

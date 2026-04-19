@@ -6,6 +6,114 @@
 
 ---
 
+## 2026-04-19 · Site no ar em produção (Vercel) · IA + operador
+
+**URL pública oficial:** **https://instituto-nova-medida.vercel.app**
+
+(também responde por `https://project-o43e3.vercel.app` — alias da
+Vercel, equivalente)
+
+**Operador:**
+- Criou projeto no Vercel (`prj_rsFlqlcbanQe6EtPhuRBeS5icIJ0`)
+- Subiu repositório no GitHub (`cabralandre82/instituto-nova-medida`)
+- Gerou Vercel API token e entregou pra IA executar deploy via CLI
+
+**IA — passos do deploy:**
+1. `vercel link` → vinculou repo local ao projeto Vercel
+2. Confirmou que as 10 env vars (Supabase + Meta) já estavam no
+   projeto (operador subiu pela UI)
+3. Trocou `WHATSAPP_ACCESS_TOKEN` (operador tinha acabado de
+   regerar) — usou `printf` em vez de `echo` pra evitar trailing
+   newline corruption
+4. Detectou que o projeto Vercel **não tinha framework configurado**
+   (`framework: null`) → primeiro deploy retornava 404 em tudo.
+   Setou via API: `framework: "nextjs", nodeVersion: "20.x"`
+5. Desligou `ssoProtection` (Vercel tinha ligado por padrão e
+   bloqueava acesso público com 401)
+6. Adicionou alias custom `instituto-nova-medida.vercel.app`
+7. Adicionou `NEXT_PUBLIC_SITE_URL` apontando pra URL final
+8. Deploy de produção em **35 segundos** com 8 rotas:
+   - `/` (147 kB First Load) — landing renderizada estaticamente
+   - `/api/lead` — serverless function (lead capture + WhatsApp)
+   - `/api/wa/webhook` — serverless function (Meta webhook)
+   - `/robots.txt`, `/sitemap.xml` — SEO
+9. Pinou todas as funções na região **`gru1` (São Paulo)** via
+   `vercel.json` pra reduzir latência pros clientes BR
+
+**IA — fix de comportamento serverless no `/api/lead`:**
+
+Em produção descobriu que o `void async` (fire-and-forget) que
+disparava o WhatsApp depois do `return NextResponse.json(...)` era
+**abortado pelo runtime serverless** assim que a resposta HTTP saía
+— diferente do dev local onde o processo Node continua vivo.
+
+Sintoma: lead persistia no Supabase mas `whatsapp_msg1_status`
+ficava NULL (mensagem nunca disparada).
+
+Fix: trocou `void (async () => {...})()` por `await` direto antes do
+`return`. Cliente espera ~500ms a mais por causa do round-trip à
+Meta, mas garantimos disparo + tracking no mesmo ciclo.
+
+Commit: `bc1d145` — `fix(api/lead): await WhatsApp dispatch in
+serverless runtime`
+
+**Validação E2E em produção:**
+
+| Endpoint | Resultado |
+|---|---|
+| `GET /` | HTTP 200, 43kB, landing completa renderizada |
+| `POST /api/lead` | persistiu lead `0fe3e46d-eb21-474a-b2c1-ce87ee986ea0` no Supabase |
+| `GET /api/wa/webhook?hub.mode=subscribe...` | retorna `hub.challenge` ✓ (handshake da Meta funcionando) |
+| `GET /robots.txt` | OK |
+| `GET /sitemap.xml` | OK |
+
+**Pendência: WhatsApp em produção (erro 131005)**
+
+POST `/messages` no runtime Vercel retorna `(#131005) Access denied`
+mesmo com token byte-idêntico ao que funciona via curl residencial.
+
+Diagnóstico (via endpoint `/api/debug/wa-env` temporário, removido
+após confirmação):
+- `runtime_region`: `gru1` (Brasil) — geo-IP descartado
+- `outbound_ip`: `56.124.125.161` (AWS)
+- Token: `length=288`, `sha256_first16=5d6eaf5bb22f8cdc` — IDÊNTICO
+  ao token correto (sem whitespace, sem aspas, sem newline)
+- GET `/{phone_id}?fields=...` → **200 OK**
+- POST `/{phone_id}/messages` → **403 (#131005)** mesmo com
+  `appsecret_proof`
+
+**Causa raiz:** o token gerado no painel "Get Started" do WhatsApp
+Cloud API é um **User Access Token** vinculado à sessão do
+navegador. A Meta documenta:
+
+> "User access tokens are only used for testing in the developer
+> dashboard. For production server applications, you must use a
+> System User access token."
+
+A Meta libera `User AT` quando vem de IP residencial (assume que é
+"você testando no terminal"), mas bloqueia chamadas server-to-server
+de IPs cloud (AWS/Vercel/etc).
+
+**Ação corretiva (depende da Meta destravar Business Manager):**
+
+Quando o BM reativar (ver próximo bloco), gerar um **System User
+Token permanente** em Settings → Users → System Users → Generate
+Token, com escopos `whatsapp_business_management` e
+`whatsapp_business_messaging`. Trocar `WHATSAPP_ACCESS_TOKEN` no
+Vercel via `printf "%s" "$NEW_TOKEN" | vercel env add ...`.
+Nenhuma mudança de código necessária.
+
+**Ação para o operador AGORA — destravar Business Manager:**
+
+1. Acesse https://business.facebook.com → seu Business Manager
+2. Configurações da Empresa → Informações da Empresa
+3. Em **Site da Empresa**, coloque: `https://instituto-nova-medida.vercel.app`
+4. Salve e clique em **Solicitar nova análise**
+5. Meta verifica em 24-48h. Quando aprovar, BM volta ao normal.
+6. Aí seguimos com o System User Token (passo acima).
+
+---
+
 ## 2026-04-19 · Sprint 2 — primeira mensagem WhatsApp entregue 🎯 · IA + operador
 
 **Operador:**

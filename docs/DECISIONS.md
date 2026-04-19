@@ -280,3 +280,80 @@ Editor. Quando passar de ~5 migrations, migrar para Supabase CLI
 - Schema versionado junto com o código no git
 - Replicar ambientes (staging/prod) é trivial
 - Rollback é manual mas explícito
+
+---
+
+## D-017 · Hospedagem: Vercel + região `gru1` (São Paulo) · 2026-04-19
+
+**Contexto:** Decidir onde hospedar o frontend Next.js + API routes.
+
+**Decisão:** **Vercel** (mesmo time/empresa do Next.js). Plano free
+no início (incluso para projetos pessoais). Todas as serverless
+functions pinadas em **`gru1` (São Paulo)** via `vercel.json` pra
+reduzir latência ao usuário BR final e ao pool do Supabase também
+em São Paulo.
+
+**Alternativas consideradas:**
+- AWS Amplify / Lambda + CloudFront → mais controle, mais setup
+- Render / Railway → bons mas latência BR pior
+- Self-hosted (VPS BR) → assumir SRE pra deploys, TLS, scaling — sem
+  retorno num MVP
+
+**Consequências:**
+- Deploy automático a cada `git push` na `main`
+- Preview URL em cada PR
+- HTTPS automático
+- Edge global pro static (HTML/CSS/JS) + serverless funcs em São
+  Paulo pras rotas dinâmicas
+- Custo: $0 até atingir limites de bandwidth/invocations gratuitos
+- Migração futura pra AWS = `vercel.json` + adapter, sem reescrita
+
+---
+
+## D-018 · WhatsApp em produção exige System User Token (não User AT) · 2026-04-19
+
+**Contexto:** Após deploy bem-sucedido em https://instituto-nova-medida.vercel.app,
+o `POST /messages` da Meta começou a retornar `(#131005) Access denied`
+em 100% das chamadas, mesmo com token byte-idêntico ao que funciona
+via curl residencial brasileiro.
+
+Diagnóstico provou (via endpoint debug `/api/debug/wa-env`,
+removido após):
+- Token no Vercel: `length=288`, `sha256_first16=5d6eaf5bb22f8cdc`
+  — IDÊNTICO ao token correto
+- Função roda em `gru1` (Brasil) — geo-IP descartado
+- IP de saída: `56.124.125.161` (AWS)
+- GET `/{phone_id}` → 200 OK
+- POST `/{phone_id}/messages` → 403 com/sem `appsecret_proof`
+
+A Meta documenta:
+> "User access tokens are only used for testing in the developer
+> dashboard. For production server applications, you must use a
+> System User access token."
+
+A Meta libera o User AT quando vem de IP residencial (assume
+"você testando no terminal") mas bloqueia chamadas server-to-server
+de IPs cloud (AWS/Vercel/etc), retornando 131005.
+
+**Decisão:** Usar **System User Token permanente** em produção,
+gerado em Business Manager → Settings → Users → System Users →
+Generate Token, com escopos:
+- `whatsapp_business_management`
+- `whatsapp_business_messaging`
+
+System User Tokens não expiram (ou duram 60 dias) e funcionam de
+qualquer IP, justamente para servidores.
+
+**Bloqueio temporário:** O Business Manager do operador está
+desativado pela Meta porque o site cadastrado não pôde ser
+verificado. Agora que temos a URL pública
+`https://instituto-nova-medida.vercel.app`, basta atualizar o site
+no BM e pedir reanálise (24-48h).
+
+**Consequências:**
+- Pipeline `/api/lead → Supabase → WhatsApp` está plugado e testado,
+  só aguarda o token correto pra disparar em produção
+- Zero mudança de código quando o System User Token chegar — só
+  trocar `WHATSAPP_ACCESS_TOKEN` no Vercel
+- User AT atual (`hello_world` via curl) continua funcionando pra
+  testes locais

@@ -6,7 +6,9 @@ Plataforma de telessaúde brasileira para emagrecimento individualizado.
 Avaliação médica online, prescrição quando indicada e acompanhamento
 contínuo com a mesma médica pelo WhatsApp.
 
-Domínio em produção: **[institutonovamedida.com.br](https://institutonovamedida.com.br)** (a registrar)
+**Em produção (URL temporária):** **https://instituto-nova-medida.vercel.app**
+
+Domínio definitivo: `institutonovamedida.com.br` (a registrar)
 
 ---
 
@@ -17,8 +19,14 @@ access, how-it-works, desire, cost, quiz interativo, captura LGPD, FAQ,
 sucesso com share, footer compliant).
 
 **Sprint 2** ✅ — Backend Supabase (`leads`, RLS, migrations versionadas)
-+ pipeline WhatsApp Cloud API (lib + tracking + webhook + tunnel) +
-disparo automático de MSG 1 quando lead cai no banco.
++ pipeline WhatsApp Cloud API (lib + tracking + webhook) + disparo
+automático de MSG 1 quando lead cai no banco.
+
+**Deploy** ✅ — No ar em **https://instituto-nova-medida.vercel.app**
+(Vercel, região `gru1` São Paulo, deploy automático a cada push na
+`main`). Aguardando Meta reativar Business Manager pra trocar User AT
+por System User Token e destravar disparo WhatsApp em produção. Ver
+`D-018` em `docs/DECISIONS.md`.
 
 Próxima sprint: **Sprint 3** — Pagamentos (Asaas: PIX, cartão até 3x,
 webhook).
