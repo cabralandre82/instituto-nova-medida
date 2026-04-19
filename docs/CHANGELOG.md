@@ -6,6 +6,70 @@
 
 ---
 
+## 2026-04-19 · Páginas legais publicadas (Termos, Privacidade, Sobre) · IA
+
+**Por quê:** LGPD obriga publicação de Política de Privacidade clara e
+acessível. CDC exige Termos de Uso. Mais relevante para o momento: a
+**Meta Business Manager checa essas páginas** durante a verificação do
+site — publicar agora, antes de pedir reanálise, aumenta muito a
+chance de aprovação rápida.
+
+**Arquitetura:**
+- `src/components/LegalShell.tsx` — wrapper compartilhado com header
+  simples (logo + "Voltar ao site"), tipografia rica
+  (H2/H3/P/UL/LI/Aside/TOC/Section), Footer reutilizado da home
+- `src/components/Logo.tsx` — agora aceita prop `href` (default
+  `#top`) pra apontar pra `/` quando usado em páginas internas
+- `src/components/Footer.tsx` — links âncora viraram `/#secao` pra
+  funcionar de páginas internas; `/lgpd` e `/cookies` consolidados em
+  `/privacidade#contato` e `/privacidade#cookies`; adicionado `/sobre`
+
+**Páginas:**
+
+| Rota | Conteúdo | Tamanho | Seções |
+|---|---|---|---|
+| `/termos` | Termos de Uso | 75 kB | 14 (objeto, natureza CFM/Anvisa, elegibilidade, consulta, prescrição, pagamento c/ direito de arrependimento art. 49 CDC, WhatsApp, uso aceitável, limitação responsabilidade, propriedade intelectual, vigência, foro) |
+| `/privacidade` | Política de Privacidade | 86 kB | 13 (controlador, dados coletados, finalidades, bases legais LGPD, compartilhamento, retenção, segurança, direitos do titular, cookies, menores, transferência internacional, alterações, DPO) |
+| `/sobre` | Sobre o Instituto | 43 kB | 6 (missão, como atendemos, valores, conformidade regulatória, quem somos, contato) |
+
+**Dependências legais cobertas no texto:**
+- Lei nº 14.510/2022 (telessaúde)
+- Resolução CFM nº 2.314/2022 (telemedicina)
+- Resolução CFM nº 1.821/2007 (guarda de prontuário 20 anos)
+- Código de Ética Médica
+- Nota Técnica Anvisa nº 200/2025 (manipulação GLP-1)
+- LGPD (Lei nº 13.709/2018)
+- CDC (art. 49 — direito de arrependimento; art. 101 — foro)
+- Marco Civil da Internet (art. 15 — guarda de logs 6 meses)
+- Código Tributário Nacional (art. 174 — guarda de docs fiscais 5 anos)
+
+**SEO:**
+- `sitemap.ts` lista todas as 4 URLs públicas (lê
+  `NEXT_PUBLIC_SITE_URL`)
+- `layout.tsx` ganhou `metadata.title.template`, twitter card e
+  `category: "health"`
+- Cada página define `alternates.canonical` próprio e robots
+  `index, follow`
+
+**Bug de bonus encontrado e fixado:**
+- `NEXT_PUBLIC_SITE_URL` no Vercel estava com `\n` literal no final
+  (mesmo bug do `WHATSAPP_ACCESS_TOKEN` — `echo` adicionou newline).
+  Sintoma: sitemap renderizava `<loc>https://...vercel.app\n/sobre</loc>`,
+  inválido pra crawlers do Google e Meta. Fix: removido + readicionado
+  com `printf` em todos os 3 ambientes.
+
+**Validação em produção:** todas as rotas retornam 200, sitemap
+limpo (4 URLs sem newline), footer atualizado.
+
+> **Disclaimer técnico:** os textos legais foram redigidos como
+> rascunho profissional consistente com a legislação vigente, mas
+> precisam de revisão de advogado especializado em direito digital
+> e saúde antes da entrada em operação comercial real (especialmente
+> CNPJ, endereço, nome do RT médico, política específica de reembolso
+> pós-manipulação).
+
+---
+
 ## 2026-04-19 · Site no ar em produção (Vercel) · IA + operador
 
 **URL pública oficial:** **https://instituto-nova-medida.vercel.app**
