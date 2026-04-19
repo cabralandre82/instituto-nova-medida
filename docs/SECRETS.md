@@ -1,0 +1,70 @@
+# Credenciais Necessárias · Instituto Nova Medida
+
+> Este documento lista **apenas os nomes** das chaves necessárias.
+> **Nunca** armazene valores reais aqui. Use `.env.local` (gitignored)
+> e/ou cofre de secrets do provedor (Vercel Environment Variables).
+
+## `.env.local` (template)
+
+```bash
+# === Supabase ===
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=          # server-only, nunca expor ao cliente
+
+# === Asaas (pagamentos) ===
+ASAAS_API_KEY=
+ASAAS_WEBHOOK_TOKEN=                # validar webhooks recebidos
+ASAAS_ENV=sandbox                   # ou 'production'
+
+# === Memed (prescrição) ===
+MEMED_API_KEY=
+MEMED_API_SECRET=
+MEMED_ENV=sandbox
+
+# === Daily.co (vídeo) ===
+DAILY_API_KEY=
+DAILY_DOMAIN=                       # ex: institutonovamedida.daily.co
+
+# === WhatsApp Cloud API (Meta) ===
+META_APP_ID=
+META_APP_SECRET=
+WHATSAPP_BUSINESS_ACCOUNT_ID=
+WHATSAPP_PHONE_NUMBER_ID=
+WHATSAPP_ACCESS_TOKEN=
+WHATSAPP_WEBHOOK_VERIFY_TOKEN=      # nós escolhemos, configurar no painel da Meta
+
+# === Analytics ===
+NEXT_PUBLIC_META_PIXEL_ID=
+NEXT_PUBLIC_GA4_ID=
+NEXT_PUBLIC_GTM_ID=
+
+# === E-mail transacional (Resend) ===
+RESEND_API_KEY=
+EMAIL_FROM="Instituto Nova Medida <contato@institutonovamedida.com.br>"
+
+# === Domínio / Auth ===
+NEXT_PUBLIC_SITE_URL=https://institutonovamedida.com.br
+```
+
+## Onde criar cada conta (passo a passo no Sprint 2)
+
+| Serviço | URL | Plano inicial | O que precisamos da sua parte |
+|---|---|---|---|
+| **Supabase** | https://supabase.com | Free (suficiente até ~50k req/mês) | Criar conta, criar projeto na região São Paulo |
+| **Asaas** | https://www.asaas.com | Conta PJ (CNPJ) | CNPJ, dados bancários, ativar split de pagamentos |
+| **Memed** | https://api.memed.com.br | Free para médicos | Cadastro com CRM da médica RT |
+| **Daily.co** | https://daily.co | Free (10k min/mês) | Criar conta, gerar API key, ativar regional residency BR |
+| **Meta for Developers** | https://developers.facebook.com | Free + custos por mensagem | Criar app, conectar WhatsApp Business, validar número |
+| **Vercel** | https://vercel.com | Hobby grátis para começar; Pro quando precisar | Conectar GitHub, deploy automático |
+| **Cloudflare** | https://cloudflare.com | Free | Apontar nameservers do `institutonovamedida.com.br` |
+| **Resend** (e-mail) | https://resend.com | Free 3k e-mails/mês | Verificar domínio, criar API key |
+
+## Boas práticas
+
+- **NUNCA** comitar `.env.local` no git (já está no `.gitignore`)
+- **Rotacionar** chaves a cada 90 dias
+- **Usar service role keys apenas no servidor** (nunca enviar para o cliente)
+- **Ambiente sandbox** (Asaas, Memed) para todo desenvolvimento; só usar
+  produção a partir do beta fechado
+- **Webhook secrets** sempre validados antes de processar payload
