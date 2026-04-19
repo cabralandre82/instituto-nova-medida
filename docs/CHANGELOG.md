@@ -6,6 +6,135 @@
 
 ---
 
+## 2026-04-19 · Last-mile comercial — landing → /planos · IA
+
+**Por quê:** a Sprint 3 deixou `/planos` e o checkout funcionando, mas
+nenhuma seção da landing apontava para lá. Visitante decidido a comprar
+não tinha caminho. Esta release fecha esse gap.
+
+**Mudanças:**
+- `Header.tsx` — novo item "Planos" no menu sticky (entre "Como
+  funciona" e "Dúvidas"), via `next/link` para SPA navigation.
+- `Hero.tsx` — segundo CTA "Ver planos de tratamento" como botão
+  outline ao lado do CTA primário do quiz. A linha de microcopy embaixo
+  vira inline ("Avaliação médica online · sem compromisso · você só
+  segue se fizer sentido") pra não competir visualmente.
+- `Cost.tsx` — link sutil "Ver planos de tratamento" ao lado do CTA
+  principal "Começar minha avaliação". Hierarquia mantida: o quiz
+  segue como caminho recomendado.
+- `CaptureForm.tsx` — após gravar o lead, persiste em localStorage
+  `inm_lead_id`, `inm_lead_name`, `inm_lead_phone`. Permite que o
+  checkout vincule a compra ao lead original (atribuição).
+- `CheckoutForm.tsx` — useEffect no mount lê esses 3 valores e
+  pré-preenche nome+telefone, reduzindo fricção pra quem veio do quiz.
+- `Success.tsx` — novo card "Quer adiantar?" entre o aviso de WhatsApp
+  e o card de share, com CTA verde para `/planos`. Tom calculado:
+  "Sem cobrança automática. Você só confirma depois da avaliação, se
+  fizer sentido". Não pressiona, mas abre a porta.
+
+**Jornadas suportadas após esta release:**
+1. Visitante → quiz → lead → WhatsApp (caminho original)
+2. Visitante → quiz → lead → /planos → checkout (vincula leadId)
+3. Visitante → /planos → checkout (compra direta sem quiz)
+4. Visitante → header "Planos" a qualquer momento
+
+Build limpo. Atribuição de lead→compra preservada via localStorage
+(server-side a vinculação acontece no insert da tabela `payments`
+quando o `/api/checkout` recebe `leadId`).
+
+---
+
+## 2026-04-19 · Sprint 3 (1/2) — Pagamentos Asaas (estrutura + páginas) · IA
+
+**Por quê:** com a Sprint 2 fechada e o site no ar, o próximo gargalo é
+fechar o ciclo "lead → consulta → pagamento". Fechamos a parte de
+pagamento agora; consulta + prescrição entram na Sprint 4. Operador ainda
+não tem CNPJ próprio, então rodamos tudo em **Asaas sandbox** — quando o
+CNPJ destravar, basta trocar `ASAAS_API_KEY` no Vercel (ver D-019).
+
+**Decisões registradas:**
+- `D-019` — Asaas sandbox enquanto o CNPJ não chega
+- `D-020` — Estrutura societária recomendada (SLU + RT médico contratado)
+  com checklist operacional e estimativas de prazo/custo
+
+**Schema (migration `20260419030000_asaas_payments.sql`):**
+- `plans` — catálogo dos 3 tiers (Essencial / Avançado / Avançado Plus),
+  preços em centavos, features em jsonb, leitura pública via RLS
+- `customers` — clientes Asaas, chave única por CPF, endereço pra entrega
+- `subscriptions` — estrutura criada já (vazia até Sprint 5)
+- `payments` — 1 row por checkout, status espelha enum do Asaas (15
+  estados), invoice URL/boleto/QR PIX salvos
+- `asaas_events` — log raw de webhooks pra idempotência + auditoria
+- RLS deny-by-default em customers/subscriptions/payments/asaas_events
+  (service_role escreve tudo via backend)
+- Seed dos 3 planos aplicado direto no Postgres do Supabase
+
+**Lib (`src/lib/asaas.ts`):**
+- Cliente HTTP com sandbox/produção switching automático
+  (`https://sandbox.asaas.com/api/v3` ↔ `https://api.asaas.com/v3`)
+- `createCustomer()`, `getCustomer()`
+- `createPayment()` — PIX/boleto/cartão (com 3x via installmentCount)
+- `getPayment()`, `getPaymentPixQrCode()`
+- `createSubscription()` — pronta pra Sprint 5
+- `isWebhookTokenValid()` — comparação em tempo constante (defesa contra
+  timing attack)
+- Resultado tipado em union `{ ok: true, data }` ou `{ ok: false, code, message }`
+  no mesmo padrão do `whatsapp.ts`
+
+**API routes:**
+- `POST /api/checkout` — valida 11 campos, busca/cria customer (idempotente
+  por CPF), cria cobrança, salva tudo no Supabase, retorna `invoiceUrl`
+  pra redirecionar
+- `POST /api/asaas/webhook` — persiste raw em `asaas_events` (idempotente
+  via `asaas_event_id`), atualiza `payments` (status, invoice_url,
+  paid_at/refunded_at), valida token de auth em tempo constante (exigido
+  só em produção)
+- `GET /api/asaas/webhook` — healthcheck pra testar a URL no painel Asaas
+
+**Páginas (todas com mesma estética cream/sage/terracotta+ink):**
+- `/planos` — server component que lê `plans` do Supabase, 3 cards (o
+  destacado tem fundo `ink-800`), seção "incluso em todos", FAQ enxuto
+- `/checkout/[plano]` — server component que carrega o plano, renderiza
+  `CheckoutForm` (client) com:
+  - Máscara de CPF/telefone/CEP feitas à mão (sem libs, bundle leve)
+  - Validação de CPF pelos dígitos verificadores
+  - Auto-preenchimento via ViaCEP (e foco automático no número)
+  - Resumo lateral sticky com total dinâmico por método de pagamento
+  - 3 opções: PIX, cartão 3x, boleto (preço PIX/boleto = price_pix_cents,
+    cartão = price_cents)
+  - Aceite explícito Termos + Privacidade (LGPD)
+- `/checkout/sucesso` — confirmação para cartão aprovado
+- `/checkout/aguardando` — confirmação para PIX/boleto aguardando
+
+**Métricas do build:**
+- Build limpo em 36s, 14 rotas no total
+- `/checkout/[plano]` → 6.44 kB (107 kB First Load) — formulário completo
+- `/planos` → 2.35 kB (103 kB First Load) — server component
+
+**Arquivos:**
+- `supabase/migrations/20260419030000_asaas_payments.sql` (315 linhas)
+- `src/lib/asaas.ts` (310 linhas)
+- `src/app/api/checkout/route.ts` (267 linhas)
+- `src/app/api/asaas/webhook/route.ts` (170 linhas)
+- `src/app/planos/page.tsx` (309 linhas)
+- `src/app/checkout/[plano]/page.tsx` (78 linhas)
+- `src/app/checkout/sucesso/page.tsx` (102 linhas)
+- `src/app/checkout/aguardando/page.tsx` (108 linhas)
+- `src/components/CheckoutForm.tsx` (498 linhas — client component)
+
+**Pendências da Sprint 3 (parte 2/2):**
+- Operador cria conta sandbox em https://sandbox.asaas.com (grátis, sem
+  CNPJ), gera API key e compartilha
+- IA pluga `ASAAS_API_KEY` no `.env.local` e no Vercel (3 envs)
+- Configura webhook no painel Asaas → URL =
+  `https://instituto-nova-medida.vercel.app/api/asaas/webhook` + token
+  `inm_asaas_webhook_2026_8gT4nW2cR6bV9pK`
+- Testa ponta-a-ponta: `/planos` → checkout → invoice → simular pagamento
+  no painel sandbox → ver `payments.status` virar `RECEIVED` no Supabase
+- Adiciona link "Quero começar" do hero da home pra `/planos`
+
+---
+
 ## 2026-04-19 · Páginas legais publicadas (Termos, Privacidade, Sobre) · IA
 
 **Por quê:** LGPD obriga publicação de Política de Privacidade clara e

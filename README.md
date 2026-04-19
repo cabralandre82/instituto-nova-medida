@@ -28,8 +28,22 @@ automático de MSG 1 quando lead cai no banco.
 por System User Token e destravar disparo WhatsApp em produção. Ver
 `D-018` em `docs/DECISIONS.md`.
 
-Próxima sprint: **Sprint 3** — Pagamentos (Asaas: PIX, cartão até 3x,
-webhook).
+**Sprint 3** ✅ — Pagamentos Asaas em sandbox (produção destravada
+quando o CNPJ próprio sair, sem code change — ver `D-019`/`D-020`).
+Schema completo (`plans`, `customers`, `payments`, `subscriptions`,
+`asaas_events`), seed dos 3 tiers, lib `src/lib/asaas.ts`, API
+`/api/checkout` + webhook `/api/asaas/webhook`, páginas `/planos`,
+`/checkout/[plano]`, `/checkout/sucesso` e `/checkout/aguardando`.
+Validado E2E: criação de customer + payment na Asaas sandbox e webhook
+`PAYMENT_RECEIVED` atualizando `payments.status` no Supabase com
+`signature_valid=true`. Landing conectada (Header, Hero, Cost e
+Success modal apontam para `/planos`); lead capturado pelo quiz é
+vinculado à compra via `localStorage`. **Pendente operador:** subir
+sub-conta dedicada na Asaas quando o CNPJ próprio chegar e ativar
+split automático (Sprint 6).
+
+Próxima sprint: **Sprint 4** — Avaliação clínica + videoconsulta
+(Daily.co) + prescrição digital (Memed).
 
 Veja [`docs/SPRINTS.md`](./docs/SPRINTS.md) para o roadmap completo.
 
@@ -76,10 +90,26 @@ instituto-nova-medida/
 │   │   ├── sitemap.ts
 │   │   ├── robots.ts
 │   │   ├── icon.svg
+│   │   ├── planos/page.tsx           # catálogo de planos
+│   │   ├── checkout/
+│   │   │   ├── [plano]/page.tsx      # formulário de checkout
+│   │   │   ├── sucesso/page.tsx
+│   │   │   └── aguardando/page.tsx
+│   │   ├── sobre/page.tsx
+│   │   ├── termos/page.tsx
+│   │   ├── privacidade/page.tsx
 │   │   └── api/
-│   │       └── lead/route.ts
-│   ├── components/          # 13 componentes
-│   └── lib/utils.ts
+│   │       ├── lead/route.ts
+│   │       ├── checkout/route.ts
+│   │       ├── asaas/webhook/route.ts
+│   │       └── wa/webhook/route.ts
+│   ├── components/                   # 16+ componentes
+│   └── lib/
+│       ├── asaas.ts                  # cliente Asaas
+│       ├── supabase.ts
+│       ├── whatsapp.ts
+│       └── utils.ts
+├── supabase/migrations/              # SQL versionado
 ├── package.json
 ├── tailwind.config.ts
 ├── tsconfig.json

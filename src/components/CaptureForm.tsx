@@ -64,6 +64,17 @@ export function CaptureForm({
         }),
       });
       if (!res.ok) throw new Error("Falha ao registrar");
+      const data = (await res.json().catch(() => null)) as {
+        id?: string;
+      } | null;
+      // Persist the lead id so a future checkout can be linked to this lead.
+      try {
+        if (data?.id) {
+          localStorage.setItem("inm_lead_id", data.id);
+          localStorage.setItem("inm_lead_name", name.trim());
+          localStorage.setItem("inm_lead_phone", phone.replace(/\D/g, ""));
+        }
+      } catch {}
       onSuccess(name.trim());
     } catch {
       setError(

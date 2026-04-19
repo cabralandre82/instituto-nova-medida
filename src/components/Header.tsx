@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { Logo } from "./Logo";
 import { cn } from "@/lib/utils";
 
@@ -29,6 +30,9 @@ export function Header({ onCta }: { onCta: () => void }) {
           <a href="#como-funciona" className="hover:text-ink-800 transition-colors">
             Como funciona
           </a>
+          <Link href="/planos" className="hover:text-ink-800 transition-colors">
+            Planos
+          </Link>
           <a href="#duvidas" className="hover:text-ink-800 transition-colors">
             Dúvidas
           </a>

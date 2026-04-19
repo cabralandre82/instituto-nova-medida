@@ -1,6 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
+import Link from "next/link";
 
 export function Cost({ onCta }: { onCta: () => void }) {
   return (
@@ -82,10 +83,38 @@ export function Cost({ onCta }: { onCta: () => void }) {
             </svg>
           </button>
 
-          <p className="text-[0.9rem] text-cream-100/70 leading-snug max-w-xs">
-            Mais de 1.200 pessoas já passaram por essa avaliação nas últimas semanas.
-          </p>
+          <Link
+            href="/planos"
+            className="group inline-flex items-center gap-2 text-cream-100/90 hover:text-cream-50 text-[0.95rem] font-medium underline-offset-4 hover:underline transition-colors"
+          >
+            Ver planos de tratamento
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 14 14"
+              fill="none"
+              className="transition-transform group-hover:translate-x-0.5"
+            >
+              <path
+                d="M3 7H11M11 7L7 3M11 7L7 11"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </Link>
         </motion.div>
+
+        <motion.p
+          initial={{ opacity: 0 }}
+          whileInView={{ opacity: 1 }}
+          viewport={{ once: true }}
+          transition={{ duration: 0.7, delay: 0.45 }}
+          className="mt-8 text-[0.9rem] text-cream-100/70 leading-snug max-w-xl"
+        >
+          Mais de 1.200 pessoas já passaram por essa avaliação nas últimas semanas.
+        </motion.p>
       </div>
     </section>
   );

@@ -2,6 +2,7 @@
 
 import { motion } from "framer-motion";
 import Image from "next/image";
+import Link from "next/link";
 
 export function Hero({ onCta }: { onCta: () => void }) {
   return (
@@ -63,7 +64,7 @@ export function Hero({ onCta }: { onCta: () => void }) {
             initial={{ opacity: 0, y: 14 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.7, delay: 0.32 }}
-            className="mt-9 flex flex-col sm:flex-row sm:items-center gap-4"
+            className="mt-9 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4"
           >
             <button
               onClick={onCta}
@@ -86,11 +87,37 @@ export function Hero({ onCta }: { onCta: () => void }) {
                 />
               </svg>
             </button>
-            <p className="text-[0.85rem] text-ink-400 leading-snug max-w-xs">
-              Avaliação médica online,
-              <br className="hidden sm:block" /> simples e individual
-            </p>
+            <Link
+              href="/planos"
+              className="group inline-flex items-center justify-center gap-2 rounded-full border border-ink-200 hover:border-ink-300 hover:bg-cream-50 text-ink-700 text-[0.94rem] font-medium px-6 py-[0.95rem] transition-colors"
+            >
+              Ver planos de tratamento
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 14 14"
+                fill="none"
+                className="transition-transform group-hover:translate-x-0.5"
+              >
+                <path
+                  d="M3 7H11M11 7L7 3M11 7L7 11"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </Link>
           </motion.div>
+
+          <motion.p
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.7, delay: 0.45 }}
+            className="mt-3 text-[0.82rem] text-ink-400 leading-snug"
+          >
+            Avaliação médica online · sem compromisso · você só segue se fizer sentido
+          </motion.p>
 
           <motion.div
             initial={{ opacity: 0 }}
