@@ -37,14 +37,28 @@ export async function GET(req: Request) {
     probeGet = { fetch_error: e instanceof Error ? e.message : String(e) };
   }
 
+  const appSecret = process.env.META_APP_SECRET ?? "";
+  const proof = createHash("sha256")
+    .update("dummy")
+    .digest("hex");
+  void proof;
+
+  // gera app secret proof real
+  const appsecretProof = require("node:crypto")
+    .createHmac("sha256", appSecret)
+    .update(token)
+    .digest("hex");
+
+  const body = JSON.stringify({
+    messaging_product: "whatsapp",
+    to: "5521998851851",
+    type: "template",
+    template: { name: "hello_world", language: { code: "en_US" } },
+  });
+
+  // Probe POST sem appsecret_proof (jeito atual)
   let probePost: Record<string, unknown> = { skipped: true };
   try {
-    const body = JSON.stringify({
-      messaging_product: "whatsapp",
-      to: "5521998851851",
-      type: "template",
-      template: { name: "hello_world", language: { code: "en_US" } },
-    });
     const postRes = await fetch(
       `https://graph.facebook.com/v21.0/${phoneId}/messages`,
       {
@@ -59,21 +73,55 @@ export async function GET(req: Request) {
     );
     const txt = await postRes.text();
     let parsed: unknown = txt;
-    try {
-      parsed = JSON.parse(txt);
-    } catch {}
+    try { parsed = JSON.parse(txt); } catch {}
     probePost = {
       _http_status: postRes.status,
-      _body_sent_length: body.length,
-      _auth_header_length: `Bearer ${token}`.length,
       response: parsed,
     };
   } catch (e) {
     probePost = { fetch_error: e instanceof Error ? e.message : String(e) };
   }
 
+  // Probe POST com appsecret_proof
+  let probePostWithProof: Record<string, unknown> = { skipped: true };
+  try {
+    const postRes = await fetch(
+      `https://graph.facebook.com/v21.0/${phoneId}/messages?appsecret_proof=${appsecretProof}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          "User-Agent": "curl/8.4.0",
+        },
+        body,
+        cache: "no-store",
+      }
+    );
+    const txt = await postRes.text();
+    let parsed: unknown = txt;
+    try { parsed = JSON.parse(txt); } catch {}
+    probePostWithProof = {
+      _http_status: postRes.status,
+      response: parsed,
+    };
+  } catch (e) {
+    probePostWithProof = { fetch_error: e instanceof Error ? e.message : String(e) };
+  }
+
+  // Probe: outbound IP (qual IP a Meta vê)
+  let outboundIp: unknown = "unknown";
+  try {
+    const ipRes = await fetch("https://api.ipify.org?format=json", { cache: "no-store" });
+    outboundIp = await ipRes.json();
+  } catch (e) {
+    outboundIp = { error: e instanceof Error ? e.message : String(e) };
+  }
+
   return NextResponse.json({
     runtime_region: process.env.VERCEL_REGION ?? "unknown",
+    outbound_ip: outboundIp,
+    appsecret_proof_first16: appsecretProof.slice(0, 16),
     token: {
       length: token.length,
       sha256_first16: tokenSha,
@@ -87,5 +135,6 @@ export async function GET(req: Request) {
     waba_id: wabaId,
     probe_get: probeGet,
     probe_post: probePost,
+    probe_post_with_appsecret_proof: probePostWithProof,
   });
 }
