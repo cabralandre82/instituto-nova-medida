@@ -22,8 +22,7 @@ export async function GET(req: Request) {
   // Hash do token (sem expor o token em si)
   const tokenSha = createHash("sha256").update(token).digest("hex").slice(0, 16);
 
-  // Tentar uma chamada GET simples à Graph API pra ver se o token vale
-  let probe: Record<string, unknown> = { skipped: true };
+  let probeGet: Record<string, unknown> = { skipped: true };
   try {
     const probeRes = await fetch(
       `https://graph.facebook.com/v21.0/${phoneId}?fields=display_phone_number,status`,
@@ -32,10 +31,45 @@ export async function GET(req: Request) {
         cache: "no-store",
       }
     );
-    probe = (await probeRes.json()) as Record<string, unknown>;
-    probe._http_status = probeRes.status;
+    probeGet = (await probeRes.json()) as Record<string, unknown>;
+    probeGet._http_status = probeRes.status;
   } catch (e) {
-    probe = { fetch_error: e instanceof Error ? e.message : String(e) };
+    probeGet = { fetch_error: e instanceof Error ? e.message : String(e) };
+  }
+
+  let probePost: Record<string, unknown> = { skipped: true };
+  try {
+    const body = JSON.stringify({
+      messaging_product: "whatsapp",
+      to: "5521998851851",
+      type: "template",
+      template: { name: "hello_world", language: { code: "en_US" } },
+    });
+    const postRes = await fetch(
+      `https://graph.facebook.com/v21.0/${phoneId}/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body,
+        cache: "no-store",
+      }
+    );
+    const txt = await postRes.text();
+    let parsed: unknown = txt;
+    try {
+      parsed = JSON.parse(txt);
+    } catch {}
+    probePost = {
+      _http_status: postRes.status,
+      _body_sent_length: body.length,
+      _auth_header_length: `Bearer ${token}`.length,
+      response: parsed,
+    };
+  } catch (e) {
+    probePost = { fetch_error: e instanceof Error ? e.message : String(e) };
   }
 
   return NextResponse.json({
@@ -44,13 +78,13 @@ export async function GET(req: Request) {
       sha256_first16: tokenSha,
       starts_with: token.slice(0, 12),
       ends_with: token.slice(-12),
-      // Detectar caracteres invisíveis suspeitos no início/fim
       has_leading_whitespace: /^\s/.test(token),
       has_trailing_whitespace: /\s$/.test(token),
       has_quotes: token.includes('"') || token.includes("'"),
     },
     phone_number_id: phoneId,
     waba_id: wabaId,
-    probe,
+    probe_get: probeGet,
+    probe_post: probePost,
   });
 }
