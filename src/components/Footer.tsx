@@ -73,22 +73,29 @@ export function Footer() {
 
           <div className="lg:col-span-7 grid sm:grid-cols-3 gap-8">
             <Col title="Plataforma">
-              <FLink href="#como-funciona">Como funciona</FLink>
-              <FLink href="#duvidas">Dúvidas</FLink>
-              <FLink href="#seguranca">Segurança</FLink>
+              <FLink href="/#como-funciona">Como funciona</FLink>
+              <FLink href="/#duvidas">Dúvidas</FLink>
+              <FLink href="/#seguranca">Segurança</FLink>
+              <FLink href="/sobre">Sobre o Instituto</FLink>
             </Col>
             <Col title="Legal">
               <FLink href="/termos">Termos de uso</FLink>
               <FLink href="/privacidade">Política de privacidade</FLink>
-              <FLink href="/lgpd">Encarregado de dados (LGPD)</FLink>
-              <FLink href="/cookies">Política de cookies</FLink>
+              <FLink href="/privacidade#contato">
+                Encarregado de dados (DPO)
+              </FLink>
+              <FLink href="/privacidade#cookies">Política de cookies</FLink>
             </Col>
             <Col title="Suporte">
               <FLink href="mailto:contato@institutonovamedida.com.br">
                 contato@institutonovamedida.com.br
               </FLink>
-              <FLink href="/imprensa">Imprensa</FLink>
-              <FLink href="/medicas">Para médicas</FLink>
+              <FLink href="mailto:imprensa@institutonovamedida.com.br">
+                Imprensa
+              </FLink>
+              <FLink href="mailto:medicas@institutonovamedida.com.br">
+                Para médicas
+              </FLink>
             </Col>
           </div>
         </div>

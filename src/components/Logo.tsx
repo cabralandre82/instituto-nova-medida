@@ -1,9 +1,15 @@
 import { cn } from "@/lib/utils";
 
-export function Logo({ className }: { className?: string }) {
+export function Logo({
+  className,
+  href = "#top",
+}: {
+  className?: string;
+  href?: string;
+}) {
   return (
     <a
-      href="#top"
+      href={href}
       className={cn("inline-flex items-center gap-2.5 group", className)}
       aria-label="Instituto Nova Medida"
     >
