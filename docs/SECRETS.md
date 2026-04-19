@@ -12,10 +12,19 @@ NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=          # server-only, nunca expor ao cliente
 
-# === Asaas (pagamentos) ===
+# === Asaas (pagamentos) ============================================
+# Sandbox: gera no painel https://sandbox.asaas.com → Configurações → Integrações
+# Produção: depois de o CNPJ próprio estar liberado em https://www.asaas.com
+# (chave começa com "$aact_" em sandbox e em produção; o que diferencia é o painel
+# em que foi gerada e a env var ASAAS_ENV abaixo)
 ASAAS_API_KEY=
-ASAAS_WEBHOOK_TOKEN=                # validar webhooks recebidos
-ASAAS_ENV=sandbox                   # ou 'production'
+# Token estático que enviamos no header `asaas-access-token` do webhook.
+# Nós escolhemos o valor (ex: random base64 64 chars), e configuramos
+# o mesmo no painel Asaas → Webhooks → Token de autenticação.
+ASAAS_WEBHOOK_TOKEN=
+# 'sandbox' (testes, sem mover dinheiro) ou 'production' (real).
+# Ver decisão D-019 em DECISIONS.md.
+ASAAS_ENV=sandbox
 
 # === Memed (prescrição) ===
 MEMED_API_KEY=
@@ -52,7 +61,8 @@ NEXT_PUBLIC_SITE_URL=https://institutonovamedida.com.br
 | Serviço | URL | Plano inicial | O que precisamos da sua parte |
 |---|---|---|---|
 | **Supabase** | https://supabase.com | Free (suficiente até ~50k req/mês) | Criar conta, criar projeto na região São Paulo |
-| **Asaas** | https://www.asaas.com | Conta PJ (CNPJ) | CNPJ, dados bancários, ativar split de pagamentos |
+| **Asaas (sandbox)** | https://sandbox.asaas.com | Free | Email + senha. **Não exige CNPJ.** Usado em todo o desenvolvimento da Sprint 3. |
+| **Asaas (produção)** | https://www.asaas.com | Conta PJ (CNPJ) | CNPJ próprio (D-020), dados bancários, ativar split (Sprint 6) |
 | **Memed** | https://api.memed.com.br | Free para médicos | Cadastro com CRM da médica RT |
 | **Daily.co** | https://daily.co | Free (10k min/mês) | Criar conta, gerar API key, ativar regional residency BR |
 | **Meta for Developers** | https://developers.facebook.com | Free + custos por mensagem | Criar app, conectar WhatsApp Business, validar número |

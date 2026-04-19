@@ -35,50 +35,133 @@ nome+WhatsApp, baseado 1:1 na estratégia do `estrategia tirzepatida.odt`.
 
 ---
 
-## 🟡 Sprint 2 · Backend + Persistência + WhatsApp · próxima
+## ✅ Sprint 2 · Backend + Persistência + WhatsApp · 2026-04-19
 
 **Objetivo:** Lead da landing vai parar no Supabase e dispara automação
 WhatsApp (MSG 1–10 do documento de estratégia).
 
 ### Entregáveis
 
-- [ ] Conta Supabase (região São Paulo) — *credencial pendente*
-- [ ] Schema completo do banco (leads, pacientes, médicas, consultas,
-      prescricoes, ciclos, mensagens_wa, eventos_lgpd)
-- [ ] Row Level Security (RLS) policies
-- [ ] `/api/lead` persistindo no Supabase
-- [ ] Conta Meta for Developers + WhatsApp Business — *credencial pendente*
-- [ ] Templates aprovados pela Meta (MSG 1–10)
-- [ ] Worker de disparo automático (cron ou inngest/qstash)
-- [ ] Webhook `/api/wa/incoming` recebendo respostas
-- [ ] Detecção de "SIM" / "NÃO" / dúvida → fluxo apropriado
-- [ ] Painel mínimo de leads (admin) para acompanhar conversões
+- [x] Conta Supabase (região São Paulo) ✅
+- [x] Schema da fase 1 (`leads` + `whatsapp_events`, RLS deny-by-default) ✅
+- [x] Migrations versionadas em `supabase/migrations/` ✅
+- [x] `/api/lead` persistindo no Supabase ✅
+- [x] App Meta + WhatsApp Cloud API ativados ✅
+- [x] Test number da Meta funcionando como remetente (Phone ID
+      `1093315577192606`) ✅
+- [x] Lib WhatsApp (`src/lib/whatsapp.ts`) com `sendTemplate`,
+      `sendText`, `sendBoasVindas` ✅
+- [x] Webhook `/api/wa/webhook` recebendo `delivered`, `read`,
+      `failed` e respostas inbound ✅
+- [x] Tracking no banco (`whatsapp_msg1_status`, `_message_id`,
+      `_sent_at`, `_error`) ✅
+- [x] Pipeline ponta-a-ponta validado: lead novo → Supabase →
+      `hello_world` enviado pra `+55 21 99885-1851` (entregue) ✅
 
-### Definição de pronto
+### Adendos pós-sprint
 
-Um lead novo no quiz dispara MSG 1 em até 60 segundos. Resposta do
-paciente é registrada e dispara MSG seguinte do fluxo.
+- [x] **Deploy em produção (Vercel)** — site no ar em
+      https://instituto-nova-medida.vercel.app, função pinada em
+      `gru1`, framework Next.js detectado, ssoProtection desligada
+- [x] Fix do `void async` fire-and-forget no runtime serverless
+      (trocado por `await` direto)
+- [x] Páginas legais: `/termos`, `/privacidade`, `/sobre`
+- [x] Sitemap + metadata atualizados
+
+### Pendências carregadas pra próximas sprints
+
+- [ ] Submeter template `boas_vindas_inicial` em pt_BR no WhatsApp
+      Manager (copy em `docs/COPY.md`) — bloqueado por reativação BM
+- [ ] **System User Token permanente** — bloqueado por reativação do
+      Business Manager da Meta (operador precisa atualizar site no BM
+      e pedir reanálise)
+- [ ] Fluxo MSG 2-10 com agendamento via cron / qstash — Sprint 5
+- [ ] Painel admin de leads — Sprint 5
 
 ---
 
-## ⚪ Sprint 3 · Área do Paciente
+## 🟡 Sprint 3 · Pagamentos (Asaas) · em andamento
 
-**Objetivo:** Paciente consegue agendar consulta, assinar TCLE, fazer
-videoconsulta e ver seu histórico.
+**Objetivo:** Paciente clica num plano, preenche dados de identificação
++ entrega, paga via PIX/cartão/boleto, e o status da cobrança é
+rastreado no Supabase via webhook do Asaas.
+
+**Modo:** sandbox (`https://sandbox.asaas.com/api/v3`) até o operador
+abrir o CNPJ próprio. Migração pra produção = trocar `ASAAS_API_KEY`
+no Vercel. Ver decisão `D-019`.
+
+### Entregáveis
+
+- [ ] Conta Asaas sandbox + API key — *credencial pendente do operador*
+- [ ] Schema Supabase: `plans`, `customers`, `payments`,
+      `subscriptions`, `asaas_events` (migrations versionadas)
+- [ ] Seed dos 3 planos atuais (Essencial, Avançado, Avançado Plus)
+      conforme `docs/PRICING.md`
+- [ ] `src/lib/asaas.ts` — cliente da API com:
+  - `createCustomer()` — vinculado ao `lead.id`
+  - `createPayment()` — cobrança avulsa (PIX/cartão/boleto)
+  - `createSubscription()` — recorrência mensal
+  - `getPayment()`
+  - tratamento de erros tipado
+  - sandbox/prod switching automático
+- [ ] Página `/planos` — 3 cards bonitos com tiers, comparação clara,
+      CTA "Quero esse plano"
+- [ ] Página `/checkout/[plano]` — formulário com:
+  - Dados pessoais (nome, CPF, email, telefone)
+  - Endereço de entrega (auto-preenchido por CEP via ViaCEP)
+  - Escolha de forma de pagamento (PIX / cartão 3x / boleto)
+  - Aceite explícito dos termos + privacidade
+- [ ] `POST /api/checkout` — cria customer + cobrança no Asaas, salva
+      em `payments`, redireciona pra invoice URL hospedada
+- [ ] `POST /api/asaas/webhook` — recebe `PAYMENT_*` events
+      (CREATED, RECEIVED, OVERDUE, REFUNDED, CHARGEBACK), valida HMAC,
+      registra raw em `asaas_events`, atualiza `payments.status`
+- [ ] Páginas pós-checkout:
+  - `/checkout/sucesso` — pagamento confirmado
+  - `/checkout/aguardando` — PIX/boleto gerado, aguardando confirmação
+- [ ] `docs/SECRETS.md` atualizado com Asaas
+- [ ] `README.md` + `CHANGELOG.md` atualizados
+
+### Fora do escopo (próximas sprints)
+
+- Split automático com farmácia/médica → Sprint 5 (depende de
+  parceiros cadastrados como subcontas Asaas)
+- Renovação automática + lembrete antes do fim do ciclo → Sprint 5
+- Painel do paciente "minha assinatura" → Sprint 4
+- Reembolso self-service → Sprint 7
+
+### Definição de pronto
+
+Operador entra na `/planos` na URL pública, clica num plano,
+preenche checkout, escolhe PIX, é redirecionado pra invoice do Asaas
+sandbox, simula o pagamento, recebe webhook, vê o `payments.status`
+mudar pra `RECEIVED` no Supabase. Tudo isso em ambiente sandbox, sem
+movimentar dinheiro real.
+
+---
+
+## ⚪ Sprint 4 · Avaliação clínica + videoconsulta + prescrição
+
+**Objetivo:** Paciente que pagou agenda a consulta, é atendido por
+videoconferência segura, recebe prescrição digital ICP-Brasil quando
+indicada.
 
 ### Entregáveis
 
 - [ ] Auth do paciente (Supabase Auth, magic link via WhatsApp/email)
-- [ ] Onboarding 3 minutos: TCLE eletrônico + anamnese curta + dados básicos
-- [ ] Escolha: agendar horário OU entrar em fila ("próxima médica disponível")
-- [ ] Página de teleconsulta (Daily.co embed + chat)
-- [ ] Pagamento Asaas (PIX, boleto à vista, cartão 3x sem juros)
+- [ ] Onboarding pós-pagamento: TCLE eletrônico + anamnese curta +
+      dados clínicos
+- [ ] Escolha: agendar horário OU entrar em fila ("próxima médica
+      disponível")
+- [ ] Sala de teleconsulta (Daily.co embed + chat)
+- [ ] Memed integrado (assinatura ICP-Brasil)
 - [ ] Página "Meu tratamento": dose atual, próxima reconsulta, exames
 - [ ] Upload de exames (PDF/imagem) para histórico
+- [ ] Webhook Memed → atualiza `prescriptions` no banco
 
 ---
 
-## ⚪ Sprint 4 · Área da Médica
+## ⚪ Sprint 5 · Área da Médica
 
 **Objetivo:** Médica consegue atender com fluxo enxuto (~10 min/consulta
 inicial, ~5 min/reconsulta).
@@ -97,7 +180,7 @@ inicial, ~5 min/reconsulta).
 
 ---
 
-## ⚪ Sprint 5 · Admin + Indicação + Analytics
+## ⚪ Sprint 6 · Admin + Indicação + Analytics + Split de comissão
 
 **Objetivo:** Você (operador) tem visibilidade total + máquina de
 indicação rodando.
@@ -113,7 +196,7 @@ indicação rodando.
 
 ---
 
-## ⚪ Sprint 6 · Conteúdo, SEO e crescimento orgânico
+## ⚪ Sprint 7 · Conteúdo, SEO e crescimento orgânico
 
 - [ ] Blog (rota `/blog` com MDX)
 - [ ] Páginas de cidade ("emagrecimento online em São Paulo")
@@ -123,7 +206,7 @@ indicação rodando.
 
 ---
 
-## ⚪ Sprint 7 · Hardening e LGPD operacional
+## ⚪ Sprint 8 · Hardening e LGPD operacional
 
 - [ ] Termos de uso e Política de Privacidade redigidos por advogado de saúde
 - [ ] Encarregado de Dados (DPO) contratado/nomeado

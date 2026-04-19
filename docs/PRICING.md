@@ -20,12 +20,15 @@
 
 ## Tiers de plano (proposta inicial)
 
-| Plano | Medicamento | Doses cobertas | Preço/ciclo (3x sem juros) | Preço à vista (PIX/boleto) | Margem bruta estimada* |
-|---|---|---|---|---|---|
-| **Essencial** | Semaglutida manipulada | até 1mg/sem | R$ 1.797 (3x R$ 599) | R$ 1.617 (-10%) | ~50% |
-| **Avançado** | Tirzepatida 2,5–7,5mg | inclui escalonamento | R$ 2.997 (3x R$ 999) | R$ 2.697 (-10%) | ~45% |
-| **Avançado Plus** | Tirzepatida 10–15mg | manutenção/dose alta | R$ 4.197 (3x R$ 1.399) | R$ 3.777 (-10%) | ~40% |
-| **Premium** *(reservado)* | Retatrutida | aguardando aprovação Anvisa | a definir | a definir | — |
+| Slug | Plano | Medicamento | Doses cobertas | Preço/ciclo (3x sem juros) | Preço à vista (PIX/boleto) | Margem bruta estimada* |
+|---|---|---|---|---|---|---|
+| `essencial` | **Essencial** | Semaglutida manipulada | até 1mg/sem | R$ 1.797 (3x R$ 599) | R$ 1.617 (-10%) | ~50% |
+| `avancado` | **Avançado** ⭐ | Tirzepatida 2,5–7,5mg | inclui escalonamento | R$ 2.997 (3x R$ 999) | R$ 2.697 (-10%) | ~45% |
+| `avancado-plus` | **Avançado Plus** | Tirzepatida 10–15mg | manutenção/dose alta | R$ 4.197 (3x R$ 1.399) | R$ 3.777 (-10%) | ~40% |
+| `premium` *(reservado)* | **Premium** | Retatrutida | aguardando aprovação Anvisa | a definir | a definir | — |
+
+> Os `slugs` são as chaves usadas em `/checkout/[plano]` e na tabela
+> `plans` do Supabase.
 
 > *Margem bruta = preço − (custo med + custo médico + taxa Asaas + custos
 > operacionais). Detalhamento abaixo.
@@ -77,14 +80,33 @@ Se a médica avaliar e **não houver indicação clínica**, o paciente
   (a definir e configurar — não bloquear o paciente, apenas cobrar a
   consulta da segunda em diante)
 
-## Compra do medicamento
+## Compra do medicamento — modelo regulatório
 
-A compra do medicamento é feita em **plataforma separada da farmácia
-parceira**. O Instituto Nova Medida:
-- **NÃO fatura** o medicamento
-- **Apenas envia** os dados de prescrição e endereço de entrega para a
-  farmácia (com consentimento explícito do paciente)
-- A farmácia cobra direto do paciente
+A comercialização de medicamentos manipulados de uso contínuo
+(GLP-1 agonistas) tem restrições específicas pela
+**Nota Técnica Anvisa nº 200/2025**. Por isso adotamos um modelo
+de **um checkout / dois faturamentos**, transparente pro paciente:
 
-> Esta separação está alinhada com a Nota Técnica Anvisa nº 200/2025 e
-> reduz risco regulatório.
+1. Paciente vê **um único preço** (o do plano)
+2. Paciente paga **uma única vez** via Asaas
+3. Internamente, o Asaas faz **split automático** dos valores entre:
+   - **Instituto Nova Medida** (consulta + acompanhamento + plataforma)
+   - **Farmácia parceira** (medicamento manipulado)
+   - **Médica** (honorários da consulta inicial e reconsultas)
+4. Cada CNPJ emite **NF-e própria** dos seus serviços/produtos
+
+> O split automático do Asaas será ativado na **Sprint 6**, quando
+> tivermos farmácia parceira cadastrada como subconta. Até lá, em
+> sandbox e nos primeiros checkouts reais, o valor cheio cai na conta
+> principal do Instituto Nova Medida — o operador faz o repasse manual
+> e regulariza no fechamento do mês.
+
+## Sandbox vs Produção
+
+| Item | Sandbox (atual) | Produção (após CNPJ) |
+|---|---|---|
+| URL base API | `https://sandbox.asaas.com/api/v3` | `https://api.asaas.com/v3` |
+| API key | `$ASAAS_API_KEY_SANDBOX` | `$ASAAS_API_KEY` |
+| Movimenta dinheiro real? | Não | Sim |
+| Webhook | mesma URL Vercel | mesma URL Vercel |
+| Migração | trocar `ASAAS_ENV=production` no Vercel | — |

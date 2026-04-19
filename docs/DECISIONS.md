@@ -310,6 +310,99 @@ em São Paulo.
 
 ---
 
+## D-019 · Asaas em sandbox + abertura de CNPJ próprio em paralelo · 2026-04-19
+
+**Contexto:** Operador tem conta Asaas existente, mas vinculada a CNPJ
+de outra empresa (não-médica). A nova entidade jurídica
+(clínica/Instituto) ainda não foi constituída.
+
+**Opções consideradas:**
+
+1. **Usar conta Asaas existente** (CNPJ atual)
+   - ❌ NF emitida com nome errado → reclamação no PROCON
+   - ❌ Receita médica em PJ não-médica → fiscalização tributária
+   - ❌ Inviabiliza split correto pras médicas parceiras (cada uma
+     precisa de NF correta da Instituto)
+
+2. **Esperar abrir CNPJ pra começar Sprint 3**
+   - ❌ Bloqueia desenvolvimento por 30-60 dias
+   - ❌ Perde tempo de validação do fluxo de checkout
+
+3. **Asaas sandbox agora + ativação real depois do CNPJ** ✅
+   - Código fica 100% pronto e testado
+   - Sandbox simula tudo: PIX, cartão, boleto, webhooks
+   - Quando CNPJ chegar, troca-se apenas a `ASAAS_API_KEY` no
+     Vercel — zero refactor
+
+**Decisão:** Adotamos a opção 3.
+- `ASAAS_ENV=sandbox` no início, `ASAAS_ENV=production` quando o
+  CNPJ chegar
+- Endpoint base muda automaticamente:
+  - sandbox: `https://sandbox.asaas.com/api/v3`
+  - prod: `https://api.asaas.com/v3`
+- Webhook URL fica a mesma (apontando pro Vercel)
+
+**Consequências:**
+- Sprint 3 entrega o pipeline completo de pagamentos sem depender
+  do CNPJ
+- Operador pode demonstrar a plataforma pra sócios, médicas
+  parceiras, investidores
+- Migração pra produção é trocar 1 env var
+
+---
+
+## D-020 · Estrutura societária da entidade jurídica: SLU + RT médico contratado · 2026-04-19
+
+**Contexto:** Operador precisa abrir a pessoa jurídica para receber
+pagamentos médicos legalmente, registrar a clínica no CRM/UF e
+contratar médicas parceiras.
+
+**Decisão recomendada:**
+- **Tipo:** Sociedade Limitada Unipessoal (SLU) — operador como
+  único sócio
+- **Responsável Técnico:** Médico(a) contratado(a) com CRM ativo
+  (pode ser a Dra. principal da plataforma ou um RT terceirizado
+  R$ 1.500-4.000/mês)
+- **CNAE principal:** 8630-5/03 — Atividade médica ambulatorial
+  restrita a consultas
+- **CNAE secundário:** 8650-0 (atividades de profissionais da área
+  de saúde) e opcionalmente 6201-5 (desenvolvimento de software)
+- **Regime tributário:** Lucro Presumido (carga total estimada
+  13-16% — favorável pra serviços médicos)
+- **Endereço:** sede em endereço fiscal compartilhado/coworking
+  (R$ 80-200/mês) — não vincula endereço pessoal nos órgãos públicos
+- **Capital social:** a partir de R$ 1.000 (livre)
+
+**Etapas operacionais (estimativa de tempo e custo):**
+
+| Etapa | Tempo | Custo |
+|---|---|---|
+| Abertura na Junta Comercial (via contador) | 5-10 dias | R$ 800-1.500 |
+| Liberação CNPJ na Receita Federal | 1-3 dias | grátis |
+| Alvará municipal de funcionamento | 15-30 dias | R$ 100-400 |
+| **Registro da clínica no CRM/UF** (obrigatório) | 30-60 dias | R$ 600-1.500 |
+| Conta bancária PJ | 5-15 dias | grátis |
+| Conta Asaas com novo CNPJ | 1-3 dias | grátis |
+| **Total operacional** | **30-60 dias** | **R$ 1.500-3.500** |
+
+**Bloqueio crítico:** sem **registro da clínica no CRM/UF**, a
+operação médica é tecnicamente irregular mesmo com CNPJ. Esta etapa
+deve ser iniciada em paralelo com a abertura do CNPJ.
+
+**Contador:** procurar especialização em saúde. Opções: Contabilizei
+ou Conube (online, R$ 79-99/mês), ou contador local com experiência
+em clínicas médicas (perguntar diretamente: "já abriu clínica? sabe
+registrar no CRM/UF?").
+
+**Consequências:**
+- Operador faz isso em paralelo enquanto desenvolvemos
+- Quando ativo, basta criar conta Asaas com CNPJ novo e trocar
+  `ASAAS_API_KEY` no Vercel
+- O Footer e os documentos legais já têm placeholders `[a preencher]`
+  esperando os dados (CNPJ, endereço, RT médico, CRM/UF)
+
+---
+
 ## D-018 · WhatsApp em produção exige System User Token (não User AT) · 2026-04-19
 
 **Contexto:** Após deploy bem-sucedido em https://instituto-nova-medida.vercel.app,
