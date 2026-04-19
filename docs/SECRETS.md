@@ -31,9 +31,22 @@ MEMED_API_KEY=
 MEMED_API_SECRET=
 MEMED_ENV=sandbox
 
-# === Daily.co (vídeo) ===
+# === Daily.co (vídeo, Sprint 4) ===
+# API key gerada em https://dashboard.daily.co → Developers → API keys.
+# Usada apenas no servidor (nunca exposta ao cliente). Rotacionar a
+# cada 90 dias. Free tier: 10k participant-min/mês (cobre o MVP).
 DAILY_API_KEY=
-DAILY_DOMAIN=                       # ex: institutonovamedida.daily.co
+# Subdomínio Daily da conta. Descoberto via GET /v1/ → domain_name.
+# Ex: 'instituto-nova-medida' → salas em
+# https://instituto-nova-medida.daily.co/{room}.
+DAILY_DOMAIN=
+# Secret estático que o Daily envia em x-daily-webhook-secret nos
+# webhooks. Configurado em dashboard.daily.co → Developers → Webhooks.
+# Nós escolhemos o valor.
+DAILY_WEBHOOK_SECRET=
+# Provider de vídeo ativo. Default 'daily'. Trocar pra 'jitsi' quando
+# migrarmos (D-021). Sem valor = 'daily'.
+# VIDEO_PROVIDER=daily
 
 # === WhatsApp Cloud API (Meta) ===
 META_APP_ID=
@@ -64,7 +77,7 @@ NEXT_PUBLIC_SITE_URL=https://institutonovamedida.com.br
 | **Asaas (sandbox)** | https://sandbox.asaas.com | Free | Email + senha. **Não exige CNPJ.** Usado em todo o desenvolvimento da Sprint 3. |
 | **Asaas (produção)** | https://www.asaas.com | Conta PJ (CNPJ) | CNPJ próprio (D-020), dados bancários, ativar split (Sprint 6) |
 | **Memed** | https://api.memed.com.br | Free para médicos | Cadastro com CRM da médica RT |
-| **Daily.co** | https://daily.co | Free (10k min/mês) | Criar conta, gerar API key, ativar regional residency BR |
+| **Daily.co** | https://daily.co | Free (10k min/mês) | Conta criada, API key validada, subdomínio `instituto-nova-medida.daily.co`. Em produção: assinar DPA + cláusulas LGPD (D-021) |
 | **Meta for Developers** | https://developers.facebook.com | Free + custos por mensagem | Criar app, conectar WhatsApp Business, validar número |
 | **Vercel** | https://vercel.com | Hobby grátis para começar; Pro quando precisar | Conectar GitHub, deploy automático |
 | **Cloudflare** | https://cloudflare.com | Free | Apontar nameservers do `institutonovamedida.com.br` |

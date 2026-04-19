@@ -6,6 +6,122 @@
 
 ---
 
+## 2026-04-19 · Sprint 4.1 (1/3) — Fundação multi-médico · IA
+
+**Por quê:** Sprint 3 fechou o pipeline comercial (paciente paga). Agora
+abre o lado clínico: cadastro de médicas, agenda, sala de teleconsulta,
+e o controle financeiro pra repassar honorário mensalmente. Esta entrega
+é a **fundação**: schema completo + lib de vídeo + decisões registradas.
+A UI (admin/médica/paciente) e as APIs vêm nas próximas entregas.
+
+**Decisões registradas (DECISIONS.md):**
+
+- **D-021** — Daily.co como provider de videoconferência no MVP, atrás
+  da abstração `src/lib/video.ts`. Critério de migração pra Jitsi
+  self-host: 3.000 consultas/mês sustentadas (provavelmente mês 12-24).
+- **D-022** — Controle financeiro **interno** (sem split Asaas).
+  Earnings imutáveis, payouts mensais com workflow draft → approved →
+  pix_sent → confirmed. Médica vê tudo em dashboard transparente,
+  Admin aprova com 4 olhos.
+- **D-023** — **Não gravar** consultas por default. Opt-in caso a caso
+  com consentimento expresso. Embasamento: CFM 2.314/2022 (exige
+  prontuário, não vídeo), LGPD Art. 6º III (necessidade), prática de
+  mercado (Doctoralia, Conexa, Telavita não gravam por default).
+- **D-024** — Médicas como **PJ** (MEI/ME), valores fixos de remuneração:
+  R$ 200 consulta agendada / +R$ 40 bônus on-demand / R$ 30 plantão hora.
+  Plantão **é remunerado** porque sem isso a fila on-demand não
+  funciona. Valores ajustáveis por médica (regra versionada).
+
+**Schema novo (`supabase/migrations/20260419040000_doctors_appointments_finance.sql`):**
+
+9 tabelas + 9 enums + 5 functions + 2 cron jobs:
+
+- `doctors` — cadastro PJ (CRM, CNPJ, status, contrato/aditivo LGPD)
+- `doctor_availability` — slots semanais (agendada vs plantão)
+- `doctor_payment_methods` — PIX + bancário, 1 ativo por médica
+- `doctor_compensation_rules` — regras versionadas por effective_from/to
+- `appointments` — consultas (scheduled / on_demand), com sala Daily,
+  recording_consent, prontuário (anamnese/hipotese/conduta), Memed
+- `appointment_notifications` — log de WhatsApp/email por consulta
+- `doctor_earnings` — ganhos imutáveis (consultation, on_demand_bonus,
+  plantao_hour, adjustment, bonus, refund_clawback) com lifecycle
+  pending → available → in_payout → paid
+- `doctor_payouts` — lotes mensais (1 por médica/período), workflow
+  draft → approved → pix_sent → confirmed (ou cancelled/failed)
+- `doctor_billing_documents` — NF-e enviadas pela médica + validação
+
+Functions Postgres:
+- `compute_earning_available_at(doctor_id, payment_id)` — calcula
+  janela D+7 PIX / D+3 boleto / D+30 cartão usando regra da médica
+- `recalculate_earnings_availability()` — promove pending → available
+- `generate_monthly_payouts(period?)` — agrega earnings em payouts draft
+
+Cron jobs (pg_cron — habilitado nesta sprint):
+- `inm_recalc_availability` — diário 00:00 BRT
+- `inm_monthly_payouts` — dia 1, 06:00 BRT
+
+RLS:
+- View `doctors_public` (read pra anon — só campos seguros, usada em
+  `/agendar`)
+- Médica enxerga só próprios dados (helpers `current_doctor_id()`,
+  `jwt_role()`)
+- Admin enxerga tudo (via custom JWT claim `role='admin'`)
+- Anon nega tudo (deny-by-default)
+
+**Lib `src/lib/video.ts`:**
+
+- Interface `VideoProvider` (createRoom, getJoinTokens, deleteRoom,
+  validateWebhook) — agnóstica de provider
+- `DailyProvider` — implementação completa com:
+  - Defaults D-021 (prejoin true, chat false, max 2, eject on exp)
+  - Idempotência por nome de sala (auto delete+recreate em 400)
+  - Tokens de owner (médica) e participant (paciente) separados
+  - Validação de webhook por secret estático constant-time
+- Helper `provisionConsultationRoom()` — cria sala + tokens em uma
+  chamada (formato pronto pra persistir em `appointments`)
+- Singleton `getVideoProvider()` controlado por env `VIDEO_PROVIDER`
+  (default `daily`) pra facilitar troca futura
+
+**Validado:**
+
+- API key Daily testada (HTTP 200), domínio descoberto
+  (`instituto-nova-medida.daily.co`), criação + delete de sala teste OK
+- Migration aplicada via psql direto no Supabase São Paulo
+- 9 tabelas + 9 enums + 5 functions + 2 cron jobs presentes
+- RLS habilitado em 5/5 tabelas críticas
+- pg_cron habilitado (extensão necessária pros jobs)
+
+**Documentação nova/atualizada:**
+
+- `docs/COMPENSATION.md` — modelo financeiro completo (princípios,
+  workflow mensal, dashboards, política de chargeback, métricas)
+- `docs/WHATSAPP_TEMPLATES.md` — 7 templates pra submeter na Meta
+  (5 de agendamento + 2 financeiros), todos categoria UTILITY pt_BR
+- `docs/SPRINTS.md` — Sprint 3 marcada como ✅ concluída; Sprint 4
+  detalhada em 4.1 (fundação) + 4.2 (fila on-demand + Memed)
+- `docs/DECISIONS.md` — D-021, D-022, D-023, D-024
+- `.env.local` — `DAILY_API_KEY`, `DAILY_DOMAIN`,
+  `DAILY_WEBHOOK_SECRET` adicionados
+
+**Pendente desta entrega (próximas sub-entregas Sprint 4.1):**
+
+- Adicionar Daily.co envs no Vercel (precisa VERCEL_TOKEN do operador)
+- Auth de médica + admin (Supabase Auth com role no JWT claim)
+- Páginas: `/admin/doctors`, `/admin/payouts`, `/admin/financeiro`,
+  `/medico` (dashboard), `/medico/agenda`, `/medico/financeiro`,
+  `/medico/configuracoes`, `/agendar` (paciente)
+- API routes: `POST /api/appointments`, `POST /api/daily/webhook`,
+  extensão de `POST /api/asaas/webhook` (criar earning em
+  `PAYMENT_RECEIVED`, clawback em `PAYMENT_REFUNDED`),
+  `POST /api/admin/payouts/[id]/(approve|pay|confirm)`
+- Lib `whatsapp.ts` extendida com helpers dos 7 templates
+- pg_cron: `accrue_plantao_hours()` (a cada hora) e
+  `notify_pending_documents()` (diário)
+- Validação E2E em produção: criar médica de teste → appointment →
+  sala criada → webhook → earning → payout draft
+
+---
+
 ## 2026-04-19 · Last-mile comercial — landing → /planos · IA
 
 **Por quê:** a Sprint 3 deixou `/planos` e o checkout funcionando, mas

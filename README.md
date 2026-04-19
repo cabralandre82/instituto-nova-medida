@@ -34,16 +34,28 @@ Schema completo (`plans`, `customers`, `payments`, `subscriptions`,
 `asaas_events`), seed dos 3 tiers, lib `src/lib/asaas.ts`, API
 `/api/checkout` + webhook `/api/asaas/webhook`, páginas `/planos`,
 `/checkout/[plano]`, `/checkout/sucesso` e `/checkout/aguardando`.
-Validado E2E: criação de customer + payment na Asaas sandbox e webhook
-`PAYMENT_RECEIVED` atualizando `payments.status` no Supabase com
-`signature_valid=true`. Landing conectada (Header, Hero, Cost e
+Validado E2E na produção. Landing conectada (Header, Hero, Cost e
 Success modal apontam para `/planos`); lead capturado pelo quiz é
-vinculado à compra via `localStorage`. **Pendente operador:** subir
-sub-conta dedicada na Asaas quando o CNPJ próprio chegar e ativar
-split automático (Sprint 6).
+vinculado à compra via `localStorage`.
 
-Próxima sprint: **Sprint 4** — Avaliação clínica + videoconsulta
-(Daily.co) + prescrição digital (Memed).
+**Sprint 4.1** 🟡 — **Em andamento** (entrega 1/3 concluída). Fundação
+multi-médico: schema completo (`doctors`, `doctor_availability`,
+`doctor_payment_methods`, `doctor_compensation_rules`, `appointments`,
+`appointment_notifications`, `doctor_earnings`, `doctor_payouts`,
+`doctor_billing_documents`), funções Postgres pra cálculo de
+disponibilidade e geração de payouts mensais, 2 cron jobs ativos
+(`pg_cron`), RLS deny-by-default com helpers `current_doctor_id()` /
+`jwt_role()`, view pública `doctors_public`, lib `src/lib/video.ts`
+abstraindo provider (DailyProvider operacional). Decisões registradas:
+**D-021** Daily.co MVP, **D-022** controle financeiro interno (sem
+split Asaas), **D-023** não gravar por default (opt-in), **D-024**
+médicas como PJ + valores fixos. Veja `docs/COMPENSATION.md` e
+`docs/WHATSAPP_TEMPLATES.md`.
+
+**Próximas entregas Sprint 4.1:** auth (médica + admin), páginas
+admin (`/admin/doctors|payouts|financeiro`), painel médica (`/medico*`),
+fluxo paciente (`/agendar`), API routes (appointments, webhook Daily,
+extensão webhook Asaas, payouts), helpers WhatsApp pros 7 templates.
 
 Veja [`docs/SPRINTS.md`](./docs/SPRINTS.md) para o roadmap completo.
 
@@ -64,6 +76,8 @@ Toda a documentação viva do projeto está em [`docs/`](./docs/):
 | [`docs/BRAND.md`](./docs/BRAND.md) | Paleta, tipografia, voz |
 | [`docs/COPY.md`](./docs/COPY.md) | Copy oficial |
 | [`docs/SECRETS.md`](./docs/SECRETS.md) | Credenciais necessárias |
+| [`docs/COMPENSATION.md`](./docs/COMPENSATION.md) | Modelo financeiro das médicas |
+| [`docs/WHATSAPP_TEMPLATES.md`](./docs/WHATSAPP_TEMPLATES.md) | Templates pra submeter na Meta |
 | [`docs/CHANGELOG.md`](./docs/CHANGELOG.md) | Histórico cronológico |
 
 ---
@@ -105,11 +119,17 @@ instituto-nova-medida/
 │   │       └── wa/webhook/route.ts
 │   ├── components/                   # 16+ componentes
 │   └── lib/
-│       ├── asaas.ts                  # cliente Asaas
+│       ├── asaas.ts                  # cliente Asaas (sandbox/prod)
+│       ├── video.ts                  # VideoProvider + DailyProvider
 │       ├── supabase.ts
 │       ├── whatsapp.ts
 │       └── utils.ts
 ├── supabase/migrations/              # SQL versionado
+│   ├── 20260419000000_initial_leads.sql
+│   ├── 20260419010000_leads_whatsapp_tracking.sql
+│   ├── 20260419020000_whatsapp_events.sql
+│   ├── 20260419030000_asaas_payments.sql
+│   └── 20260419040000_doctors_appointments_finance.sql
 ├── package.json
 ├── tailwind.config.ts
 ├── tsconfig.json

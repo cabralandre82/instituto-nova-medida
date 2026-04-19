@@ -80,110 +80,202 @@ WhatsApp (MSG 1–10 do documento de estratégia).
 
 ---
 
-## 🟡 Sprint 3 · Pagamentos (Asaas) · em andamento
+## ✅ Sprint 3 · Pagamentos (Asaas) · 2026-04-19
 
-**Objetivo:** Paciente clica num plano, preenche dados de identificação
-+ entrega, paga via PIX/cartão/boleto, e o status da cobrança é
-rastreado no Supabase via webhook do Asaas.
+**Objetivo:** Paciente clica num plano, preenche dados, paga via
+PIX/cartão/boleto, status rastreado em tempo real via webhook.
 
-**Modo:** sandbox (`https://sandbox.asaas.com/api/v3`) até o operador
-abrir o CNPJ próprio. Migração pra produção = trocar `ASAAS_API_KEY`
-no Vercel. Ver decisão `D-019`.
+**Modo:** sandbox até CNPJ próprio sair (D-019). Concluída e validada
+ponta-a-ponta em produção. Detalhamento no CHANGELOG.
 
-### Entregáveis
+### Entregáveis (todos ✅)
 
-- [ ] Conta Asaas sandbox + API key — *credencial pendente do operador*
-- [ ] Schema Supabase: `plans`, `customers`, `payments`,
-      `subscriptions`, `asaas_events` (migrations versionadas)
-- [ ] Seed dos 3 planos atuais (Essencial, Avançado, Avançado Plus)
-      conforme `docs/PRICING.md`
-- [ ] `src/lib/asaas.ts` — cliente da API com:
-  - `createCustomer()` — vinculado ao `lead.id`
-  - `createPayment()` — cobrança avulsa (PIX/cartão/boleto)
-  - `createSubscription()` — recorrência mensal
-  - `getPayment()`
-  - tratamento de erros tipado
-  - sandbox/prod switching automático
-- [ ] Página `/planos` — 3 cards bonitos com tiers, comparação clara,
-      CTA "Quero esse plano"
-- [ ] Página `/checkout/[plano]` — formulário com:
-  - Dados pessoais (nome, CPF, email, telefone)
-  - Endereço de entrega (auto-preenchido por CEP via ViaCEP)
-  - Escolha de forma de pagamento (PIX / cartão 3x / boleto)
-  - Aceite explícito dos termos + privacidade
-- [ ] `POST /api/checkout` — cria customer + cobrança no Asaas, salva
-      em `payments`, redireciona pra invoice URL hospedada
-- [ ] `POST /api/asaas/webhook` — recebe `PAYMENT_*` events
-      (CREATED, RECEIVED, OVERDUE, REFUNDED, CHARGEBACK), valida HMAC,
-      registra raw em `asaas_events`, atualiza `payments.status`
-- [ ] Páginas pós-checkout:
-  - `/checkout/sucesso` — pagamento confirmado
-  - `/checkout/aguardando` — PIX/boleto gerado, aguardando confirmação
-- [ ] `docs/SECRETS.md` atualizado com Asaas
-- [ ] `README.md` + `CHANGELOG.md` atualizados
+- [x] Schema Supabase: `plans`, `customers`, `payments`, `subscriptions`,
+      `asaas_events` com RLS deny-by-default e seed dos 3 planos
+- [x] `src/lib/asaas.ts` (cliente sandbox/prod, customers, payments,
+      subscriptions, webhook validation)
+- [x] `POST /api/checkout` com idempotência por CPF, suporte
+      PIX/boleto/cartão e split opcional
+- [x] `POST /api/asaas/webhook` autenticado, persiste eventos em raw +
+      atualiza status do payment
+- [x] Páginas `/planos`, `/checkout/[plano]`, `/checkout/sucesso`,
+      `/checkout/aguardando`
+- [x] Landing conectada (Header/Hero/Cost/Success → /planos) com
+      atribuição lead→compra via localStorage
+- [x] Validado E2E na URL de produção: customer + payment criados na
+      Asaas sandbox, webhook RECEIVED disparado, status atualizado no
+      Supabase com `signature_valid=true`
 
-### Fora do escopo (próximas sprints)
+### Pendente operacional (não bloqueia)
 
-- Split automático com farmácia/médica → Sprint 5 (depende de
-  parceiros cadastrados como subcontas Asaas)
-- Renovação automática + lembrete antes do fim do ciclo → Sprint 5
-- Painel do paciente "minha assinatura" → Sprint 4
-- Reembolso self-service → Sprint 7
-
-### Definição de pronto
-
-Operador entra na `/planos` na URL pública, clica num plano,
-preenche checkout, escolhe PIX, é redirecionado pra invoice do Asaas
-sandbox, simula o pagamento, recebe webhook, vê o `payments.status`
-mudar pra `RECEIVED` no Supabase. Tudo isso em ambiente sandbox, sem
-movimentar dinheiro real.
+- [ ] CNPJ próprio (D-020) → trocar para `ASAAS_API_KEY` de produção
+- [ ] Sub-contas das farmácias parceiras → split de 3 vias (Sprint 6)
 
 ---
 
-## ⚪ Sprint 4 · Avaliação clínica + videoconsulta + prescrição
+## 🟡 Sprint 4 · Multi-médico + agenda + videoconsulta · em andamento
 
-**Objetivo:** Paciente que pagou agenda a consulta, é atendido por
-videoconferência segura, recebe prescrição digital ICP-Brasil quando
-indicada.
+**Objetivo:** Construir o lado **clínico** do produto: cadastro de
+médicas como PJ (D-024), agenda própria de cada uma, videoconsulta
+real via Daily.co (D-021), notificações WhatsApp completas, fila
+on-demand pra "consulta agora", prontuário escrito, prescrição via
+Memed, e controle financeiro interno (D-022) que paga as médicas
+mensalmente com workflow auditável.
 
-### Entregáveis
+**Dividida em 2 entregas** porque o escopo é grande e interdependente:
 
-- [ ] Auth do paciente (Supabase Auth, magic link via WhatsApp/email)
-- [ ] Onboarding pós-pagamento: TCLE eletrônico + anamnese curta +
-      dados clínicos
-- [ ] Escolha: agendar horário OU entrar em fila ("próxima médica
-      disponível")
-- [ ] Sala de teleconsulta (Daily.co embed + chat)
-- [ ] Memed integrado (assinatura ICP-Brasil)
-- [ ] Página "Meu tratamento": dose atual, próxima reconsulta, exames
-- [ ] Upload de exames (PDF/imagem) para histórico
-- [ ] Webhook Memed → atualiza `prescriptions` no banco
+### Sprint 4.1 · Fundação multi-médico + agenda + sala + financeiro base
+
+Foco: subir um fluxo end-to-end "paciente paga → agenda → médica
+atende → recebe earning → admin paga via PIX no fim do mês". Sem fila
+on-demand ainda, sem Memed ainda — esses entram na 4.2.
+
+**Entregáveis:**
+
+- [ ] **Schema multi-médico:**
+  - [ ] `doctors` (id, crm, uf, name, email, phone, photo_url, bio,
+        cnpj, status enum)
+  - [ ] `doctor_availability` (doctor_id, weekday, start_time,
+        end_time, type enum: agendada/plantao)
+  - [ ] `doctor_payment_methods` (doctor_id, pix_key + tipo, dados
+        bancários opcionais)
+  - [ ] `doctor_compensation_rules` (doctor_id, valores fixos por
+        tipo de earning, ativa por vez)
+- [ ] **Schema appointments:**
+  - [ ] `appointments` (id, doctor_id, customer_id, payment_id,
+        scheduled_at, status enum, video_room_url, video_room_token,
+        recording_consent, anamnese jsonb, hipotese, conduta,
+        memed_prescription_id, started_at, ended_at, cancelled_*)
+  - [ ] `appointment_notifications` (appointment_id, channel, kind,
+        template_name, payload, sent_at, message_id, status, error)
+- [ ] **Schema financeiro:**
+  - [ ] `doctor_earnings` (id, doctor_id, appointment_id, payment_id,
+        type enum, amount_cents (signed), description, earned_at,
+        status enum, available_at, payout_id, metadata)
+  - [ ] `doctor_payouts` (id, doctor_id, reference_period, amount_cents,
+        earnings_count, status enum, pix_key snapshot, pix_tx_id,
+        paid_at, approved_by, approved_at, receipt_url, notes)
+  - [ ] `doctor_billing_documents` (payout_id, type, document_url,
+        document_number, issued_at, validated_*)
+- [ ] **pg_cron jobs:**
+  - [ ] `recalculate_earnings_availability()` — diário 00:00, passa
+        `pending` → `available` conforme política D+7/D+3/D+30
+  - [ ] `generate_monthly_payouts()` — dia 1 às 06:00, agrega
+        earnings available em payouts `draft`
+  - [ ] `notify_pending_documents()` — diário 06:00, cobra NF
+- [ ] **Lib `src/lib/video.ts`:**
+  - [ ] Interface `VideoProvider` (createRoom, getJoinUrl, deleteRoom,
+        validateWebhook)
+  - [ ] `DailyProvider` implementação completa
+  - [ ] Defaults da sala: `enable_prejoin_ui: true`, `enable_chat: false`,
+        `max_participants: 2`, `eject_at_room_exp: true`,
+        `enable_recording: 'local'` (off por default, ligada por
+        appointment quando `recording_consent=true`)
+- [ ] **Lib `src/lib/whatsapp.ts` extendida:**
+  - [ ] Helpers para os 5 templates de agendamento
+  - [ ] Helpers para os 2 templates financeiros
+- [ ] **Auth:** roles `doctor` e `admin` no Supabase, middleware
+      protegendo `/medico/*` e `/admin/*`
+- [ ] **API routes:**
+  - [ ] `POST /api/appointments` (paciente cria agendamento)
+  - [ ] `POST /api/daily/webhook` (meeting.started, meeting.ended)
+  - [ ] Extender `POST /api/asaas/webhook` para criar earning quando
+        `PAYMENT_RECEIVED` e clawback quando `PAYMENT_REFUNDED`
+  - [ ] `POST /api/admin/payouts/[id]/approve|pay|confirm`
+  - [ ] `POST /api/admin/payouts/[id]/receipt` (upload PDF)
+- [ ] **Páginas:**
+  - [ ] `/agendar` (paciente escolhe médica + horário)
+  - [ ] `/medico` (dashboard: próximas consultas, status verde/amarelo/
+        vermelho/cinza, botão "entrar na sala")
+  - [ ] `/medico/agenda` (gerenciar slots e bloqueios)
+  - [ ] `/medico/financeiro` (saldo, próximo pagamento, histórico, NFs)
+  - [ ] `/medico/configuracoes` (PIX, foto, bio)
+  - [ ] `/admin/doctors` (CRUD + regras de compensação)
+  - [ ] `/admin/payouts` (workflow mensal completo)
+  - [ ] `/admin/financeiro` (consolidado + alertas de conciliação)
+- [ ] **Notificações WhatsApp** agendadas (T-24h, T-1h, T-15min, T+0,
+      T+10min) via pg_cron + templates
+- [ ] **Documentação:**
+  - [ ] `docs/COMPENSATION.md` — modelo financeiro completo
+  - [ ] `docs/WHATSAPP_TEMPLATES.md` — 7 templates pra submeter na Meta
+- [ ] **Validação E2E** em produção: criar médica de teste, criar
+      appointment de teste, sala criada, webhook Daily processado,
+      earning criada com status correto, payout draft gerado
+
+### Sprint 4.2 · Fila on-demand + prontuário + Memed
+
+Foco: completar a UX clínica e financeira, implementar o diferencial
+da "consulta agora".
+
+**Entregáveis:**
+
+- [ ] `consultation_queue` table + RPC `process_queue()`
+- [ ] Página `/consulta-agora` (paciente entra na fila, vê posição em
+      tempo real via Supabase Realtime channel)
+- [ ] Painel da médica recebe alerta "próximo paciente" (Realtime)
+- [ ] Anamnese estruturada (formulário no painel da médica → grava em
+      `appointments.anamnese` jsonb)
+- [ ] Hipótese + conduta livres (texto)
+- [ ] Integração **Memed** (OAuth por médica, criação de prescrição,
+      arquivamento PDF)
+- [ ] Mensagem WhatsApp pós-consulta com link Memed
+- [ ] Templates Meta submetidos e aprovados (cobre todos os disparos
+      proativos da 4.1 + 4.2)
+- [ ] Página `/medico/historico` (consultas anteriores + busca)
+- [ ] Página `/paciente/historico` (paciente vê suas consultas + receitas)
+
+### Fora do escopo da Sprint 4 (vai pra 5+)
+
+- Renovação automática de plano com lembrete (Sprint 5)
+- Painel do paciente "meu tratamento" (Sprint 5)
+- Triagem automática por regras (Sprint 5)
+- Templates de mensagem 1-clique pra médica (Sprint 5)
+- Detector de alertas de efeitos colaterais (Sprint 5)
+- Reembolso self-service (Sprint 7)
+
+### Definição de pronto da Sprint 4.1
+
+1. Operador cadastra uma médica em `/admin/doctors` com CRM, PIX,
+   regra de compensação default.
+2. Médica recebe magic link, faz login em `/medico`, configura agenda
+   semanal em `/medico/agenda`.
+3. Paciente que pagou (Sprint 3) entra em `/agendar`, escolhe médica
+   + horário, é confirmado por WhatsApp.
+4. 15min antes da consulta, paciente recebe link da sala via WhatsApp.
+5. Ambos entram, conversam, médica encerra → webhook Daily dispara.
+6. Earning aparece em `/medico/financeiro` com status `pending`.
+7. Após D+7 (PIX), earning vira `available`.
+8. No dia 1 do mês seguinte, payout draft aparece em `/admin/payouts`.
+9. Admin aprova, paga via PIX, sobe comprovante, status `confirmed`,
+   médica é notificada.
+10. Médica sobe NF-e em `/medico/financeiro`, status `validated`.
 
 ---
 
-## ⚪ Sprint 5 · Área da Médica
+## ⚪ Sprint 5 · Área da Médica avançada + ciclo do paciente
 
 **Objetivo:** Médica consegue atender com fluxo enxuto (~10 min/consulta
-inicial, ~5 min/reconsulta).
+inicial, ~5 min/reconsulta) e paciente vê seu tratamento evoluir.
 
 ### Entregáveis
 
-- [ ] Auth da médica + verificação de CRM
-- [ ] Dashboard: pacientes ativos, fila de espera, próximos agendamentos
-- [ ] Sala de teleconsulta (vídeo Daily + prontuário lado-a-lado)
-- [ ] Anamnese pré-preenchida pelo paciente (médica revisa)
-- [ ] Triagem automática (regras de aptidão / contraindicações absolutas)
-- [ ] Sugestão de prescrição (médica revisa e assina)
-- [ ] Memed integrado (assinatura ICP-Brasil)
-- [ ] Templates de mensagem WhatsApp (1-clique)
+- [ ] Verificação automática de CRM (CFM API ou scraping autorizado)
+- [ ] Triagem automática (regras de aptidão / contraindicações absolutas
+      pré-consulta com sugestão de prescrição que a médica revisa)
+- [ ] Templates de mensagem WhatsApp 1-clique pra médica
 - [ ] Detector de alertas (efeitos colaterais graves → escalação)
+- [ ] Página `/paciente/meu-tratamento`: dose atual, próxima reconsulta,
+      exames, evolução
+- [ ] Upload de exames (PDF/imagem) para histórico clínico
+- [ ] Renovação automática de plano com lembrete antes do fim do ciclo
+- [ ] MSG 2-10 do roteiro WhatsApp original (ainda não disparadas)
 
 ---
 
 ## ⚪ Sprint 6 · Admin + Indicação + Analytics + Split de comissão
 
 **Objetivo:** Você (operador) tem visibilidade total + máquina de
-indicação rodando.
+indicação rodando + farmácia integrada com split.
 
 ### Entregáveis
 
@@ -191,8 +283,10 @@ indicação rodando.
 - [ ] Cohort de retenção mensal
 - [ ] Programa "indique e ganhe" (link rastreável + crédito automático)
 - [ ] Eventos de conversão Meta Pixel + GTM + GA4
-- [ ] Splits de comissão configuráveis no admin
 - [ ] Onboarding de farmácia parceira (upload de licença, IFA, laudos)
+- [ ] Split Asaas de 3 vias (Instituto + Farmácia) — supersede D-022
+      parcialmente: split entra apenas pra farmácia, médica continua
+      com controle interno (D-022)
 
 ---
 

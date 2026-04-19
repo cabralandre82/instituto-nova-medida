@@ -5,6 +5,173 @@
 
 ---
 
+## D-024 · Modelo de remuneração de médicas (PJ + valores fixos) · 2026-04-19
+
+**Contexto:** Sprint 4 abre o cadastro de médicas. Precisávamos definir
+vínculo, política de remuneração e tipos de ganho suportados desde
+o começo (decisões aqui são caras de mudar depois).
+
+**Decisão:** Médicas trabalham como **PJ** (MEI ou ME, com CNPJ próprio),
+contrato de prestação de serviço médico com cláusula explícita de
+**operadora LGPD** (Instituto = controlador). Remuneração por **valores
+fixos** ajustáveis por médica:
+
+| Tipo | Valor default | Quando |
+|---|---|---|
+| `consultation` | R$ 200 | Por consulta agendada concluída |
+| `on_demand_bonus` | +R$ 40 | Adicional por consulta atendida via fila on-demand (total R$ 240) |
+| `plantao_hour` | R$ 30/h | Por hora em status "verde" (online disponível para fila) |
+| `after_hours_bonus` | configurável | Multiplicador noturno/fim de semana (não ativo no MVP) |
+| `adjustment` | manual | Ajuste manual com motivo obrigatório |
+| `bonus` | discricionário | Meta batida, NPS, etc. |
+| `refund_clawback` | negativo | Quando paciente é reembolsado depois |
+
+Os valores ficam em `doctor_compensation_rules` (uma linha por médica,
+uma versão ativa por vez). Mudança de regra **não retroage** — só vale
+pra novas earnings.
+
+**Pagamento de plantão** (R$ 30/h mesmo sem atender) é incentivo
+estrutural pra fila on-demand funcionar — sem ele, médica não fica
+online esperando, e a promessa de "consulta imediata" quebra.
+
+**Alternativas consideradas:** percentual da consulta (mais alinhado com
+ticket variável, mas opaco para médica); CLT (caro e inflexível);
+marketplace livre (perde controle do protocolo).
+
+**Consequências:** modelo PJ tem risco de pejotização — mitigado por:
+contrato sem exclusividade, sem subordinação direta, sem horário
+imposto (médica decide quando ficar online), pagamento por entrega e
+não por jornada. Plantão remunerado precisa de orçamento previsível
+(decisão consciente de pagar tempo ocioso pra ter disponibilidade).
+
+---
+
+## D-023 · Gravação de teleconsulta: opt-in, não obrigatória · 2026-04-19
+
+**Contexto:** Sprint 4 implementa videoconsulta. Precisávamos definir
+política de gravação à luz de CFM, LGPD e CDC.
+
+**Decisão:** **Não gravar consultas por padrão.** Disponibilizar
+gravação como opção opt-in caso a caso, exigindo consentimento expresso
+do paciente antes do início da sala.
+
+**Base legal:**
+
+- **CFM Resolução 2.314/2022, Art. 4º §1º:** exige *prontuário* com
+  guarda de 20 anos. **Não exige gravação de vídeo.** Substituído por
+  prontuário escrito (anamnese estruturada, hipótese diagnóstica,
+  conduta, prescrição via Memed).
+- **LGPD Art. 11:** gravação = dado pessoal sensível (saúde) → exige
+  consentimento específico, expresso e destacado. Gravar sem necessidade
+  fere o **princípio da necessidade** (Art. 6º, III).
+- **CDC:** prova da prestação atendida via prontuário escrito + log
+  Daily.co (meeting_started_at, ended_at, participants) + termo de
+  consentimento da paciente assinado no checkout.
+
+**Mercado:** Doctoralia, Conexa Saúde, Telavita, Beep Saúde — nenhum
+grava por default. Operadoras corporativas que gravam fazem por
+exigência de seguro com consentimento específico.
+
+**Implementação:** campo `recording_consent` em `appointments` (default
+`false`). Quando médica liga gravação, UI do paciente mostra banner
+persistente "Esta consulta está sendo gravada com seu consentimento" +
+botão "Não autorizo". Storage criptografado, retenção 5 anos
+(prescricional CDC), descarte automático.
+
+**Consequências:** menor superfície de ataque LGPD, menor custo de
+storage, menor fricção do paciente. Trade-off: em disputa, dependemos
+do prontuário escrito (que em telemedicina já é o padrão jurídico).
+
+---
+
+## D-022 · Controle financeiro interno (sem split Asaas) · 2026-04-19
+
+**Contexto:** Inicialmente previmos split automático Asaas para repassar
+honorário diretamente à médica no momento da cobrança (D-019 referência).
+Reavaliando a tradeoff a frio.
+
+**Decisão:** **Não usar split Asaas.** Implementar controle financeiro
+interno: Instituto recebe 100% do pagamento, calcula earnings imutáveis
+por médica, gera lote mensal de payouts, paga via PIX manual (Asaas PIX
+Out ou banco direto), com workflow de aprovação obrigatório.
+
+**Por quê controle interno > split:**
+
+| Dimensão | Split Asaas | Controle interno |
+|---|---|---|
+| Onboarding médica | 3-5 dias (MEI + Asaas verificada) | Instantâneo (só PIX) |
+| Custo por transação | Fee Asaas por destino | Zero |
+| Flexibilidade de regras | Fixa no momento da cobrança | Total (consultation, plantão, bônus, ajuste) |
+| Reembolso/chargeback | Difícil reverter split | Trivial (earning negativa = clawback) |
+| Pejotização | Asaas vê o vínculo recorrente | Pagamento PJ tradicional |
+| Auditoria pra médica | Extrato Asaas (pouco contexto) | Dashboard rico + comprovante PIX |
+| NF emitida | 1 por consulta (operacionalmente custoso) | 1 mensal consolidada |
+
+**Modelo de earning (imutável):** cada `doctor_earning` registra um
+fato isolado (consulta, plantão, bônus, etc) com `earned_at` e fica
+imutável. Mudanças de regra não retroagem. Política de "available":
+PIX D+7, Boleto D+3, Cartão D+30 (cobrem janelas de chargeback).
+
+**Workflow mensal:**
+1. Dia 1: `pg_cron` agrega earnings available → cria `doctor_payouts` em status `draft`
+2. Admin aprova cada payout em `/admin/payouts`
+3. Pagamento via PIX (manual ou Asaas Transfer API)
+4. Confirmação + upload comprovante → status `confirmed`
+5. Médica notificada via WhatsApp + cobrada por NF-e/RPA
+
+**Consequências:** opera 100% no nosso código (mais responsabilidade,
+mais flexibilidade). Asaas continua sendo só gateway de cobrança do
+paciente (PSP), sem responsabilidade de divisão. Detalhamento completo
+em `docs/COMPENSATION.md`.
+
+**Substitui parcialmente D-019** (split Asaas previsto): mantém Asaas
+como gateway, descarta split.
+
+---
+
+## D-021 · Daily.co como provider de videoconferência (MVP) · 2026-04-19
+
+**Contexto:** Sprint 4 precisa de salas de teleconsulta confiáveis,
+estáveis e rápidas de implementar. Avaliamos Daily.co (SaaS US),
+Jitsi self-hosted (open source) e JaaS (Jitsi gerenciado pela 8x8).
+
+**Decisão:** **Daily.co no MVP.** Implementação atrás de uma camada
+de abstração `src/lib/video.ts` (interface `VideoProvider`) para
+permitir migração futura sem retrabalho de negócio.
+
+**Tabela comparativa que motivou a escolha** (cenário INM com rampa
+de 50→1.000 consultas/mês no ano 1, total ~5.000 consultas):
+
+| Critério | Daily.co | Jitsi self-hosted | JaaS |
+|---|---|---|---|
+| Setup MVP | ~2h | 1-3 dias + SRE | ~3h |
+| Custo ano 1 (5k consultas) | ~R$ 4.500 | ~R$ 26.000 (R$ 18k infra + R$ 8k setup SRE) | ~R$ 8.000 |
+| Manutenção | Zero | Alta (atualização, scaling JVB) | Zero |
+| Data residency BR | Não (US/EU/SG, com DPA) | Sim (AWS gru1) | Não |
+| Gravação | Trivial (flag, +R$ 0,05/min) | Precisa Jibri (mais 1 servidor) | Trivial |
+| API/SDK | Excelente (REST + React/Vue/RN + iframe + webhooks) | Bom | Excelente |
+| Vendor lock-in | Médio | Zero | Médio |
+
+**Mitigação LGPD pra Daily (US-based):** DPA assinado + cláusulas
+contratuais padrão (LGPD Art. 33, V) + termo de consentimento informado
+do paciente sobre transferência internacional + gravação opt-in
+(D-023). Em fiscalização ANPD, justificável; não é tão limpo quanto
+Jitsi BR, mas é defensável.
+
+**Critério de migração futura:** quando passar de **3.000 consultas/mês
+sustentadas**, reavaliar Jitsi self-host (custo começa a ganhar).
+Estimativa: mês 12-24.
+
+**Configurações default da sala:** `enable_prejoin_ui: true`,
+`enable_chat: false`, `max_participants: 2`, `eject_at_room_exp: true`,
+`enable_recording: 'local'` (não grava por default — controlado por
+appointment.recording_consent).
+
+**Conta operacional:** subdomínio `instituto-nova-medida.daily.co`,
+2 API keys (default 2), webhook secret rotacionável.
+
+---
+
 ## D-001 · Marca: Instituto Nova Medida · 2026-04-19
 
 **Contexto:** Precisávamos de um nome que transmitisse autoridade médica,
