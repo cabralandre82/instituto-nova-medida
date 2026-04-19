@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": ["gru1"],
+  "functions": {
+    "src/app/api/lead/route.ts": {
+      "maxDuration": 15
+    },
+    "src/app/api/wa/webhook/route.ts": {
+      "maxDuration": 10
+    },
+    "src/app/api/debug/wa-env/route.ts": {
+      "maxDuration": 10
+    }
+  }
+}

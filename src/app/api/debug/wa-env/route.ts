@@ -73,6 +73,7 @@ export async function GET(req: Request) {
   }
 
   return NextResponse.json({
+    runtime_region: process.env.VERCEL_REGION ?? "unknown",
     token: {
       length: token.length,
       sha256_first16: tokenSha,
