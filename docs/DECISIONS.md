@@ -5,6 +5,160 @@
 
 ---
 
+## D-036 · Regras de confiabilidade da médica (auto-pause) · 2026-04-20
+
+**Contexto:** D-032 instituiu o contador `doctors.reliability_incidents`
+pra acompanhar no-shows + cancelamentos forçados pela médica. Mas o
+contador é agregado, monotônico, sem janela temporal e sem ação. Na
+prática ele servia só como "termômetro informativo no admin", e:
+
+1. Incidentes de 1 ano atrás contavam igual aos de 1 semana.
+2. Sem forma de dispensar um caso comprovadamente não-culpa da médica
+   (ex: paciente reportou que tinha caído luz na região dela).
+3. Sem ação automática — admin tinha que vigiar um número crescente
+   manualmente.
+4. Risco de reputação: paciente agenda com uma médica que fez 4
+   no-shows nos últimos 30 dias porque a plataforma não bloqueou.
+
+**Objetivo:** instituir regra automática de confiabilidade com três
+camadas (observável, justa, configurável via código) + painel de
+gestão pro admin.
+
+**Alternativas consideradas:**
+
+- **Regra no banco via trigger/pg_cron.** Rejeitado: regra de negócio
+  no DB fica mais difícil de auditar e versionar do que em TS. Além
+  disso a avaliação roda de forma oportunística (após cada novo evento)
+  — não precisa de cron.
+
+- **Thresholds configuráveis dinamicamente (via UI/DB).** Rejeitado
+  por hora: adicionar UI de configuração é custo adicional sem ROI
+  claro, e mudança de threshold é rara. Se precisar, muda via commit
+  (e fica no histórico como decisão).
+
+- **Auto-reativação após N dias sem incidentes.** Rejeitado: no domínio
+  clínico, reativação precisa ser decisão humana consciente. Admin
+  precisa conversar com a médica, entender a raiz, etc. Auto-timer
+  apaga essa conversa.
+
+- **Não distinguir auto-pause de manual-pause.** Rejeitado: perde
+  contexto operacional importante. Auto-pause indica "regra disparou,
+  talvez injustiça, conversar com médica"; manual-pause indica
+  "admin tomou decisão, já tem contexto".
+
+**Decisão:**
+
+1. **Tabela granular de eventos** (`doctor_reliability_events`,
+   migration 015):
+   - Cada incidente vira uma linha com `kind`, `occurred_at`,
+     `appointment_id`, `dismissed_at/by/reason`.
+   - Unique parcial em `appointment_id` garante idempotência com
+     retries do webhook + cron (D-035).
+   - Contador antigo `doctors.reliability_incidents` fica — é métrica
+     histórica agregada; a verdade operacional agora é a tabela.
+
+2. **Regras fixas no código** (em `src/lib/reliability.ts`):
+   - `RELIABILITY_WINDOW_DAYS = 30`
+   - `RELIABILITY_SOFT_WARN = 2` → admin vê no dashboard e na página
+     `/admin/reliability`, médica segue atendendo.
+   - `RELIABILITY_HARD_BLOCK = 3` → médica é auto-pausada; sai de
+     `/agendar` até admin reativar.
+
+3. **Colunas de pause em `doctors`** (migration 015):
+   - `reliability_paused_at` (timestamptz) — se NOT NULL, médica não
+     aparece em `getPrimaryDoctor()` nem aceita novas reservas via
+     `/api/agendar/reserve`.
+   - `reliability_paused_auto` (bool) — distingue auto-pause de manual.
+   - `reliability_paused_by` (uuid, fk auth.users) — quem pausou
+     (null em auto-pause).
+   - `reliability_paused_reason` (text) — motivo pra auditoria.
+   - `reliability_paused_until_reviewed` (bool, default true) — admin
+     sinaliza se o pause só sai após revisão (pra auto-pauses) ou se
+     pode sair automaticamente (reservado; hoje unpause é sempre
+     manual).
+
+4. **Ações de pause/unpause/dismiss idempotentes:**
+   - `pauseDoctor` respeita estado — se já pausada, não sobrescreve os
+     metadados (preserva "admin está no volante").
+   - `unpauseDoctor` é idempotente (noop em médica não pausada).
+   - `dismissEvent` marca `dismissed_at/by/reason`, não deleta (audit
+     trail preservado).
+   - `evaluateAndMaybeAutoPause` roda após cada `recordReliabilityEvent`
+     e só pausa se: `active events >= HARD_BLOCK` AND `!isPaused`.
+
+5. **Integração com `applyNoShowPolicy` (D-032):**
+   - Depois do bump atômico do contador antigo, a policy agora chama
+     `recordReliabilityEvent` + `evaluateAndMaybeAutoPause`.
+   - O `kind` é derivado do `finalStatus`:
+     `no_show_doctor` → kind `"no_show_doctor"`,
+     `cancelled_by_admin_expired` → kind `"expired_no_one_joined"`.
+   - `no_show_patient` não gera evento (paciente faltou, não médica).
+   - Resultado volta em `NoShowResult.doctorAutoPaused` +
+     `.activeReliabilityEvents` pra logs.
+
+6. **Barreira no agendamento (D-027):**
+   - `getPrimaryDoctor()` filtra `reliability_paused_at IS NULL`.
+   - `/api/agendar/reserve` com `doctorId` explícito valida e retorna
+     `doctor_reliability_paused` 409 se a médica estiver pausada.
+   - Appointments já agendados ANTES do pause seguem o curso — o pause
+     afeta só novas reservas. Decisão deliberada: cancelar em massa
+     prejudicaria pacientes que já se planejaram.
+
+7. **UI `/admin/reliability`:**
+   - 4 cards de resumo: pausadas, em alerta, OK, total de eventos
+     ativos.
+   - Tabela "Pausadas" com botão "Reativar" por linha (prompt pede
+     notas opcionais).
+   - Tabela "Em alerta" com botão "Pausar" manual por linha (prompt
+     pede motivo obrigatório).
+   - Tabela "Eventos recentes" (últimos 50) com botão "Dispensar" pra
+     eventos ativos (prompt pede motivo obrigatório).
+
+8. **Dashboard `/admin`:**
+   - Dois novos alertas no "Próximos passos": `N médicas pausadas por
+     confiabilidade` (vermelho forte, link pra página) e `N em alerta`
+     (vermelho claro).
+   - Condição "Tudo em dia" incorpora os dois novos contadores.
+
+9. **AdminNav:**
+   - Item "Confiabilidade" entre "Médicas" e "Repasses" — coerente com
+     o mental model de gestão de equipe.
+
+**Implementação:** 1 migration (015), 1 lib nova (`reliability.ts`), 3
+API routes (pause/unpause/dismiss), 1 página admin nova
+(`/admin/reliability` + client `_Actions`), 1 modificação em
+`no-show-policy.ts` (integra com eventos), 1 em `scheduling.ts`
+(filtra pausadas), 1 em `agendar/reserve/route.ts` (barra reserva com
+médica pausada), 1 em dashboard e AdminNav.
+
+**Consequências imediatas:**
+
+- No próximo no-show da médica, um evento será inserido na nova
+  tabela (além de incrementar o contador antigo).
+- Se a médica acumular 3 eventos ativos em 30 dias, ela é pausada
+  automaticamente. Se já tinha reservas em curso, elas continuam —
+  apenas novas ficam bloqueadas.
+- Admin tem painel pra ver, dispensar eventos injustos, reativar
+  médicas. Nada automático na direção contrária (unpause é sempre
+  decisão humana).
+- D-029 (webhook bloqueado) + D-035 (cron fallback) + D-036 (auto-pause):
+  cadeia completa — mesmo se o webhook não registrar no-show em tempo
+  real, o cron em 5min dispara a policy, que dispara o evento, que
+  dispara auto-pause se atingir threshold.
+
+**Pendente (Sprint 5+):**
+
+- Métrica "taxa de dispensa por admin" — útil pra calibrar se o
+  threshold está justo. Hoje dá pra extrair por SQL, não tem UI.
+- Notificação pra médica quando for pausada (hoje só admin fica
+  sabendo). Precisa de template WhatsApp novo (+ aprovação Meta) ou
+  email institucional. Por ora, admin comunica por fora.
+- Thresholds por médica (senior vs iniciante). Rejeitado pra MVP mas
+  fácil de estender — coluna `reliability_threshold_override` em
+  `doctors` + lógica em `evaluateAndMaybeAutoPause`.
+
+---
+
 ## D-035 · Cron de reconciliação Daily como fallback do webhook · 2026-04-20
 
 **Contexto:** D-029 bloqueou o registro do webhook Daily em produção

@@ -6,6 +6,96 @@
 
 ---
 
+## 2026-04-20 · Regras de confiabilidade da médica (D-036) · IA
+
+**Por quê:** até agora `doctors.reliability_incidents` era só um
+contador informativo — crescia ao longo do tempo, sem janela temporal,
+sem ação automática, sem forma de dispensar casos comprovadamente
+não-culpa da médica. Resultado: uma médica com histórico ruim podia
+continuar recebendo reservas indefinidamente, e admin tinha que
+vigiar manualmente. D-036 institui regra automática com eventos
+granulares, soft warn (2 em 30d) e auto-pause (3 em 30d).
+
+**Entregáveis:**
+
+- **Migration 015** (`20260420230000_doctor_reliability_events.sql`):
+  tabela `doctor_reliability_events` (id, doctor_id, appointment_id,
+  kind, occurred_at, notes, dismissed_at/by/reason) com unique parcial
+  em `appointment_id` pra idempotência + colunas de pause em
+  `doctors` (reliability_paused_at/by/reason/auto/until_reviewed).
+
+- **`src/lib/reliability.ts`** (novo): `recordReliabilityEvent`,
+  `getDoctorReliabilitySnapshot`, `evaluateAndMaybeAutoPause`,
+  `pauseDoctor`, `unpauseDoctor`, `dismissEvent`, `listRecentEvents`,
+  `listDoctorReliabilityOverview`. Constantes de política
+  (`RELIABILITY_WINDOW_DAYS=30`, `SOFT_WARN=2`, `HARD_BLOCK=3`)
+  exportadas pro UI poder explicar regras ao admin.
+
+- **Integração com `applyNoShowPolicy` (D-032):** após o bump do
+  contador antigo, registra evento granular + roda avaliação. Se
+  atingir threshold e não estiver pausada, pausa automaticamente. O
+  contador antigo continua sendo atualizado pra não quebrar métricas
+  existentes. Resultado volta em `NoShowResult.doctorAutoPaused` +
+  `activeReliabilityEvents`.
+
+- **Barreira no agendamento (D-027):**
+  - `src/lib/scheduling.ts` `getPrimaryDoctor()` filtra
+    `reliability_paused_at IS NULL`.
+  - `src/app/api/agendar/reserve/route.ts` rejeita reserva com
+    `doctor_reliability_paused` 409 se a médica estiver pausada.
+  - Appointments já marcados ANTES do pause seguem seu curso normal
+    — decisão deliberada, explicada no ADR D-036.
+
+- **API routes (`requireAdmin`):**
+  - `POST /api/admin/doctors/[id]/reliability/pause` — pause manual
+    com motivo obrigatório (≥4 chars).
+  - `POST /api/admin/doctors/[id]/reliability/unpause` — reativa
+    médica; notas opcionais.
+  - `POST /api/admin/reliability/events/[id]/dismiss` — dispensa
+    evento individual com motivo obrigatório.
+
+- **UI `/admin/reliability`:** página server component com 4 cards de
+  resumo (Pausadas, Em alerta, OK, Eventos ativos), tabela
+  "Pausadas" (botão Reativar), tabela "Em alerta" (botão Pausar),
+  feed "Eventos recentes" (últimos 50, botão Dispensar pra ativos).
+  Client component `_Actions.tsx` usa `window.prompt()` pras ações —
+  volume baixo (~1-2/mês), UX simples, direto ao ponto.
+
+- **AdminNav:** item "Confiabilidade" entre "Médicas" e "Repasses".
+
+- **Dashboard `/admin`:** dois novos alertas em "Próximos passos"
+  (`N médicas pausadas`, `N em alerta`) e condição "Tudo em dia"
+  incorpora os contadores.
+
+**Operação:**
+
+- Auto-pause dispara em cascata com D-035: webhook bloqueado em
+  produção (D-029) → cron polling detecta meeting ended → dispara
+  applyNoShowPolicy → registra evento granular → avalia threshold →
+  pausa médica se ≥3 eventos ativos em 30d. Admin é notificado via
+  dashboard na próxima visita.
+
+- Eventos dispensados NÃO contam pro threshold, mas ficam no
+  histórico com `dismissed_at/by/reason` pra auditoria. Admin pode
+  dispensar eventos sem reativar a médica (ou vice-versa) — decisões
+  são independentes, respeitando caso-a-caso.
+
+- Pause manual e auto-pause são distinguíveis via coluna
+  `reliability_paused_auto` — UI mostra badge diferente, o que ajuda
+  admin a priorizar quem conversar primeiro.
+
+**Pendente (Sprint 5+):**
+
+- Notificação WhatsApp pra médica quando for pausada (precisa
+  template novo + aprovação Meta).
+- Métrica "% de eventos dispensados por admin" como sinal de
+  calibração do threshold.
+- Thresholds configuráveis por médica (senior vs iniciante) — campo
+  `reliability_threshold_override` em `doctors` + lógica em
+  `evaluateAndMaybeAutoPause`. Estrutura preparada, não ativada.
+
+---
+
 ## 2026-04-20 · Cron de reconciliação Daily (D-035) · IA
 
 **Por quê:** D-029 bloqueou o webhook Daily em produção (bug no cliente

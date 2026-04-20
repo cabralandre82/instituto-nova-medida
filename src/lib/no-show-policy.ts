@@ -34,6 +34,11 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createClawback } from "@/lib/earnings";
 import { enqueueImmediate } from "@/lib/notifications";
+import {
+  recordReliabilityEvent,
+  evaluateAndMaybeAutoPause,
+  type ReliabilityEventKind,
+} from "@/lib/reliability";
 
 export type NoShowFinalStatus =
   | "no_show_patient"
@@ -54,6 +59,10 @@ export type NoShowResult = {
   reliabilityIncidentsTotal?: number;
   notificationEnqueued?: boolean;
   refundRequired?: boolean;
+  /** D-036: se este incidente fez a médica ser auto-pausada. */
+  doctorAutoPaused?: boolean;
+  /** D-036: eventos ativos na janela (após registrar este). */
+  activeReliabilityEvents?: number;
 };
 
 type ApplyInput = {
@@ -174,11 +183,18 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
       .eq("id", row.id);
 
     await bumpDoctorReliability(row.doctor_id);
+    const reliabilityNoPayment = await registerReliabilityIncident(
+      row.doctor_id,
+      row.id,
+      input.finalStatus
+    );
     const notifId = await enqueueImmediate(row.id, "no_show_doctor");
 
     console.warn("[no-show-policy] sem payment_id — só reliability:", {
       source,
       appointment_id: row.id,
+      active_events: reliabilityNoPayment.activeEvents,
+      auto_paused: reliabilityNoPayment.autoPaused,
     });
 
     return {
@@ -187,6 +203,8 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
       clawbackCount: 0,
       notificationEnqueued: Boolean(notifId),
       refundRequired: false,
+      doctorAutoPaused: reliabilityNoPayment.autoPaused,
+      activeReliabilityEvents: reliabilityNoPayment.activeEvents ?? undefined,
     };
   }
 
@@ -221,6 +239,11 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
     .eq("id", row.id);
 
   const reliabilityTotal = await bumpDoctorReliability(row.doctor_id);
+  const reliabilityRich = await registerReliabilityIncident(
+    row.doctor_id,
+    row.id,
+    input.finalStatus
+  );
 
   const notifId = await enqueueImmediate(row.id, "no_show_doctor");
 
@@ -230,6 +253,8 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
     action: "clawback_and_refund_flagged",
     clawback_count: clawbackCount,
     reliability_total: reliabilityTotal,
+    active_events: reliabilityRich.activeEvents,
+    auto_paused: reliabilityRich.autoPaused,
     notification_enqueued: Boolean(notifId),
   });
 
@@ -240,6 +265,44 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
     reliabilityIncidentsTotal: reliabilityTotal ?? undefined,
     notificationEnqueued: Boolean(notifId),
     refundRequired: true,
+    doctorAutoPaused: reliabilityRich.autoPaused,
+    activeReliabilityEvents: reliabilityRich.activeEvents ?? undefined,
+  };
+}
+
+/**
+ * D-036: registra o incidente granular na tabela de eventos
+ * (idempotente via unique(appointment_id)) e roda avaliação de
+ * auto-pause.
+ *
+ * Paralelo ao contador antigo em `doctors.reliability_incidents` —
+ * este é a verdade operacional; o contador fica como métrica histórica
+ * agregada.
+ */
+async function registerReliabilityIncident(
+  doctorId: string,
+  appointmentId: string,
+  finalStatus: NoShowFinalStatus
+): Promise<{ activeEvents: number | null; autoPaused: boolean }> {
+  const kind: ReliabilityEventKind =
+    finalStatus === "cancelled_by_admin_expired"
+      ? "expired_no_one_joined"
+      : "no_show_doctor";
+
+  const rec = await recordReliabilityEvent({
+    doctorId,
+    appointmentId,
+    kind,
+  });
+  if (!rec.ok) {
+    console.error("[no-show-policy] recordReliabilityEvent falhou:", rec);
+    return { activeEvents: null, autoPaused: false };
+  }
+
+  const evalResult = await evaluateAndMaybeAutoPause(doctorId);
+  return {
+    activeEvents: evalResult.snapshot?.activeEventsInWindow ?? null,
+    autoPaused: evalResult.autoPaused,
   };
 }
 

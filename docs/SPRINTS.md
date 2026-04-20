@@ -130,12 +130,14 @@ Foco: subir um fluxo end-to-end "paciente paga → agenda → médica
 atende → recebe earning → admin paga via PIX no fim do mês". Sem fila
 on-demand ainda, sem Memed ainda — esses entram na 4.2.
 
-**Status (2026-04-20):** 95% entregue. Bloqueio D-029 (webhook Daily
+**Status (2026-04-20):** 97% entregue. Bloqueio D-029 (webhook Daily
 falha no registro por bug HTTP/2 do superagent deles) **mitigado** em
 D-035: cron `/api/internal/cron/daily-reconcile` rodando a cada 5 min
 fecha o ciclo dos appointments via polling da Daily REST API. Webhook
 continuará no código — quando Daily consertar ou migrarmos pra
 Cloudflare, passa a rodar em paralelo como caminho primário.
+D-036 (governança da médica) entregue: eventos de confiabilidade
+granulares + auto-pause em 3 eventos/30d + painel admin completo.
 
 **Entregáveis:**
 
@@ -243,6 +245,23 @@ Cloudflare, passa a rodar em paralelo como caminho primário.
       alerta quando há appointments > 2h sem fechamento.
       Defesa em profundidade: quando D-029 voltar, webhook e cron
       continuam rodando em paralelo.
+- [x] **Regras de confiabilidade da médica (D-036)** — fecha o arco
+      "governança da equipe clínica". Migration 015 cria
+      `doctor_reliability_events` (eventos granulares auditáveis com
+      dismiss individual) + colunas `reliability_paused_*` em
+      `doctors`. Novo `src/lib/reliability.ts` com constantes de
+      política (30 dias / 2 soft warn / 3 hard block), funções
+      `recordReliabilityEvent`, `evaluateAndMaybeAutoPause`,
+      `pauseDoctor`, `unpauseDoctor`, `dismissEvent`, overview/listing.
+      `applyNoShowPolicy` (D-032) passa a registrar evento granular +
+      rodar avaliação → auto-pausa a médica ao atingir 3 eventos.
+      `getPrimaryDoctor()` (D-027) e `/api/agendar/reserve` filtram
+      médicas pausadas — appointments já agendados seguem. 3 API
+      routes (`pause`, `unpause`, `dismiss`) + página
+      `/admin/reliability` com tabelas de pausadas, alertas e feed de
+      eventos recentes. AdminNav ganha item "Confiabilidade".
+      Dashboard admin ganha dois alertas novos (N pausadas, N em
+      alerta) em "Próximos passos".
 - [ ] **Auth:** roles `doctor` e `admin` no Supabase, middleware
       protegendo `/medico/*` e `/admin/*`
 - [ ] **API routes:**

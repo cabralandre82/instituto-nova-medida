@@ -59,13 +59,21 @@ type DoctorMinimal = {
   full_name: string;
 };
 
-/** Carrega a primeira médica ativa (MVP single-doctor). */
+/**
+ * Carrega a primeira médica ativa e NÃO pausada por regra de
+ * confiabilidade (D-036).
+ *
+ * Médicas com `reliability_paused_at IS NOT NULL` ficam fora do fluxo
+ * de agendamento público. Appointments já agendadas com elas seguem
+ * seu curso normal; só novas reservas ficam bloqueadas.
+ */
 export async function getPrimaryDoctor(): Promise<DoctorMinimal | null> {
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
     .from("doctors")
     .select("id, consultation_minutes, display_name, full_name")
     .eq("status", "active")
+    .is("reliability_paused_at", null)
     .order("activated_at", { ascending: true })
     .limit(1)
     .maybeSingle();

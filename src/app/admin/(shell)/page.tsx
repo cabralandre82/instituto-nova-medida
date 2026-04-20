@@ -8,6 +8,11 @@
 
 import Link from "next/link";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import {
+  listDoctorReliabilityOverview,
+  RELIABILITY_SOFT_WARN,
+  RELIABILITY_HARD_BLOCK,
+} from "@/lib/reliability";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +27,8 @@ type DashboardData = {
   notificationsFailed: number;
   reconcileStuck: number;
   reconciledLast24hBySource: Record<string, number>;
+  reliabilityPaused: number;
+  reliabilitySoftWarn: number;
 };
 
 async function loadDashboard(): Promise<DashboardData> {
@@ -51,6 +58,7 @@ async function loadDashboard(): Promise<DashboardData> {
     notifsFailed,
     reconcileStuck,
     reconciledRecent,
+    reliabilityOverview,
   ] = await Promise.all([
     supabase
       .from("doctors")
@@ -99,6 +107,7 @@ async function loadDashboard(): Promise<DashboardData> {
       .select("reconciled_by_source")
       .gte("reconciled_at", last24h.toISOString())
       .not("reconciled_by_source", "is", null),
+    listDoctorReliabilityOverview(),
   ]);
 
   const sumCents = (rows: { amount_cents: number }[] | null) =>
@@ -126,6 +135,10 @@ async function loadDashboard(): Promise<DashboardData> {
     reconciledLast24hBySource: countBySource(
       reconciledRecent.data as { reconciled_by_source: string | null }[] | null
     ),
+    reliabilityPaused: reliabilityOverview.filter((r) => r.isPaused).length,
+    reliabilitySoftWarn: reliabilityOverview.filter(
+      (r) => !r.isPaused && r.isInSoftWarn
+    ).length,
   };
 }
 
@@ -332,11 +345,47 @@ export default async function AdminDashboard() {
                 </span>
               </li>
             )}
+            {d.reliabilityPaused > 0 && (
+              <li className="flex items-start gap-3">
+                <span className="mt-1 h-2 w-2 rounded-full bg-terracotta-500 flex-shrink-0" />
+                <span>
+                  <strong className="text-ink-800">{d.reliabilityPaused}</strong>{" "}
+                  médica{d.reliabilityPaused === 1 ? "" : "s"} pausada
+                  {d.reliabilityPaused === 1 ? "" : "s"} por confiabilidade
+                  (≥{RELIABILITY_HARD_BLOCK} eventos em 30d).{" "}
+                  <Link
+                    href="/admin/reliability"
+                    className="text-sage-700 hover:underline"
+                  >
+                    Rever caso{d.reliabilityPaused === 1 ? "" : "s"}
+                  </Link>
+                  .
+                </span>
+              </li>
+            )}
+            {d.reliabilitySoftWarn > 0 && (
+              <li className="flex items-start gap-3">
+                <span className="mt-1 h-2 w-2 rounded-full bg-terracotta-300 flex-shrink-0" />
+                <span>
+                  {d.reliabilitySoftWarn} em alerta ({RELIABILITY_SOFT_WARN}+
+                  eventos em 30d).{" "}
+                  <Link
+                    href="/admin/reliability"
+                    className="text-sage-700 hover:underline"
+                  >
+                    Acompanhar
+                  </Link>
+                  .
+                </span>
+              </li>
+            )}
             {d.doctorsActive > 0 &&
               d.payoutsDraft.count === 0 &&
               d.refundsPending === 0 &&
               d.notificationsFailed === 0 &&
-              d.reconcileStuck === 0 && (
+              d.reconcileStuck === 0 &&
+              d.reliabilityPaused === 0 &&
+              d.reliabilitySoftWarn === 0 && (
                 <li className="flex items-start gap-3">
                   <span className="mt-1 h-2 w-2 rounded-full bg-sage-500 flex-shrink-0" />
                   <span>Tudo em dia.</span>

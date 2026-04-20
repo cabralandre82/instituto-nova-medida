@@ -172,11 +172,19 @@ export async function POST(req: Request) {
   } else {
     const { data: doc } = await supabase
       .from("doctors")
-      .select("id, consultation_minutes, status")
+      .select("id, consultation_minutes, status, reliability_paused_at")
       .eq("id", doctorId)
       .maybeSingle();
     if (!doc || doc.status !== "active") {
       return NextResponse.json({ ok: false, error: "doctor_not_active" }, { status: 400 });
+    }
+    // D-036: médica auto-pausada por regra de confiabilidade não recebe
+    // novas reservas. Appointments existentes seguem; isso só barra novas.
+    if ((doc as { reliability_paused_at: string | null }).reliability_paused_at) {
+      return NextResponse.json(
+        { ok: false, error: "doctor_reliability_paused" },
+        { status: 409 }
+      );
     }
     consultationMinutes = doc.consultation_minutes;
   }
