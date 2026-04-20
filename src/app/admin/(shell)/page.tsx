@@ -18,6 +18,8 @@ type DashboardData = {
   earningsAvailable: { count: number; totalCents: number };
   paymentsThisMonth: { count: number; totalCents: number };
   appointmentsToday: number;
+  refundsPending: number;
+  notificationsFailed: number;
 };
 
 async function loadDashboard(): Promise<DashboardData> {
@@ -29,35 +31,52 @@ async function loadDashboard(): Promise<DashboardData> {
   todayStart.setHours(0, 0, 0, 0);
   const tomorrow = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
 
-  const [docsActive, docsPending, payoutsDraft, earningsAvail, paysMonth, appsToday] =
-    await Promise.all([
-      supabase
-        .from("doctors")
-        .select("id", { head: true, count: "exact" })
-        .eq("status", "active"),
-      supabase
-        .from("doctors")
-        .select("id", { head: true, count: "exact" })
-        .in("status", ["invited", "pending"]),
-      supabase
-        .from("doctor_payouts")
-        .select("amount_cents", { count: "exact" })
-        .eq("status", "draft"),
-      supabase
-        .from("doctor_earnings")
-        .select("amount_cents", { count: "exact" })
-        .eq("status", "available"),
-      supabase
-        .from("payments")
-        .select("amount_cents", { count: "exact" })
-        .in("status", ["RECEIVED", "CONFIRMED"])
-        .gte("created_at", monthStart.toISOString()),
-      supabase
-        .from("appointments")
-        .select("id", { head: true, count: "exact" })
-        .gte("scheduled_at", todayStart.toISOString())
-        .lt("scheduled_at", tomorrow.toISOString()),
-    ]);
+  const [
+    docsActive,
+    docsPending,
+    payoutsDraft,
+    earningsAvail,
+    paysMonth,
+    appsToday,
+    refundsPending,
+    notifsFailed,
+  ] = await Promise.all([
+    supabase
+      .from("doctors")
+      .select("id", { head: true, count: "exact" })
+      .eq("status", "active"),
+    supabase
+      .from("doctors")
+      .select("id", { head: true, count: "exact" })
+      .in("status", ["invited", "pending"]),
+    supabase
+      .from("doctor_payouts")
+      .select("amount_cents", { count: "exact" })
+      .eq("status", "draft"),
+    supabase
+      .from("doctor_earnings")
+      .select("amount_cents", { count: "exact" })
+      .eq("status", "available"),
+    supabase
+      .from("payments")
+      .select("amount_cents", { count: "exact" })
+      .in("status", ["RECEIVED", "CONFIRMED"])
+      .gte("created_at", monthStart.toISOString()),
+    supabase
+      .from("appointments")
+      .select("id", { head: true, count: "exact" })
+      .gte("scheduled_at", todayStart.toISOString())
+      .lt("scheduled_at", tomorrow.toISOString()),
+    supabase
+      .from("appointments")
+      .select("id", { head: true, count: "exact" })
+      .eq("refund_required", true)
+      .is("refund_processed_at", null),
+    supabase
+      .from("appointment_notifications")
+      .select("id", { head: true, count: "exact" })
+      .eq("status", "failed"),
+  ]);
 
   const sumCents = (rows: { amount_cents: number }[] | null) =>
     (rows ?? []).reduce((acc, r) => acc + (r.amount_cents ?? 0), 0);
@@ -78,6 +97,8 @@ async function loadDashboard(): Promise<DashboardData> {
       totalCents: sumCents(paysMonth.data as { amount_cents: number }[] | null),
     },
     appointmentsToday: appsToday.count ?? 0,
+    refundsPending: refundsPending.count ?? 0,
+    notificationsFailed: notifsFailed.count ?? 0,
   };
 }
 
@@ -188,12 +209,39 @@ export default async function AdminDashboard() {
                 </span>
               </li>
             )}
-            {d.doctorsActive > 0 && d.payoutsDraft.count === 0 && (
+            {d.refundsPending > 0 && (
               <li className="flex items-start gap-3">
-                <span className="mt-1 h-2 w-2 rounded-full bg-sage-500 flex-shrink-0" />
-                <span>Tudo em dia. 🌿</span>
+                <span className="mt-1 h-2 w-2 rounded-full bg-terracotta-500 flex-shrink-0" />
+                <span>
+                  Processar{" "}
+                  <Link href="/admin/refunds" className="text-sage-700 hover:underline">
+                    {d.refundsPending} estorno{d.refundsPending === 1 ? "" : "s"} pendente{d.refundsPending === 1 ? "" : "s"}
+                  </Link>{" "}
+                  (no-show da médica).
+                </span>
               </li>
             )}
+            {d.notificationsFailed > 0 && (
+              <li className="flex items-start gap-3">
+                <span className="mt-1 h-2 w-2 rounded-full bg-terracotta-500 flex-shrink-0" />
+                <span>
+                  Inspecionar{" "}
+                  <Link href="/admin/notifications?status=failed" className="text-sage-700 hover:underline">
+                    {d.notificationsFailed} notificação{d.notificationsFailed === 1 ? "" : "ões"} com falha
+                  </Link>
+                  .
+                </span>
+              </li>
+            )}
+            {d.doctorsActive > 0 &&
+              d.payoutsDraft.count === 0 &&
+              d.refundsPending === 0 &&
+              d.notificationsFailed === 0 && (
+                <li className="flex items-start gap-3">
+                  <span className="mt-1 h-2 w-2 rounded-full bg-sage-500 flex-shrink-0" />
+                  <span>Tudo em dia.</span>
+                </li>
+              )}
           </ul>
         </div>
       </section>

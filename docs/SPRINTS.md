@@ -208,6 +208,15 @@ Cloudflare com `institutonovamedida.com.br`.
   - [ ] Ativação real do fluxo depende de D-029 destravar (webhook
         Daily registrado em produção). A política funciona hoje via
         update manual de status por admin.
+- [x] **UI admin de observabilidade (D-033)** — destrava operação dos
+      sistemas entregues em D-031 e D-032. Migration 013 adiciona
+      metadata de refund (`refund_external_ref`, `refund_processed_by`,
+      `refund_processed_method`, `refund_processed_notes`) + índice
+      parcial. `src/lib/refunds.ts` centraliza o registro de refund
+      processado com idempotência e gancho pra automação futura. 2
+      páginas (`/admin/notifications`, `/admin/refunds`) + 2 API
+      routes + 2 alertas novos no dashboard. UI só oferece modo
+      manual hoje; Sprint 5 liga o modo `asaas_api` sem refactor.
 - [ ] **Auth:** roles `doctor` e `admin` no Supabase, middleware
       protegendo `/medico/*` e `/admin/*`
 - [ ] **API routes:**

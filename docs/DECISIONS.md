@@ -5,6 +5,132 @@
 
 ---
 
+## D-033 · Observabilidade operacional do admin (`/admin/notifications` + `/admin/refunds`) · 2026-04-20
+
+**Contexto:** D-031 (fila persistente de WhatsApp) e D-032 (política de
+no-show com `refund_required`) shippados na mesma manhã introduziram dois
+sistemas vivos em produção que **setavam flags sem nenhuma superfície
+humana pra agir**:
+
+1. `appointment_notifications` — worker roda a cada 1 min processando a
+   fila; se uma notif falhar (Meta recusa, telefone inválido, template
+   rejeitado), a única forma de descobrir hoje é SQL manual no Supabase.
+   Linhas `pending` travadas em loop infinito de `templates_not_approved`
+   são indistinguíveis no log de linhas legítimas aguardando seu
+   `scheduled_for`.
+2. `appointments.refund_required=true` — setado quando a política de
+   no-show da médica dispara, mas refund real (devolver dinheiro pro
+   paciente) fica parado até alguém manualmente lembrar de abrir o painel
+   Asaas. Sem lista, cai no esquecimento.
+
+**Alternativas consideradas:**
+
+1. **Nada agora, esperar Sprint 5** (quando o refund automático entraria).
+   ❌ Enquanto isso os flags se acumulam silenciosamente. No dia em que a
+   Meta aprovar os 7 templates e virarmos `WHATSAPP_TEMPLATES_APPROVED=true`,
+   o operador precisa de um HUD pra entender o que está rodando.
+2. **Endpoint administrativo isolado** (só API, sem UI, usa REST
+   externo/Postman). ❌ Força o operador (não-dev) a saber HTTP +
+   autenticação. Quebra no primeiro incidente fora do horário.
+3. **UI admin mínima + gancho de schema pra Sprint 5 automatizar.** ✅
+   Fecha o loop operacional de hoje E pavimenta a automação futura sem
+   re-modelagem.
+
+**Decisão:** Opção 3. Entregas:
+
+- **Migration 013** (`20260420210000_admin_refund_metadata.sql`) — adiciona
+  4 colunas de auditoria em `appointments`:
+  - `refund_external_ref text` — id do refund no Asaas (`rf_xxx`) ou
+    end-to-end do PIX. Quando a Sprint 5 automatizar, recebe o
+    `refund.id` retornado pela Asaas API sem mudança de shape.
+  - `refund_processed_by uuid references auth.users(id)` — quem acionou.
+  - `refund_processed_notes text` — observações humanas (ex: "paciente
+    aceitou crédito pra reagendar").
+  - `refund_processed_method text check in ('manual','asaas_api')` —
+    distingue fluxos humanos vs automação futura, habilita métrica
+    "quanto ainda é manual?".
+  - Índice parcial `ix_appt_refund_processed` acelera histórico sem
+    scanear a tabela inteira.
+
+- **`src/lib/refunds.ts`** — ponto único de entrada pra marcar refund
+  processado:
+  - `markRefundProcessed({appointmentId, method, externalRef, notes,
+    processedBy})` — idempotente via guard em `refund_processed_at` (e
+    segunda trava via `.is('refund_processed_at', null)` no UPDATE pra
+    proteger race). Valida `refund_required=true` antes de aceitar —
+    impede admin registrar estorno pra um appointment que nunca teve
+    direito a ele.
+  - `processRefundViaAsaas()` — placeholder explícito retornando
+    `not_implemented`. Sprint 5 troca o corpo, o resto (chamadores,
+    UI, schema) não precisa mexer.
+
+- **API routes:**
+  - `POST /api/admin/notifications/[id]/retry` — reseta notif
+    `failed`/`pending` pra `pending + scheduled_for=now()`, deixa o
+    próximo tick do cron dispatching. Não dispara síncrono (evita
+    duplicar lógica de dispatch e respeita rate-limit global).
+    Idempotente (2ª chamada é noop).
+  - `POST /api/admin/appointments/[id]/refund` — método `manual` hoje,
+    gancho pra `asaas_api` quando Sprint 5 chegar. Grava tudo via
+    `markRefundProcessed()`.
+
+- **Páginas `/admin/notifications` e `/admin/refunds`:**
+  - Notificações: contadores por status (failed/pending/sent/delivered/
+    read), filtros via query string (server-rendered), tabela com
+    botão Retry, paginação 50/página. Ordenação favorece `failed` no
+    topo (alfabética feliz: `failed < pending < sent`).
+  - Refunds: 2 seções — "Pendentes" (card por appointment com formulário
+    inline: external_ref + notes + botão) e "Histórico" (últimos 50
+    processados, inclui badge manual/asaas_api).
+  - Dashboard ganhou 2 alertas novos: "X estornos pendentes" (terracotta)
+    e "Y notificações com falha".
+  - Link no `AdminNav` (6 entradas agora).
+
+**Princípios aplicados:**
+
+- **Observabilidade antes de automação.** Primeiro mostrar o que está
+  vivo; depois automatizar. Inverter cria caixa preta.
+- **Schema pronto pra futuro.** As 4 colunas da migration 013 servem
+  idêntico pra admin manual (hoje) e pra automação (Sprint 5). Evita
+  migração retroativa.
+- **Idempotência em todo escritor.** `markRefundProcessed` e `retry`
+  ambos safe pra duplo-clique e retry de rede.
+- **UI honesta.** Enquanto Sprint 5 não liga, a UI só oferece "manual"
+  e explica o fluxo passo-a-passo. Não cria falso senso de automação.
+
+**Consequências imediatas:**
+
+- Operador abre `/admin` e vê imediatamente quantos refunds pendentes e
+  notifs falhadas existem — sem precisar de SQL.
+- No dia que `WHATSAPP_TEMPLATES_APPROVED=true` virar, a gente consegue
+  observar em tempo real a taxa de sucesso/falha nos primeiros minutos.
+- D-032 deixa de ser "log-only" em produção — `no_show_doctor` vira
+  ação operacional concreta (processar estorno no Asaas + registrar).
+
+**Pendências explícitas (Sprint 5):**
+
+- Trocar o corpo de `processRefundViaAsaas()` por chamada real à
+  `POST /payments/{asaas_payment_id}/refund`.
+- Ligar o botão "Estornar no Asaas" na UI do `/admin/refunds`.
+- Dedupe com o webhook Asaas `PAYMENT_REFUNDED`: quando admin processar
+  manualmente antes do webhook chegar, webhook precisa ser idempotente
+  via `refund_external_ref` pra não marcar de novo.
+- Extender o webhook Asaas pra preencher `refund_processed_at` quando
+  receber `PAYMENT_REFUNDED` (cobre casos em que paciente abre chargeback
+  ou admin processa direto no Asaas sem passar pela nossa UI).
+
+**Arquivos:**
+- `supabase/migrations/20260420210000_admin_refund_metadata.sql`
+- `src/lib/refunds.ts`
+- `src/app/api/admin/notifications/[id]/retry/route.ts`
+- `src/app/api/admin/appointments/[id]/refund/route.ts`
+- `src/app/admin/(shell)/notifications/` (page + filters + retry button)
+- `src/app/admin/(shell)/refunds/` (page + form)
+- `src/app/admin/(shell)/_components/AdminNav.tsx` (+2 entradas)
+- `src/app/admin/(shell)/page.tsx` (+2 alertas no dashboard)
+
+---
+
 ## D-032 · Política financeira de no-show (clawback assimétrico paciente × médica) · 2026-04-20
 
 **Contexto:** O webhook do Daily (D-028) já resolve *identificar*

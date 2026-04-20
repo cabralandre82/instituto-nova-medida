@@ -6,6 +6,91 @@
 
 ---
 
+## 2026-04-20 · UI admin · notifications + refunds (D-033) · IA
+
+**Por quê:** D-031 (fila WhatsApp) e D-032 (política no-show) entregaram
+infra viva em produção que setava flags sem nenhuma forma do operador
+enxergar/agir. O worker de notificações roda a cada 1 min e, sem UI, a
+única forma de descobrir `failed` ou `pending` travado era SQL manual. A
+flag `appointments.refund_required=true` (criada pela política de no-show)
+ficava dormindo até alguém lembrar de abrir o painel Asaas. Esta entrega
+fecha a lacuna operacional.
+
+**Entregáveis:**
+
+- **Migration 013** (`20260420210000_admin_refund_metadata.sql`) — 4
+  colunas novas em `appointments`:
+  - `refund_external_ref` — id do refund Asaas (ou txid PIX) pra
+    auditoria. Serve igual pra registro manual e pra automação futura
+    (Sprint 5) — zero re-modelagem quando ligarmos a Asaas API.
+  - `refund_processed_by` (FK `auth.users`) — quem acionou.
+  - `refund_processed_notes` — observações humanas.
+  - `refund_processed_method` check constraint (`'manual' | 'asaas_api'`)
+    — distingue fluxo humano de automação, permite métrica "quanto
+    ainda é manual?".
+  - Índice parcial `ix_appt_refund_processed` acelera histórico.
+
+- **`src/lib/refunds.ts`** — única porta de entrada pra marcar refund
+  processado. `markRefundProcessed()` valida pré-condições
+  (`refund_required=true`, não processado antes), é idempotente com
+  guard na coluna + segunda trava `.is('refund_processed_at', null)`
+  no UPDATE (anti-race). `processRefundViaAsaas()` fica como stub
+  explícito — Sprint 5 troca o corpo sem mexer em chamadores.
+
+- **2 API routes admin:**
+  - `POST /api/admin/notifications/[id]/retry` — reseta notif `failed`
+    ou `pending` pra `pending + scheduled_for=now()`, deixa o cron
+    existente dispatching. Não dispara síncrono (evita duplicar lógica
+    de dispatch e respeitar rate-limit global). Idempotente.
+  - `POST /api/admin/appointments/[id]/refund` — marca via lib
+    `refunds.ts` com `method='manual'`. Gancho pra `method='asaas_api'`
+    na Sprint 5.
+
+- **2 páginas no admin:**
+  - `/admin/notifications` — contadores por status, filtros via query
+    string (server-rendered), tabela paginada 50/página, botão Retry
+    em linhas `failed`/`pending`. Ordenação favorece `failed` no topo.
+  - `/admin/refunds` — seção "Pendentes" com card por appointment
+    (formulário inline: external_ref + notes + botão) + seção
+    "Histórico" dos últimos 50 processados (badge manual/asaas_api).
+    Explica o fluxo Asaas passo-a-passo dentro do card.
+
+- **Dashboard admin (`/admin`)** ganhou 2 alertas novos:
+  - "X estornos pendentes" (terracotta) → link pra `/admin/refunds`.
+  - "Y notificações com falha" → link pra `/admin/notifications?status=failed`.
+  Mensagem "Tudo em dia" só aparece quando os 4 contadores (repasses
+  draft, estornos pendentes, notifs failed) estiverem zerados.
+
+- **AdminNav** ganhou 2 entradas (6 no total).
+
+**Gotchas / decisões operacionais:**
+
+- Retry de notificação NÃO dispara o envio síncrono. Ele só muda o
+  status pra `pending` e o `scheduled_for` pra agora — o cron de 1 min
+  pega no próximo tick. Mais previsível, evita race, respeita o
+  rate-limit global do worker.
+- `/admin/refunds` só oferece modo manual na UI. A lib já tem o gancho
+  `method='asaas_api'` pronto mas desligado — não cria falso senso de
+  automação.
+- Histórico de refunds é view-only. Uma vez processado, não tem como
+  "reabrir" pela UI. Se precisar corrigir (ex: operador digitou
+  external_ref errado), é SQL manual documentado em ADR.
+- Observabilidade pura; nenhum fluxo crítico novo. Se a página quebrar,
+  a fila e a política de no-show continuam funcionando igual.
+
+**Smoke test em produção (próximo):**
+
+Depois do deploy, rodar:
+1. Aplicar migration 013 via `supabase db push --include-all`.
+2. GET `/admin/notifications` autenticado → 200 com a fila visível.
+3. GET `/admin/refunds` → 200 (esperado: 0 pendentes até termos volume).
+4. GET `/admin` → ver os 2 alertas novos (ou "Tudo em dia").
+5. SQL spot-check: `select count(*) from appointments where
+   refund_processed_method is not null` = 0 pré-migration, schema
+   válido pós-migration.
+
+---
+
 ## 2026-04-20 · Política financeira de no-show (D-032) · IA
 
 **Por quê:** Fechar o ciclo clínico-financeiro da Sprint 4.1. O webhook
