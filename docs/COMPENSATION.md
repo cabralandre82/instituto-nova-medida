@@ -272,6 +272,50 @@ e admin combina recuperação (deduzir do mês seguinte ou cobrar).
 
 ---
 
+## Política de no-show (D-032)
+
+Tratamento **assimétrico** conforme qual parte falhou:
+
+| Status final                          | Earning médica | Refund paciente | Reliability |
+|---------------------------------------|----------------|-----------------|-------------|
+| `no_show_patient` (paciente faltou)   | Mantém         | Não             | —           |
+| `no_show_doctor` (médica faltou)      | Clawback       | Sim (flag)      | +1          |
+| Sala expirou sem ninguém              | Clawback       | Sim (flag)      | +1          |
+
+**Rationale:**
+
+- Se o **paciente** falta, a médica disponibilizou horário, ficou
+  online, e o paciente é quem quebrou o contrato. Médica recebe
+  integral; paciente NÃO tem direito a refund automático, mas pode
+  escalar via admin (caso de atestado, emergência comprovada).
+- Se a **médica** falta, é ela que quebrou o contrato com o paciente.
+  Clawback revoga a earning (reusa fluxo de D-022) e a flag
+  `refund_required=true` no appointment entra na fila de refunds que o
+  admin processa no Asaas (até Sprint 5 automatizar).
+- Se **ninguém aparece** (sala expirou vazia), a falha é de infra /
+  plataforma — não é justo o paciente pagar. Mesmo tratamento do
+  `no_show_doctor`.
+
+**Métrica de confiabilidade:** `doctors.reliability_incidents`
+incrementa em 1 a cada `no_show_doctor` ou expired-empty. Dashboard
+admin (Sprint 5) vai listar médicas com alta incidência — por ora é
+só contador, sem regra de corte automática. Operador pode zerar o
+contador manualmente depois de uma conversa (a coluna é editável).
+
+**Gatilho técnico:** `src/lib/no-show-policy.ts#applyNoShowPolicy()`
+é chamado pelos webhooks Daily (`/api/daily/webhook` e
+`/api/daily-webhook`) imediatamente após o update de status final no
+appointment. Idempotente via `appointments.no_show_policy_applied_at`.
+
+**Notificação ao paciente:** kinds `no_show_patient` e `no_show_doctor`
+na fila `appointment_notifications` (D-031). Templates Meta reais
+(`no_show_patient_aviso`, `no_show_doctor_desculpas`) aguardando
+revisão jurídica — enquanto isso, stubs retornam
+`templates_not_approved` e o worker mantém as notificações em
+`pending` até os templates entrarem no ar.
+
+---
+
 ## Cron jobs (pg_cron)
 
 | Frequência | Job | Função |

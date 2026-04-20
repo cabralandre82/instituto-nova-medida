@@ -293,6 +293,45 @@ export async function sendMedicaDocumentoPendente(opts: {
   });
 }
 
+// ─── 10/11. no_show_patient / no_show_doctor (pós D-032) ─────────────────
+// Templates dedicados ainda não submetidos à Meta (o copy final depende
+// de revisão jurídica — o paciente precisa entender que o horário foi
+// perdido OU que haverá reembolso). Enquanto isso, marcamos como stub
+// não-enviado: a lib retorna `templates_not_approved` e o worker mantém
+// a linha em `pending`, re-tentando todo minuto. Quando o template real
+// for aprovado, basta preencher a função aqui e subir o env flag.
+
+export async function sendNoShowPatient(_opts: {
+  to: string;
+  pacienteNome: string;
+  doctorDisplay: string;
+  reagendamentoUrl: string;
+}): Promise<WhatsAppSendResult> {
+  // TODO(Sprint 5): submeter template `no_show_patient_aviso` na Meta.
+  return {
+    ok: false,
+    code: null,
+    message: "templates_not_approved",
+    details: "Template no_show_patient aguardando aprovação Meta (Sprint 5).",
+  };
+}
+
+export async function sendNoShowDoctor(_opts: {
+  to: string;
+  pacienteNome: string;
+  doctorDisplay: string;
+  reagendamentoUrl: string;
+}): Promise<WhatsAppSendResult> {
+  // TODO(Sprint 5): submeter template `no_show_doctor_desculpas` na Meta.
+  return {
+    ok: false,
+    code: null,
+    message: "templates_not_approved",
+    details:
+      "Template no_show_doctor aguardando aprovação Meta (Sprint 5). Admin precisa fazer outreach manual via WhatsApp.",
+  };
+}
+
 // ─── Kind ↔ Template dispatcher ──────────────────────────────────────────
 // Usado pelo worker em notifications.ts pra despachar uma linha
 // de appointment_notifications pro helper correto.
@@ -305,7 +344,9 @@ export type NotificationKind =
   | "on_demand_call"
   | "pos_consulta"
   | "reserva_expirada"
-  | "t_plus_10min";
+  | "t_plus_10min"
+  | "no_show_patient"
+  | "no_show_doctor";
 
 export const KIND_TO_TEMPLATE: Record<NotificationKind, string> = {
   confirmacao: "confirmacao_agendamento",
@@ -316,4 +357,6 @@ export const KIND_TO_TEMPLATE: Record<NotificationKind, string> = {
   pos_consulta: "pos_consulta_resumo",
   t_plus_10min: "pos_consulta_resumo", // mesmo template, disparado 10min pós consulta quando sem prescrição
   reserva_expirada: "pagamento_pix_pendente", // reuso: PIX expirou / reserva expirou (template novo seria ideal)
+  no_show_patient: "no_show_patient_aviso", // TODO Sprint 5: criar/aprovar na Meta
+  no_show_doctor: "no_show_doctor_desculpas", // TODO Sprint 5: criar/aprovar na Meta
 };

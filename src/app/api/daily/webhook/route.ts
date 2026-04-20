@@ -47,6 +47,7 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getVideoProvider, parseDailyEvent, type NormalizedVideoEvent } from "@/lib/video";
+import { applyNoShowPolicy, classifyFinalStatus } from "@/lib/no-show-policy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -327,6 +328,29 @@ async function processEvent(appointmentId: string, event: NormalizedVideoEvent) 
 
     await supabase.from("appointments").update(updates).eq("id", appointmentId);
     console.log("[daily-webhook] appointment encerrado:", appointmentId, updates);
+
+    // Aplica política financeira/notificação de no-show (D-032). Rodamos
+    // depois do update pra garantir que o status no DB já reflete o
+    // desfecho final antes da lib carregar e processar. Não bloqueia a
+    // resposta HTTP em caso de falha — log + retry manual via admin.
+    const finalStatus = classifyFinalStatus(
+      updates.status as string,
+      (updates.cancelled_reason as string | undefined) ?? null
+    );
+    if (finalStatus) {
+      try {
+        const policyResult = await applyNoShowPolicy({
+          appointmentId,
+          finalStatus,
+          cancelledReason:
+            (updates.cancelled_reason as string | undefined) ?? null,
+          source: "daily-webhook",
+        });
+        console.log("[daily-webhook] no-show policy:", policyResult);
+      } catch (e) {
+        console.error("[daily-webhook] no-show policy falhou:", e);
+      }
+    }
     return;
   }
 

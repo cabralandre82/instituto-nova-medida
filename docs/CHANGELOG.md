@@ -6,6 +6,91 @@
 
 ---
 
+## 2026-04-20 · Política financeira de no-show (D-032) · IA
+
+**Por quê:** Fechar o ciclo clínico-financeiro da Sprint 4.1. O webhook
+do Daily já detectava `no_show_patient`/`no_show_doctor` e marcava o
+status do appointment, mas não decidia o que fazer com a earning da
+médica e o refund pro paciente. Agora decide, de forma idempotente e
+auditável.
+
+**Política aplicada (D-032):**
+
+- `no_show_patient` (paciente faltou, médica esperou):
+  médica mantém earning integral, sem refund, paciente é avisado via
+  WhatsApp e pode escalar ao admin. Zero overhead financeiro.
+- `no_show_doctor` (médica faltou, paciente esperou):
+  clawback automático da earning (idempotente, usa `createClawback()`
+  existente), flag `refund_required=true` no appointment pro admin
+  processar refund no Asaas, incrementa
+  `doctors.reliability_incidents`, notifica paciente.
+- `cancelled_by_admin` + `cancelled_reason='expired_no_one_joined'`
+  (ninguém entrou): tratado como `no_show_doctor` — risco é da
+  plataforma, não do paciente.
+
+**Entregáveis:**
+
+- **Migration 012** (`20260420200000_no_show_policy.sql`):
+  - `appointments`: `no_show_policy_applied_at` (guard idempotência),
+    `refund_required` + `refund_processed_at` (pra admin), `no_show_notes`.
+  - `doctors`: `reliability_incidents` + `last_reliability_incident_at`.
+  - Índice parcial `ix_appt_refund_required` pra acelerar listagem
+    admin de refunds pendentes.
+  - Índice `ix_appt_no_show_applied` pra métricas de histórico.
+
+- **`src/lib/no-show-policy.ts`**:
+  - `classifyFinalStatus(status, reason)` → `NoShowFinalStatus | null`.
+    Normaliza `cancelled_by_admin+expired_no_one_joined` pra o ramo
+    "expired" (mesmo tratamento de `no_show_doctor`).
+  - `applyNoShowPolicy({appointmentId, finalStatus, source})`:
+    carrega appt, respeita guard, aplica política financeira (reuso
+    `createClawback()`), marca flags, bump reliability, enfileira
+    notificação via `enqueueImmediate`. Retorna `NoShowResult`
+    estruturado (action, clawbackCount, reliabilityIncidentsTotal,
+    refundRequired) pra logs/testes/admin UI futura.
+  - Tolerante a falhas parciais: clawback falhou mas guard marca
+    assim mesmo (evita retry duplicar notificação), log de error.
+
+- **`src/lib/wa-templates.ts`** — 2 novos kinds:
+  - `no_show_patient` → `sendNoShowPatient()` (stub até Meta aprovar
+    template `no_show_patient_aviso`).
+  - `no_show_doctor` → `sendNoShowDoctor()` (stub até Meta aprovar
+    template `no_show_doctor_desculpas`).
+  - Ambos retornam `templates_not_approved` → worker mantém em
+    `pending` pra re-tentar quando os templates entrarem no ar.
+  - `NotificationKind` estendido, `KIND_TO_TEMPLATE` mapeado.
+
+- **`src/lib/notifications.ts`** — dispatch dos 2 kinds novos
+  no switch do worker.
+
+- **Integração** em ambos handlers Daily:
+  - `src/app/api/daily/webhook/route.ts`: após `update appointments`
+    pro status final, chama `applyNoShowPolicy` quando aplicável.
+  - `src/pages/api/daily-webhook.ts` (fallback D-029): idem, além de
+    passar a gravar `cancelled_at` + `cancelled_reason` quando o ramo
+    "ninguém entrou" dispara (antes ia só status).
+
+**Gotchas / decisões operacionais:**
+
+- Refund NÃO é automático ainda. Sprint 5 leva isso: endpoint admin
+  que chama Asaas API + preenche `refund_processed_at`. Motivo:
+  integração idempotente cross-system (Asaas ↔ appointment ↔ dedupe
+  evento) merece escopo próprio.
+- Reliability incidents só contabilizam agora — regras de corte
+  (ex: "bloquear agenda se > N no mês") ficam pra quando tivermos
+  histórico. Coluna reset-able pelo admin.
+- O template `no_show_patient_aviso` exige revisão jurídica antes de
+  submeter à Meta — redação do "você perdeu sua consulta" precisa ser
+  cuidadosa pra não gerar reclamação ANS/Procon. Por isso stub.
+
+**Bloqueio herdado:** ativação real depende do Daily webhook registrar,
+ainda bloqueado por D-029 (HTTP/2 + superagent). A lógica da política
+roda hoje se alguém atualizar o status do appointment manualmente (via
+admin), então não está ociosa — só não dispara no happy path até D-029
+destravar.
+
+---
+
 ## 2026-04-20 · WhatsApp · fila persistente + 7 helpers + worker (D-031) · IA
 
 **Por quê:** Sprint 4.1 precisa de 5 mensagens automáticas pra paciente

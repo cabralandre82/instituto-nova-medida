@@ -192,6 +192,22 @@ Cloudflare com `institutonovamedida.com.br`.
   - [ ] Submeter os 7 templates na Meta WhatsApp Manager
         (aprovação 1-24h). Ativar setando
         `WHATSAPP_TEMPLATES_APPROVED=true` no Vercel.
+- [x] **Política financeira de no-show (D-032)** — fecha o ciclo
+      clínico-financeiro dos desfechos `no_show_patient`,
+      `no_show_doctor` e `cancelled_by_admin+expired_no_one_joined`.
+      Migration 012 + `src/lib/no-show-policy.ts` + integração em
+      ambos handlers Daily. Reusa `createClawback()` (idempotente).
+      Flag `refund_required` guia admin pra processar refund Asaas
+      (automação vem na Sprint 5). Contador
+      `doctors.reliability_incidents` alimentado.
+  - [ ] Templates Meta dedicados (`no_show_patient_aviso`,
+        `no_show_doctor_desculpas`) — aguardando revisão jurídica do
+        copy antes de submeter. Enquanto isso, stubs retornam
+        `templates_not_approved` e worker mantém notificações em
+        `pending` pra re-tentar.
+  - [ ] Ativação real do fluxo depende de D-029 destravar (webhook
+        Daily registrado em produção). A política funciona hoje via
+        update manual de status por admin.
 - [ ] **Auth:** roles `doctor` e `admin` no Supabase, middleware
       protegendo `/medico/*` e `/admin/*`
 - [ ] **API routes:**

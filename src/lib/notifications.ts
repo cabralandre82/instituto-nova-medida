@@ -36,6 +36,8 @@ import {
   sendLinkSala,
   sendPosConsultaResumo,
   sendPagamentoPixPendente,
+  sendNoShowPatient,
+  sendNoShowDoctor,
   KIND_TO_TEMPLATE,
   type NotificationKind,
 } from "@/lib/wa-templates";
@@ -240,6 +242,22 @@ async function dispatch(row: NotificationRow): Promise<DispatchOutcome> {
       });
       break;
     }
+    case "no_show_patient":
+      result = await sendNoShowPatient({
+        to: customer.phone,
+        pacienteNome: customer.name,
+        doctorDisplay,
+        reagendamentoUrl,
+      });
+      break;
+    case "no_show_doctor":
+      result = await sendNoShowDoctor({
+        to: customer.phone,
+        pacienteNome: customer.name,
+        doctorDisplay,
+        reagendamentoUrl,
+      });
+      break;
     default:
       return { ok: false, retry: false, reason: `unknown_kind:${row.kind}` };
   }

@@ -5,6 +5,93 @@
 
 ---
 
+## D-032 · Política financeira de no-show (clawback assimétrico paciente × médica) · 2026-04-20
+
+**Contexto:** O webhook do Daily (D-028) já resolve *identificar*
+qual parte falhou numa consulta agendada — `no_show_patient` quando
+só a médica entrou, `no_show_doctor` quando só o paciente, e
+`cancelled_by_admin` com reason `expired_no_one_joined` quando a sala
+expirou vazia. Faltava fechar o ciclo clínico-financeiro: o que
+acontece com o payment (Asaas), com o earning da médica
+(`doctor_earnings`) e com a comunicação pro paciente em cada caso.
+
+Opções consideradas:
+
+1. **Tratamento simétrico**: refund total em qualquer no-show. É o
+   mais "limpo" pro paciente, mas pune a médica por um comportamento
+   do paciente que ela não controla — ela abriu mão do horário dela,
+   ficou online, e não recebe nada. Quebra a relação com as médicas
+   rapidamente.
+2. **Tratamento assimétrico (escolhido)**: clawback só quando o
+   problema é do lado da plataforma (médica faltou ou houve falha
+   técnica); paciente perde o valor se ele mesmo faltou.
+3. **Sempre manter earning, nunca refund**: protege a receita mas
+   ignora que o paciente pagou por um serviço que não recebeu quando
+   a médica falha. Quebra a relação com o paciente.
+
+**Decisão:** Política assimétrica com 3 ramos:
+
+| Status final                          | Earning médica | Refund paciente | Notifica paciente | Reliability |
+|---------------------------------------|----------------|-----------------|-------------------|-------------|
+| `no_show_patient`                     | Mantém         | **Não**         | Sim (aviso)       | —           |
+| `no_show_doctor`                      | **Clawback**   | **Sim** (flag)  | Sim (desculpas)   | +1          |
+| `cancelled_by_admin` + `expired_…`    | **Clawback**   | **Sim** (flag)  | Sim (desculpas)   | +1 (médica) |
+
+- **Clawback** reutiliza `createClawback()` de `src/lib/earnings.ts`
+  (D-022): insere earning negativa `refund_clawback` apontando pro
+  parent via `parent_earning_id`, cancela a original se ainda não
+  virou `paid`. Já era idempotente por design.
+- **Refund** NÃO é feito automaticamente no Asaas nessa sprint — a
+  política só marca `appointments.refund_required = true` e o admin
+  processa via painel Asaas. Motivo: refund automático exige idempotência
+  cross-system (Asaas ↔ Supabase ↔ dedupe de evento) que merece
+  sprint dedicada (Sprint 5). Até lá, a flag + índice
+  `ix_appt_refund_required` garantem que nenhum caso se perca.
+- **Reliability** é um contador simples em `doctors.reliability_incidents`
+  + timestamp `last_reliability_incident_at`. Na prática vai ser usado
+  só pra dashboard admin por enquanto; regras de corte (ex: "bloquear
+  agenda se > 3 incidentes no mês") ficam pra quando houver histórico.
+- **Notificação** vai pela fila persistente de D-031 via novos kinds
+  `no_show_patient` e `no_show_doctor`. Os templates Meta reais ainda
+  não foram submetidos (copy depende de revisão jurídica — redação do
+  aviso de "você perdeu sua consulta" precisa ser cuidadosa pra não
+  gerar reclamação ANS/Procon). Enquanto isso, `wa-templates.ts`
+  retorna `templates_not_approved` e o worker mantém em `pending` pra
+  re-tentar quando o flag `WHATSAPP_TEMPLATES_APPROVED` virar true com
+  os templates aprovados.
+
+**Idempotência:** guard via nova coluna
+`appointments.no_show_policy_applied_at`. Chamadas subsequentes
+(retry do webhook Daily, re-processamento manual) retornam
+`already_applied` sem efeito colateral. A lib também faz logging
+estruturado pra auditoria.
+
+**Orquestração:** Daily webhook (`src/app/api/daily/webhook/route.ts`
+e `src/pages/api/daily-webhook.ts`) → depois de atualizar o status
+do appointment pra um dos 3 ramos, chama
+`applyNoShowPolicy({appointmentId, finalStatus, source})`.
+Desacoplado: se a política falhar, o webhook continua 200 OK (o
+`daily_events` já guardou o evento bruto e admin pode reprocessar).
+
+**Futuro (Sprint 5):**
+- Submeter templates `no_show_patient_aviso` e `no_show_doctor_desculpas`
+  à Meta.
+- Endpoint admin pra processar refund via Asaas API (remove
+  `refund_required` e preenche `refund_processed_at`).
+- Dashboard de reliability por médica (incident rate, trend).
+- Escalation: quando um paciente responde ao aviso de `no_show_patient`
+  alegando problema técnico, abrir ticket pra admin revisar.
+
+**Arquivos:**
+- `supabase/migrations/20260420200000_no_show_policy.sql`
+- `src/lib/no-show-policy.ts`
+- `src/lib/wa-templates.ts` (+2 kinds, stubs)
+- `src/lib/notifications.ts` (dispatch dos 2 kinds novos)
+- `src/app/api/daily/webhook/route.ts` (integração)
+- `src/pages/api/daily-webhook.ts` (integração fallback)
+
+---
+
 ## D-031 · WhatsApp como fila persistente (`appointment_notifications`) + worker HTTP · 2026-04-20
 
 **Contexto:** Sprint 4.1 previa enviar 5 mensagens WhatsApp pro paciente

@@ -100,9 +100,19 @@ vinculado à compra via `localStorage`.
   `RECEIVED`; cron de expiração enfileira "reserva expirada".
   Gate `WHATSAPP_TEMPLATES_APPROVED=false` mantém fila em retry
   até Meta aprovar templates.
+  ✅ **Política financeira de no-show** (D-032): migration 012 com
+  flags `no_show_policy_applied_at`, `refund_required` em
+  `appointments` e métrica `reliability_incidents` em `doctors`.
+  Lib `src/lib/no-show-policy.ts` aplica tratamento assimétrico —
+  `no_show_patient` mantém earning / `no_show_doctor` e sala
+  expirada disparam clawback automático (reusa `createClawback()`)
+  + flag de refund pendente + bump reliability. Webhooks Daily
+  (App e Pages Router) chamam a política após fixar o status
+  terminal. Idempotente; templates Meta dedicados ficam pra Sprint 5.
 
 **Restante da Sprint 4.1 (3/3):** submeter os 7 templates na Meta
-(1-24h), política de estorno automático em no-show.
+(1-24h) + templates dedicados de no-show, refund automático no
+Asaas (Sprint 5).
 
 Veja [`docs/SPRINTS.md`](./docs/SPRINTS.md) para o roadmap completo.
 
@@ -212,10 +222,11 @@ instituto-nova-medida/
 │       ├── scheduling.ts             # slots disponíveis + reserva atomic
 │       ├── patient-tokens.ts         # HMAC do link /consulta/[id]
 │       ├── notifications.ts          # fila + worker wa-reminders
+│       ├── no-show-policy.ts         # política financeira D-032
 │       ├── supabase.ts               # admin (service role) + anon
 │       ├── supabase-server.ts        # @supabase/ssr (server components)
 │       ├── video.ts                  # VideoProvider + DailyProvider
-│       ├── wa-templates.ts           # 9 wrappers tipados (7 Meta + 2 internos)
+│       ├── wa-templates.ts           # 11 wrappers tipados (7 Meta + 2 internos + 2 no-show stub)
 │       ├── whatsapp.ts               # sendTemplate + sendText (Graph API)
 │       └── utils.ts
 ├── supabase/migrations/              # SQL versionado
@@ -227,7 +238,10 @@ instituto-nova-medida/
 │   ├── 20260419050000_payouts_admin_fields.sql
 │   ├── 20260419060000_payout_proofs_bucket.sql
 │   ├── 20260419070000_appointment_booking.sql   # 008: pending_payment + slot reserve
-│   └── 20260419080000_daily_events.sql          # 009: webhook Daily (raw + idempot.)
+│   ├── 20260419080000_daily_events.sql          # 009: webhook Daily (raw + idempot.)
+│   ├── 20260420000000_expire_pending_payment.sql            # 010: cron expiração
+│   ├── 20260420100000_appointment_notifications_scheduler.sql # 011: scheduler + funcs
+│   └── 20260420200000_no_show_policy.sql                    # 012: política no-show
 ├── package.json
 ├── tailwind.config.ts
 ├── tsconfig.json

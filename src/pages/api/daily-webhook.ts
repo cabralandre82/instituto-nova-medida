@@ -21,6 +21,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { parseDailyEvent, type NormalizedVideoEvent } from "@/lib/video";
+import { applyNoShowPolicy, classifyFinalStatus } from "@/lib/no-show-policy";
 import crypto from "node:crypto";
 
 export const config = {
@@ -295,6 +296,8 @@ async function processEvent(
         updates.status = "completed";
       } else if (joinedNonOwners === 0 && joinedOwners === 0) {
         updates.status = "cancelled_by_admin";
+        updates.cancelled_at = new Date().toISOString();
+        updates.cancelled_reason = "expired_no_one_joined";
       } else if (joinedNonOwners === 0) {
         updates.status = "no_show_patient";
       } else if (joinedOwners === 0) {
@@ -304,6 +307,26 @@ async function processEvent(
       }
 
       await supabase.from("appointments").update(updates).eq("id", appointmentId);
+
+      // Política financeira/notificação de no-show (D-032).
+      const finalStatus = classifyFinalStatus(
+        updates.status as string,
+        (updates.cancelled_reason as string | undefined) ?? null
+      );
+      if (finalStatus) {
+        try {
+          const policyResult = await applyNoShowPolicy({
+            appointmentId,
+            finalStatus,
+            cancelledReason:
+              (updates.cancelled_reason as string | undefined) ?? null,
+            source: "daily-webhook-pages",
+          });
+          console.log("[daily-webhook-pages] no-show policy:", policyResult);
+        } catch (e) {
+          console.error("[daily-webhook-pages] no-show policy falhou:", e);
+        }
+      }
       return;
     }
     case "participant.joined":
