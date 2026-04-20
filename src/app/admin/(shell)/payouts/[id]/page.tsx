@@ -9,6 +9,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { PayoutActions } from "./PayoutActions";
+import { ProofPanel } from "./ProofPanel";
 
 export const dynamic = "force-dynamic";
 
@@ -298,6 +299,9 @@ export default async function PayoutDetailPage({
             hasPix={!!pix}
             amountCents={payout.amount_cents}
           />
+
+          {/* Comprovante (sempre visível pra histórico) */}
+          <ProofPanel payoutId={payout.id} rawValue={payout.pix_proof_url} />
         </aside>
       </div>
     </div>

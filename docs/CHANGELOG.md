@@ -6,6 +6,57 @@
 
 ---
 
+## 2026-04-19 · Sprint 4.1 (3/3 cont.) — Comprovantes PIX em Storage privado · IA
+
+**Por quê:** o passo "Confirmar recebimento" pedia URL externa colada
+manualmente — sem auditoria, sem garantia de que o link sobrevive,
+sem controle de acesso. Agora o comprovante vira arquivo num bucket
+Supabase privado, anexado direto no fluxo. Decisão: **D-026**.
+
+**Migration aplicada (007 — `20260419060000_payout_proofs_bucket.sql`):**
+
+- Cria bucket `payouts-proofs` (private, 10 MB cap, MIMEs PDF/PNG/JPG/WEBP).
+- `pix_proof_url` passa a guardar storage path (`payouts/{id}/...`);
+  URLs externas continuam aceitas para backfill.
+- `receipt_url` marcada como deprecated via `comment on column`.
+- Sem policies em `storage.objects` — autorização vive 100% nos
+  handlers (ver D-026).
+
+**Lib nova (`src/lib/payout-proofs.ts`):**
+
+- `BUCKET`, `MAX_UPLOAD_BYTES (5 MB)`, `ALLOWED_MIMES`.
+- `buildStoragePath()` — `payouts/{id}/{ts}-{slug}.{ext}` determinístico.
+- `slugifyFilename()` — normaliza unicode + `[a-z0-9-]`, máx 40 chars.
+- `createSignedUrl()` — signed URL curta (60s).
+- `removeFromStorage()` — idempotente, 404 não é erro.
+- `isStoragePath()` — distingue path interno de URL externa legacy.
+
+**APIs novas:**
+
+- `POST   /api/admin/payouts/[id]/proof` — multipart upload, valida MIME
+  + 5 MB lógico, grava no bucket, atualiza `pix_proof_url`, **remove o
+  arquivo antigo** se havia outro storage path (não toca em URLs externas).
+- `GET    /api/admin/payouts/[id]/proof` — signed URL 60s.
+- `DELETE /api/admin/payouts/[id]/proof` — apaga do bucket + zera colunas.
+- `GET    /api/medico/payouts/[id]/proof` — signed URL 60s, **bloqueia
+  se o payout não é da médica autenticada**.
+
+**UI:**
+
+- `PayoutActions` (admin → confirm): substituído `<input type="url">`
+  por `<input type="file" accept="pdf,png,jpg,webp">` + preview de nome+tamanho.
+  O upload acontece ANTES do `POST /confirm`, então em caso de falha o
+  status do payout não muda (atomicidade prática).
+- `ProofPanel` (admin, sidebar dos detalhes): mostra "Arquivo: X" ou
+  "URL externa: hostname", com botões `Abrir` (signed URL) e `Remover`.
+- `ProofLink` (médica, `/medico/repasses`): substitui `<a href>` direto
+  pelo botão que pede signed URL na hora.
+
+**Build:** 2 APIs novas + 2 componentes client. Bundle de
+`/admin/payouts/[id]` cresceu de 1.75 → 2.81 kB (ProofPanel client).
+
+---
+
 ## 2026-04-19 · Sprint 4.1 (3/3 parcial) — Painel da médica `/medico/*` · IA
 
 **Por quê:** com magic link + papel `doctor` operacional, faltava onde

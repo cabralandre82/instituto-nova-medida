@@ -8,6 +8,7 @@
 
 import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { ProofLink } from "./ProofLink";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -21,6 +22,7 @@ type PayoutRow = {
   approved_at: string | null;
   paid_at: string | null;
   receipt_url: string | null;
+  pix_proof_url: string | null;
   pix_tx_id: string | null;
   pix_key_snapshot: string | null;
   pix_key_type_snapshot: string | null;
@@ -35,7 +37,7 @@ async function loadPayouts(doctorId: string) {
   const { data, error } = await supabase
     .from("doctor_payouts")
     .select(
-      "id, reference_period, amount_cents, earnings_count, status, approved_at, paid_at, receipt_url, pix_tx_id, pix_key_snapshot, pix_key_type_snapshot, notes, failed_reason, cancelled_reason, created_at"
+      "id, reference_period, amount_cents, earnings_count, status, approved_at, paid_at, receipt_url, pix_proof_url, pix_tx_id, pix_key_snapshot, pix_key_type_snapshot, notes, failed_reason, cancelled_reason, created_at"
     )
     .eq("doctor_id", doctorId)
     .order("reference_period", { ascending: false })
@@ -247,16 +249,7 @@ export default async function DoctorPayoutsPage() {
                   </p>
                 )}
 
-                {p.receipt_url && (
-                  <a
-                    href={p.receipt_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="mt-4 inline-flex items-center gap-2 text-sm font-medium text-sage-700 hover:text-sage-800 hover:underline"
-                  >
-                    Ver comprovante →
-                  </a>
-                )}
+                {(p.pix_proof_url || p.receipt_url) && <ProofLink payoutId={p.id} />}
               </li>
             );
           })}

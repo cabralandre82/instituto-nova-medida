@@ -1,9 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type Status = "draft" | "approved" | "pix_sent" | "confirmed" | "cancelled" | "failed";
+
+const ACCEPT_MIMES = "application/pdf,image/png,image/jpeg,image/webp";
+const MAX_BYTES = 5 * 1024 * 1024;
 
 export function PayoutActions({
   payoutId,
@@ -19,9 +22,10 @@ export function PayoutActions({
   const router = useRouter();
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
-  const [proofUrl, setProofUrl] = useState("");
+  const [proofFile, setProofFile] = useState<File | null>(null);
   const [txId, setTxId] = useState("");
   const [notes, setNotes] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   async function call(action: string, body?: Record<string, unknown>) {
     setSubmitting(action);
@@ -35,6 +39,54 @@ export function PayoutActions({
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data?.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
       setMsg({ kind: "ok", text: "Atualizado." });
+      router.refresh();
+    } catch (e) {
+      setMsg({ kind: "err", text: e instanceof Error ? e.message : "Erro" });
+    } finally {
+      setSubmitting(null);
+    }
+  }
+
+  async function uploadProof(file: File): Promise<boolean> {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch(`/api/admin/payouts/${payoutId}/proof`, {
+      method: "POST",
+      body: fd,
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      error?: string;
+      message?: string;
+    };
+    if (!res.ok || !data.ok) {
+      throw new Error(data.message || data.error || `HTTP ${res.status}`);
+    }
+    return true;
+  }
+
+  async function handleConfirm() {
+    setSubmitting("confirm");
+    setMsg(null);
+    try {
+      if (proofFile) {
+        if (proofFile.size > MAX_BYTES) {
+          throw new Error("Arquivo maior que 5 MB.");
+        }
+        await uploadProof(proofFile);
+      }
+      const res = await fetch(`/api/admin/payouts/${payoutId}/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          notes: notes.trim() || undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      setMsg({ kind: "ok", text: "Recebimento confirmado." });
+      setProofFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
       router.refresh();
     } catch (e) {
       setMsg({ kind: "err", text: e instanceof Error ? e.message : "Erro" });
@@ -106,15 +158,27 @@ export function PayoutActions({
         <div className="space-y-3">
           <p className="text-sm text-ink-600">
             Confirme quando a médica avisar que recebeu (ou bater no extrato).
-            Anexe link do comprovante se quiser.
+            Anexe o comprovante do banco — fica privado, só você e a médica acessam.
           </p>
-          <input
-            type="url"
-            value={proofUrl}
-            onChange={(e) => setProofUrl(e.target.value)}
-            placeholder="URL do comprovante (opcional)"
-            className="w-full rounded-xl border border-ink-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sage-500"
-          />
+
+          <div>
+            <label className="block text-xs font-medium text-ink-700 mb-1.5">
+              Comprovante (PDF, PNG, JPG ou WEBP — máx 5 MB)
+            </label>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={ACCEPT_MIMES}
+              onChange={(e) => setProofFile(e.target.files?.[0] ?? null)}
+              className="w-full text-sm text-ink-700 file:mr-3 file:rounded-lg file:border-0 file:bg-ink-100 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-ink-800 hover:file:bg-ink-200"
+            />
+            {proofFile && (
+              <p className="mt-1 text-xs text-ink-500">
+                {proofFile.name} · {(proofFile.size / 1024).toFixed(0)} KB
+              </p>
+            )}
+          </div>
+
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
@@ -124,12 +188,7 @@ export function PayoutActions({
           />
           <button
             type="button"
-            onClick={() =>
-              call("confirm", {
-                pix_proof_url: proofUrl.trim() || undefined,
-                notes: notes.trim() || undefined,
-              })
-            }
+            onClick={handleConfirm}
             disabled={submitting !== null}
             className="w-full rounded-xl bg-sage-700 hover:bg-sage-800 disabled:opacity-50 text-white font-medium py-2.5 px-4 transition-colors"
           >

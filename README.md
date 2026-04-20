@@ -63,12 +63,13 @@ vinculado à compra via `localStorage`.
   Daily idempotente), extrato de ganhos por mês com filtro, histórico
   de repasses read-only e edição de perfil restrita
   (`display_name`, `bio`, `phone`, `consultation_minutes`).
+  ✅ Storage privado para comprovantes PIX (bucket `payouts-proofs`,
+  upload + signed URL via API mediada — D-026). Migration 007 aplicada.
 
 **Restante da Sprint 4.1 (3/3):** fluxo do paciente (`/agendar` +
 reserva → checkout → criação automática de appointment + sala Daily),
 webhook Daily (`meeting.started/ended` atualiza `appointment.status`),
-helpers WhatsApp pros 7 templates, Storage privado pra comprovantes
-PIX/NF-e, env vars Daily no Vercel.
+helpers WhatsApp pros 7 templates, env vars Daily no Vercel.
 
 Veja [`docs/SPRINTS.md`](./docs/SPRINTS.md) para o roadmap completo.
 
@@ -148,9 +149,10 @@ instituto-nova-medida/
 │   │       ├── auth/                 # magic-link / callback / signout
 │   │       ├── admin/                # APIs do painel admin
 │   │       │   ├── doctors/[id]/(compensation|payment-method|availability)
-│   │       │   └── payouts/[id]/(approve|pay|confirm|cancel)
+│   │       │   └── payouts/[id]/(approve|pay|confirm|cancel|proof)
 │   │       └── medico/               # APIs do painel da médica
 │   │           ├── profile (PATCH)
+│   │           ├── payouts/[id]/proof (GET → signed URL 60s)
 │   │           └── appointments/[id]/join (POST → cria sala Daily)
 │   ├── components/                   # 16+ componentes
 │   └── lib/
@@ -158,6 +160,7 @@ instituto-nova-medida/
 │       ├── auth.ts                   # requireAdmin/requireDoctor + getSessionUser
 │       ├── earnings.ts               # geração de earnings/clawbacks
 │       ├── payouts.ts                # state machine de payouts
+│       ├── payout-proofs.ts          # bucket privado de comprovantes PIX
 │       ├── supabase.ts               # admin (service role) + anon
 │       ├── supabase-server.ts        # @supabase/ssr (server components)
 │       ├── video.ts                  # VideoProvider + DailyProvider
@@ -169,7 +172,8 @@ instituto-nova-medida/
 │   ├── 20260419020000_whatsapp_events.sql
 │   ├── 20260419030000_asaas_payments.sql
 │   ├── 20260419040000_doctors_appointments_finance.sql
-│   └── 20260419050000_payouts_admin_fields.sql
+│   ├── 20260419050000_payouts_admin_fields.sql
+│   └── 20260419060000_payout_proofs_bucket.sql
 ├── package.json
 ├── tailwind.config.ts
 ├── tsconfig.json

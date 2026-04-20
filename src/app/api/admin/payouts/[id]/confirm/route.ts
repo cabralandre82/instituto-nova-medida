@@ -16,6 +16,12 @@ import { canTransition, loadPayoutOrFail } from "@/lib/payouts";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/**
+ * NOTA: a partir da migration 007, o comprovante NÃO é mais enviado por
+ * URL externa neste endpoint. O upload acontece em
+ * `POST /api/admin/payouts/[id]/proof` ANTES do confirm. O campo
+ * `pix_proof_url` aqui só sobrevive para backfill via API/script.
+ */
 type Body = {
   pix_proof_url?: string;
   notes?: string;

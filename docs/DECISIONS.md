@@ -5,6 +5,56 @@
 
 ---
 
+## D-026 · Comprovantes PIX em bucket Supabase privado, mediados por API · 2026-04-19
+
+**Contexto:** o passo "Confirmar recebimento" do payout aceitava só uma
+URL externa colada manualmente. Isso não fecha auditoria contábil: o
+operador pode digitar errado, o link pode quebrar (Drive/Dropbox), e
+não há controle de quem viu cada comprovante.
+
+**Decisão:** criar bucket Supabase Storage `payouts-proofs` (private)
+manipulado SEMPRE via service role do servidor, com autorização nos
+handlers Next.js (não em policies SQL).
+
+- **Bucket:** `payouts-proofs`, `public=false`, hard cap de 10 MB,
+  MIMEs aceitos = `pdf, png, jpeg, webp`.
+- **Path determinístico:** `payouts/{payout_id}/{ts}-{slug}.{ext}`,
+  facilita listing/delete em massa por payout.
+- **Coluna que aponta:** `doctor_payouts.pix_proof_url` armazena o
+  storage path (string que começa com `payouts/`). URLs externas
+  antigas continuam aceitas (qualquer string que não começa com
+  `payouts/` é tratada como link externo no GET).
+- **API admin** (`/api/admin/payouts/[id]/proof`):
+  - `POST` multipart `file=` → valida MIME + 5 MB lógico, grava no
+    bucket, atualiza `pix_proof_url`, remove arquivo antigo se existia.
+  - `GET` → signed URL de 60s.
+  - `DELETE` → remove arquivo + zera coluna.
+- **API médica** (`/api/medico/payouts/[id]/proof`): só `GET`,
+  bloqueia se o payout não pertence à médica autenticada.
+- **Sem RLS em `storage.objects`:** o bucket é completamente fechado;
+  nada o toca exceto handlers que já passaram por `requireAdmin()` ou
+  `requireDoctor()` + check de ownership. Mais simples, mais seguro,
+  evita policies SQL frágeis.
+- **Signed URLs sempre curtas** (60s) para minimizar shoulder-surfing
+  e log/clipboard hijacking.
+
+**Consequências:**
+
+- Operador não digita mais URL externa — anexa arquivo direto no
+  passo `pix_sent → confirmed`. Comprovante fica versionado no Storage.
+- Médica vê o mesmo arquivo que o operador anexou (transparência total).
+- O mesmo bucket vai servir NF-e nos próximos sprints (reusar path
+  `nfse/{payout_id}/...` com mesma família de helpers).
+- Migration 007 documenta o bucket; é idempotente (`on conflict do update`).
+
+**Não decidido aqui (futuro):**
+
+- Verificação automática de PDF (PDF/A para NF-e — Sprint 5).
+- Antivírus server-side (ClamAV) — quando subirem >100 arquivos/mês.
+- Hash dos arquivos pra deduplicação (não é problema no volume MVP).
+
+---
+
 ## D-025 · Autenticação por magic link (Supabase Auth) + roles via app_metadata · 2026-04-19
 
 **Contexto:** Sprint 4.1 (entrega 2/3) precisa habilitar acesso ao painel
