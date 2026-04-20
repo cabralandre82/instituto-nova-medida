@@ -5,6 +5,128 @@
 
 ---
 
+## D-043 · Área logada do paciente ("meu tratamento") · 2026-04-20
+
+**Contexto:** até aqui, o paciente existia como **linha em
+`customers`** e recebia links pontuais por WhatsApp/e-mail:
+`/checkout/[plano]` pra pagar, `/consulta/[id]?t=...` pra entrar
+na sala (D-028), lembrete pelo bot. Não havia `/paciente` — uma
+vez que a compra confirmava, o paciente **sumia do app**. Toda
+interação operacional (qual foi minha próxima consulta? preciso
+renovar? quando termina meu ciclo?) virava tíquete de WhatsApp
+pra equipe, que lia, respondia e registrava manualmente.
+
+Problemas concretos:
+
+- **Retenção cega:** sem visibilidade do ciclo, paciente descobre
+  que acabou a medicação tarde demais → evasão silenciosa.
+- **WhatsApp inflado:** ~40% das mensagens entrantes da equipe
+  eram perguntas que a própria área logada resolveria em 10s.
+- **Sem canal de renovação:** na renovação, operador tinha que
+  re-disparar checkout; qualquer lapso, evasão.
+- **Zero bookmark:** link `/consulta/[id]?t=...` expira em 7 dias;
+  paciente que arquivou o e-mail fica sem porta de entrada.
+
+**Alternativas consideradas:**
+
+1. **Status quo (só token por link):** zero infraestrutura nova,
+   mas perpetua dependência de WhatsApp e impede qualquer
+   produto self-service futuro (prescrições, NF-e, receitas).
+2. **Auth por SMS / senha própria:** funcionalmente equivalente
+   ao magic-link (que já usamos pra admin/médica em D-025), mas
+   exige 2+ integrações novas (SMS gateway, hashing de senha,
+   fluxo de reset). Preço > valor.
+3. **Magic-link reaproveitando D-025 + vínculo automático por
+   e-mail:** mesma stack, zero UI nova de senha, self-onboarding
+   implícito (se o paciente já é `customer`, o primeiro clique
+   cria o `auth.user` com role=patient).
+
+**Decisão:** Alternativa (3).
+
+- Nova tabela-vínculo não; ampliamos `customers` com
+  `user_id uuid references auth.users(id) on delete set null`
+  (unique partial). Fonte da verdade do match é o **e-mail do
+  customer** (já validado no checkout, já único em 99% dos
+  cenários — o CPF é que é estrictamente único, mas e-mails
+  de compras distintas tipicamente também são).
+- Trigger SQL `link_customer_to_new_auth_user` sincroniza o
+  vínculo quando o auth.user é criado **em qualquer caminho**
+  (admin, migration, import). A API do magic-link do paciente
+  é quem geralmente cria esse auth.user e já vincula no mesmo
+  fluxo, mas a trigger é a defesa em profundidade.
+- Role `patient` já estava reservada em `src/lib/auth.ts`
+  (D-025 comentava "Sprint 5: futuro /paciente"); agora virou
+  real via `requirePatient()` — hard-gate que redireciona pra
+  `/paciente/login` se falta sessão ou customer.
+- API dedicada `/api/paciente/auth/magic-link` isola o fluxo
+  de auto-provisionamento do paciente do fluxo clássico
+  (`/api/auth/magic-link` que só aceita admin/médica
+  pré-existentes). Evita regressão no login do operador.
+
+**Arquitetura da UI:**
+
+- `/paciente/login` — form magic-link idêntico ao `/medico/login`.
+- `/paciente/(shell)/layout.tsx` — `requirePatient()` + header
+  com saudação + nav (Visão geral / Minhas consultas / Renovar).
+- `/paciente` — dashboard (próxima consulta + status do ciclo
+  + últimas 3 consultas + CTAs condicionais de renovação).
+- `/paciente/consultas` — agenda + histórico completo.
+- `/paciente/consultas/[id]` — detalhe + botão "Entrar na sala".
+  **Truque crítico**: em vez de duplicar a lógica de janela de
+  entrada/Daily, geramos um token HMAC via `signPatientToken()`
+  no server component e reutilizamos `JoinRoomButton` +
+  `/api/paciente/appointments/[id]/join`. O endurecimento de
+  janela, provisionamento, expiração de token Daily — tudo
+  continua **num só lugar**.
+- `/paciente/renovar` — status do ciclo, lista de planos, CTA
+  destaque pro plano atual (recomendado), redireciona pra
+  `/checkout/[slug]` existente. Renovação é **manual** (1 clique),
+  não recorrente — decisão já tomada em D-011 e mantida aqui.
+
+**Lib `src/lib/patient-treatment.ts`** é fonte única:
+`getActiveTreatment`, `getRenewalInfo`, `getUpcomingAppointment`,
+`listPastAppointments`, `getPatientProfile` + helpers de label.
+Todas aceitam `SupabaseClient` injetável (testável sem
+singleton) e recebem `now: Date` opcional pra testes
+determinísticos.
+
+**Impacto:**
+
+- Destrava **retenção auto-servida**: paciente acessa
+  `/paciente`, vê "faltam 7 dias", clica "Renovar" → checkout.
+  Sem passar por operador.
+- Reduz fricção do reingresso na sala: token do WhatsApp
+  expirou? Paciente loga e gera um novo de `/paciente/consultas/
+  [id]`.
+- Abre caminho pros próximos D-: pré-consulta (formulário de
+  sintomas antes da conversa), prescrições (download da receita
+  após a consulta), NF-e do paciente, tracking de entrega
+  da medicação. Tudo cabe em `/paciente/*` agora.
+
+**Sobre RLS:** seguimos o padrão do projeto — backend usa
+service_role, fencing é feito em código via `requirePatient()`
+que filtra queries por `customer_id`. Abrir RLS por paciente
+(policy em `appointments`, `payments`, `customers` filtrando
+por `auth.uid() = customers.user_id`) exige reescrever 6+
+policies e é escopo pra quando houver cliente direto no front
+(mobile nativo, app externo, etc). Hoje todas as queries
+passam pelo server, então não há ganho material.
+
+**Relacionado:** D-025 (auth + magic-link base), D-028 (token
+HMAC + `/consulta/[id]`), D-011 (cycle-based, não
+subscription-based), D-042 (self-service da médica — espelho).
+
+**Métricas pra acompanhar:**
+
+- % de pacientes que loga em /paciente ao menos uma vez (meta:
+  >60% em 60 dias).
+- Volume de WhatsApp operacional ("quando é minha próxima?",
+  "quando acaba?") — deve cair mensuravelmente após 30 dias.
+- Conversão de renovação: % de pacientes em `expiring_soon`
+  que clica "Renovar" direto do dashboard.
+
+---
+
 ## D-042 · PIX self-service da médica · 2026-04-20
 
 **Contexto:** com o ciclo fiscal fechado (D-041) e o cron de payouts

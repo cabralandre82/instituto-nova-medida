@@ -48,12 +48,19 @@ export async function middleware(request: NextRequest) {
 
   const path = request.nextUrl.pathname;
 
-  // Hard-gate: /admin/* e /medico/* exigem sessão (exceto as rotas de login)
+  // Hard-gate: /admin/*, /medico/* e /paciente/* exigem sessão
+  // (exceto as rotas de login respectivas)
   const isProtectedAdmin = path.startsWith("/admin") && !path.startsWith("/admin/login");
   const isProtectedDoctor = path.startsWith("/medico") && !path.startsWith("/medico/login");
+  const isProtectedPatient =
+    path.startsWith("/paciente") && !path.startsWith("/paciente/login");
 
-  if ((isProtectedAdmin || isProtectedDoctor) && !user) {
-    const loginPath = isProtectedAdmin ? "/admin/login" : "/medico/login";
+  if ((isProtectedAdmin || isProtectedDoctor || isProtectedPatient) && !user) {
+    const loginPath = isProtectedAdmin
+      ? "/admin/login"
+      : isProtectedDoctor
+        ? "/medico/login"
+        : "/paciente/login";
     const redirectUrl = new URL(loginPath, request.url);
     redirectUrl.searchParams.set("next", path);
     return NextResponse.redirect(redirectUrl);

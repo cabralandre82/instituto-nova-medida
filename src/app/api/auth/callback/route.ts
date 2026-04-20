@@ -21,8 +21,14 @@ export async function GET(req: Request) {
     rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "/admin";
 
   // Determina qual login receberia o erro com base no `next`.
-  // /medico/* → /medico/login | qualquer outro (incl. /admin/*) → /admin/login
-  const loginBase = safeNext.startsWith("/medico") ? "/medico/login" : "/admin/login";
+  // /medico/*  → /medico/login
+  // /paciente/* → /paciente/login
+  // qualquer outro (incl. /admin/*) → /admin/login
+  const loginBase = safeNext.startsWith("/medico")
+    ? "/medico/login"
+    : safeNext.startsWith("/paciente")
+      ? "/paciente/login"
+      : "/admin/login";
 
   if (!code) {
     return NextResponse.redirect(new URL(`${loginBase}?error=invalid`, req.url));

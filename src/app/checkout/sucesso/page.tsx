@@ -89,7 +89,26 @@ export default function CheckoutSucessoPage() {
             ))}
           </div>
 
-          <div className="mt-10 flex flex-col sm:flex-row gap-3 justify-center">
+          <div className="mt-10 rounded-2xl bg-white border border-ink-100 p-5 sm:p-6 text-left">
+            <p className="text-[0.78rem] uppercase tracking-[0.16em] text-sage-700 font-medium mb-2">
+              Sua área de paciente
+            </p>
+            <h3 className="font-serif text-[1.1rem] text-ink-800">
+              Acompanhe seu tratamento em /paciente
+            </h3>
+            <p className="mt-1.5 text-[0.92rem] text-ink-500">
+              Próxima consulta, histórico e renovação — com login por
+              link mágico usando o e-mail desta compra. Sem senha.
+            </p>
+            <Link
+              href="/paciente/login"
+              className="mt-4 inline-flex items-center gap-2 text-sage-700 hover:text-sage-800 font-medium text-sm"
+            >
+              Acessar minha área →
+            </Link>
+          </div>
+
+          <div className="mt-8 flex flex-col sm:flex-row gap-3 justify-center">
             <Link
               href="/"
               className="inline-flex items-center justify-center gap-2 rounded-full bg-sage-700 hover:bg-sage-800 text-cream-100 px-6 py-3.5 text-[0.95rem] font-medium transition-colors"

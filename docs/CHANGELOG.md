@@ -6,6 +6,91 @@
 
 ---
 
+## 2026-04-20 · Área logada do paciente "meu tratamento" (D-043) · IA
+
+**Por quê:** depois do checkout, o paciente sumia do app. Qualquer
+pergunta (quando é minha próxima consulta? quantos dias faltam pra
+acabar o ciclo? onde renovo?) virava WhatsApp pra equipe. Sem
+`/paciente`, não existia canal de retenção nem de auto-renovação.
+
+**Entregáveis:**
+
+- **Migration `20260423000000_customers_user_id.sql`:**
+  - `customers.user_id uuid references auth.users(id) on delete
+    set null` + unique partial index.
+  - Backfill: liga customers existentes ao auth.user correspondente
+    via e-mail.
+  - Trigger `link_customer_to_new_auth_user` (security definer) —
+    sincroniza o vínculo toda vez que um auth.user novo nasce.
+
+- **`src/lib/auth.ts`:** `requirePatient()` — hard-gate que exige
+  sessão + `role='patient'` + `customers.user_id` vinculado.
+  Redireciona pra `/paciente/login` com mensagem apropriada em
+  cada falha.
+
+- **`src/lib/patient-treatment.ts`** (novo): fonte única do domínio.
+  - `getActiveTreatment(customerId, now)` — último payment
+    CONFIRMED + plan + janela do ciclo (paid_at..paid_at+cycle_days)
+    + daysRemaining + progressPct.
+  - `getRenewalInfo(customerId, now)` — status `none` /
+    `active` / `expiring_soon` (≤14 dias) / `expired`.
+  - `getUpcomingAppointment`, `listPastAppointments`,
+    `getPatientProfile`.
+  - Helpers puros de label (pt-BR).
+
+- **`/api/paciente/auth/magic-link`** (novo): fluxo dedicado do
+  paciente. Se e-mail bate um `customer` existente, cria
+  `auth.user` com role=patient, vincula e dispara o link mágico
+  — tudo num POST. Se nada bate, retorna 200 silencioso
+  (anti-enumeração).
+
+- **UI `/paciente`:**
+  - `/paciente/login` (+ `PatientLoginForm`): magic-link.
+  - `/paciente/(shell)/layout.tsx` + `PatientNav` (Visão geral
+    / Minhas consultas / Renovar).
+  - `/paciente` — dashboard: banners condicionais para
+    `expired`/`expiring_soon`, card de próxima consulta (com
+    botão "Entrar na sala" via HMAC quando está na janela),
+    card de tratamento (% progresso + CTA renovação), últimas
+    3 consultas, resumo do investimento.
+  - `/paciente/consultas` — agenda + histórico completo,
+    clicáveis.
+  - `/paciente/consultas/[id]` — detalhe + **reaproveita**
+    `JoinRoomButton` + `/api/paciente/appointments/[id]/join`
+    via token HMAC gerado server-side (sem duplicar janela de
+    entrada).
+  - `/paciente/renovar` — status do ciclo + lista de planos
+    ativos (o plano atual aparece destacado como "recomendado")
+    + redireciona pra `/checkout/[slug]` já existente.
+
+- **Middleware:** adiciona `/paciente/*` ao hard-gate de sessão
+  (redirecionando pra `/paciente/login`).
+
+- **`/checkout/sucesso`:** ganha card destacado com link pra
+  `/paciente/login` — fecha o loop "comprei → acompanho".
+
+- **`/api/auth/callback`:** reconhece `/paciente/*` pra direcionar
+  erros pro login certo.
+
+- **Testes:** 21 novos em `src/lib/patient-treatment.test.ts`.
+  Total: 141/141 passando. Cobre transições de `RenewalStatus`,
+  fallback de `doctors` null, filtro `.or` do histórico e
+  propagação de erros.
+
+- **Docs:** ADR `D-043` em `docs/DECISIONS.md` + atualização
+  de Sprint 5 em `docs/SPRINTS.md`.
+
+**Impacto direto:**
+- Paciente ganha bookmark fixo (`/paciente`). Token do
+  WhatsApp expirou? Loga, abre a consulta, gera um novo.
+- Renovação agora é 2 cliques: `/paciente/renovar` → checkout.
+- Reduz WhatsApp operacional: perguntas recorrentes ficam
+  self-service.
+- Destrava os próximos: pré-consulta, prescrições, NF-e do
+  paciente, tracking de medicação.
+
+---
+
 ## 2026-04-20 · PIX self-service da médica (D-042) · IA
 
 **Por quê:** com o ciclo fiscal fechado (D-041) e o cron de payouts

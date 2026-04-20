@@ -100,3 +100,37 @@ export async function requireDoctor(): Promise<{
   }
   return { user, doctorId: data.id as string };
 }
+
+/**
+ * Garante que o usuário é paciente e retorna o customer_id. Se não
+ * autenticada → /paciente/login. Se autenticada mas sem customer
+ * vinculado → /paciente/login?error=no_profile (caso raro: conta
+ * criada manualmente fora do fluxo do magic-link).
+ *
+ * O vínculo `customers.user_id` é estabelecido em dois caminhos:
+ *   1. Migration 018 backfill — para clientes legados.
+ *   2. Trigger `link_customer_to_new_auth_user` — para signups novos.
+ *   3. API `/api/paciente/auth/magic-link` — cria auth.user quando
+ *      um customer existente solicita o link pela primeira vez.
+ */
+export async function requirePatient(): Promise<{
+  user: SessionUser;
+  customerId: string;
+}> {
+  const user = await requireAuth("/paciente/login");
+  if (user.role !== "patient") {
+    redirect("/paciente/login?error=forbidden");
+  }
+
+  const supabase = getSupabaseServer();
+  const { data, error } = await supabase
+    .from("customers")
+    .select("id")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (error || !data?.id) {
+    redirect("/paciente/login?error=no_profile");
+  }
+  return { user, customerId: data.id as string };
+}

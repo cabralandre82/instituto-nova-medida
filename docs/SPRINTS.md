@@ -446,10 +446,30 @@ automatizado (estorno já foi em D-034; NF-e upload flow fica aqui).
 
 **Frente 2 — Ciclo do paciente:**
 
-- [ ] Página `/paciente/meu-tratamento`: dose atual, próxima
-      reconsulta, histórico de prescrições, evolução
+- [x] **D-043 · Área logada do paciente "meu tratamento"** —
+      `/paciente/*` com magic-link dedicado (`/api/paciente/auth/
+      magic-link`) que auto-provisiona `auth.user` com role=patient
+      no primeiro acesso se e-mail bate um `customer` existente.
+      Migration `20260423000000_customers_user_id.sql` adiciona
+      `customers.user_id` + trigger `link_customer_to_new_auth_user`.
+      `requirePatient()` no `src/lib/auth.ts`.
+      `src/lib/patient-treatment.ts` como fonte única
+      (`getActiveTreatment`, `getRenewalInfo`,
+      `getUpcomingAppointment`, `listPastAppointments`).
+      UI: `/paciente` dashboard (próxima consulta com entrada HMAC,
+      status do ciclo com % progresso, banners condicionais para
+      `expired`/`expiring_soon`, últimas 3 consultas),
+      `/paciente/consultas` (agenda + histórico),
+      `/paciente/consultas/[id]` (detalhe reutilizando
+      `JoinRoomButton` via token HMAC server-side — sem duplicar
+      lógica de janela), `/paciente/renovar` (status do ciclo + lista
+      de planos com CTA destacado pro plano atual). Middleware e
+      callback auth atualizados pra `/paciente/*`. Card de acesso em
+      `/checkout/sucesso`. 141 testes passando (21 novos).
+- [ ] Pré-consulta (sintomas/efeitos) em `/paciente/consultas/[id]`
+      que a médica lê antes
 - [ ] Upload de exames (PDF/imagem) para histórico clínico
-- [ ] Renovação automática de plano com lembrete antes do fim do ciclo
+- [ ] Prescrições visíveis ao paciente após a consulta
 - [ ] MSG 2-10 do roteiro WhatsApp original (ainda não disparadas)
 
 **Frente 3 — Clínica:**
