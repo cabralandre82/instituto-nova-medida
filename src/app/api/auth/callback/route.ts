@@ -20,8 +20,12 @@ export async function GET(req: Request) {
   const safeNext =
     rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "/admin";
 
+  // Determina qual login receberia o erro com base no `next`.
+  // /medico/* → /medico/login | qualquer outro (incl. /admin/*) → /admin/login
+  const loginBase = safeNext.startsWith("/medico") ? "/medico/login" : "/admin/login";
+
   if (!code) {
-    return NextResponse.redirect(new URL("/admin/login?error=invalid", req.url));
+    return NextResponse.redirect(new URL(`${loginBase}?error=invalid`, req.url));
   }
 
   const supabase = getSupabaseRouteHandler();
@@ -29,10 +33,10 @@ export async function GET(req: Request) {
 
   if (error) {
     console.error("[auth/callback] exchangeCodeForSession:", error);
-    const redir = error.message?.toLowerCase().includes("expired")
+    const reason = error.message?.toLowerCase().includes("expired")
       ? "expired"
       : "callback";
-    return NextResponse.redirect(new URL(`/admin/login?error=${redir}`, req.url));
+    return NextResponse.redirect(new URL(`${loginBase}?error=${reason}`, req.url));
   }
 
   return NextResponse.redirect(new URL(safeNext, req.url));
