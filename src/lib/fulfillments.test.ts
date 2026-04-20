@@ -18,7 +18,19 @@ import {
   nextAllowedStatuses,
   timestampsForTransition,
   type FulfillmentStatus,
+  type ShippingSnapshot,
 } from "./fulfillments";
+
+const baseShipping: ShippingSnapshot = {
+  recipient_name: "Maria da Silva",
+  zipcode: "01310100",
+  street: "Avenida Paulista",
+  number: "1000",
+  complement: "apto 12",
+  district: "Bela Vista",
+  city: "São Paulo",
+  state: "SP",
+};
 
 const ALL_STATUSES: readonly FulfillmentStatus[] = [
   "pending_acceptance",
@@ -200,6 +212,7 @@ describe("computeAcceptanceHash", () => {
     planSlug: "tirzepatida-90",
     prescriptionUrl: "https://memed.com.br/prescription/abc-123",
     appointmentId: "11111111-1111-1111-1111-111111111111",
+    shipping: baseShipping,
   };
 
   it("produz sempre o mesmo hash para a mesma entrada", () => {
@@ -278,5 +291,79 @@ describe("computeAcceptanceHash", () => {
       acceptanceText: "a\u0301",
     });
     expect(composed).toBe(decomposed);
+  });
+
+  // ── endereço de entrega no hash (D-044 · 2.C) ──
+
+  it("muda o hash se qualquer campo do endereço mudar", () => {
+    const base = computeAcceptanceHash(baseInput);
+
+    const mutants: Array<Partial<ShippingSnapshot>> = [
+      { recipient_name: "João da Silva" },
+      { zipcode: "04538132" },
+      { street: "Rua Oscar Freire" },
+      { number: "2000" },
+      { complement: "apto 34" },
+      { district: "Pinheiros" },
+      { city: "Rio de Janeiro" },
+      { state: "RJ" },
+    ];
+
+    for (const mutation of mutants) {
+      const other = computeAcceptanceHash({
+        ...baseInput,
+        shipping: { ...baseShipping, ...mutation },
+      });
+      expect(other).not.toBe(base);
+    }
+  });
+
+  it("CEP é normalizado (com ou sem hífen produz mesmo hash)", () => {
+    const base = computeAcceptanceHash(baseInput);
+    const withDash = computeAcceptanceHash({
+      ...baseInput,
+      shipping: { ...baseShipping, zipcode: "01310-100" },
+    });
+    expect(base).toBe(withDash);
+  });
+
+  it("UF é normalizada pra maiúscula", () => {
+    const base = computeAcceptanceHash(baseInput);
+    const lower = computeAcceptanceHash({
+      ...baseInput,
+      shipping: { ...baseShipping, state: "sp" },
+    });
+    expect(base).toBe(lower);
+  });
+
+  it("complemento vazio equivale a null (colapso de shape)", () => {
+    const withNull = computeAcceptanceHash({
+      ...baseInput,
+      shipping: { ...baseShipping, complement: null },
+    });
+    const withEmpty = computeAcceptanceHash({
+      ...baseInput,
+      shipping: { ...baseShipping, complement: "" },
+    });
+    const withSpaces = computeAcceptanceHash({
+      ...baseInput,
+      shipping: { ...baseShipping, complement: "   " },
+    });
+    expect(withNull).toBe(withEmpty);
+    expect(withNull).toBe(withSpaces);
+  });
+
+  it("whitespace extra em campos de endereço não muda o hash", () => {
+    const base = computeAcceptanceHash(baseInput);
+    const noisy = computeAcceptanceHash({
+      ...baseInput,
+      shipping: {
+        ...baseShipping,
+        street: `  ${baseShipping.street}   `,
+        city: ` ${baseShipping.city} `,
+        recipient_name: `  ${baseShipping.recipient_name}  `,
+      },
+    });
+    expect(base).toBe(noisy);
   });
 });

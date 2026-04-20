@@ -5,6 +5,107 @@
 
 ---
 
+## D-044 · Endereço + termo jurídico do aceite (onda 2.C.1) · 2026-04-20
+
+**Contexto:** a paciente aceita o plano no `/paciente/oferta/[id]`
+(onda 2.C.2, próxima). Antes de fazer UI, resolvemos o backend: o
+**que** ela aceita, **como** o endereço entra no consentimento, e
+**o quê** nunca vaza pra farmácia.
+
+**Decisões-chave desta onda:**
+
+- **Farmácia NÃO recebe endereço do paciente.** Regra operacional
+  importada como invariante de schema: no fluxo da onda 2.E, o
+  modal "enviar à farmácia" vai mostrar só `prescription_url` +
+  nome + CPF; o endereço só aparece no modal seguinte (`shipped`),
+  quando a clínica gera etiqueta. Isso é citado explicitamente no
+  **termo de aceite** (cláusula 4), virando compromisso legal com
+  o paciente.
+
+- **Endereço salvo em DOIS lugares com finalidades distintas.**
+  `fulfillments.shipping_*` é operacional (clínica edita livremente
+  se precisar); `plan_acceptances.shipping_snapshot` é legal
+  (trigger SQL bloqueia UPDATE/DELETE; entra no `acceptance_hash`).
+  A diferença é consciente: se alguém operacionalmente corrigir o
+  endereço depois do aceite (raríssimo, só em caso extremo), a
+  prova original do consentimento fica inviolada.
+
+- **Endereço faz parte do hash do aceite.** O `computeAcceptanceHash`
+  agora inclui um snapshot canonicalizado do endereço (CEP
+  só-dígitos, UF maiúscula, whitespace colapsado, complement null
+  quando vazio). Paciente muda de endereço depois de aceitar ≠
+  aceitou outro endereço — e hash comprovará.
+
+- **Texto do aceite é artefato versionado e imutável.**
+  `ACCEPTANCE_TERMS_VERSION = "v1-2026-04"` em
+  `src/lib/acceptance-terms.ts`. Mudança de texto = nova versão;
+  a versão v1 jamais é editada depois que foi publicada. Aceites
+  gravados no banco têm o texto exato exibido no momento, não só
+  a versão — porque `acceptance_text` é string completa, não
+  referência.
+
+- **Redação jurídica sênior, não jurídiquês.** O termo cita LGPD
+  art. 11 II "a" (base legal correta pra dado sensível de saúde
+  com consentimento), CFM 2.314/2022 (regulamento de telemedicina
+  vigente), CDC art. 49 (direito de arrependimento) invocando sua
+  exceção de produto personalizado na cláusula de não-reembolso
+  pós-manipulação, e Lei 5.991/1973 + 13.021/2014 (dispensação).
+  Registro formal, mas sem latinismos e sem vagueza.
+
+- **Política de cancelamento declarada em 3 faixas.** (i) Pré-
+  pagamento: livre sem ônus. (ii) Pós-pagamento, pré-farmácia:
+  reembolso integral via Asaas refund. (iii) Pós-farmácia:
+  sem reembolso (fundamento técnico no CDC art. 49 § único —
+  produto personalizado). Esse esquema mapeia 1:1 a máquina de
+  estados (`pending_payment`/`paid` → refundable;
+  `pharmacy_requested+` → não).
+
+- **Validação de endereço é pura e compartilhável.** Vivem em
+  `patient-address.ts` e retornam `ShippingSnapshot` canônico.
+  Mesma função vai validar no `/paciente/oferta` e no futuro
+  `/paciente/perfil` (se o paciente quiser atualizar endereço
+  entre tratamentos).
+
+- **Idempotência de corrida por constraint SQL.** Aceite paralelo
+  (usuário clica 2× rápido em abas diferentes): só um INSERT em
+  `plan_acceptances` vence (UNIQUE em `fulfillment_id`), o outro
+  pega `23505` e o código re-lê a row vencedora e devolve
+  `alreadyAccepted: true`. Estado final sempre consistente.
+
+- **Asaas fica fora desta onda.** `acceptFulfillment` termina em
+  `pending_payment` sem `payment_id`. A criação do payment vai
+  pra `ensurePaymentForFulfillment` (onda 2.C.2), chamada pelo
+  endpoint depois do aceite. Separação deixa o aceite
+  transacionalmente simples; se Asaas cair, o aceite fica
+  gravado e o retry só cria o payment.
+
+- **View operacional unificada.** `fulfillments_operational`
+  centraliza os joins que 2.E e 2.F vão consumir. Evita que cada
+  tela faça seu próprio join e acabe com shapes divergentes.
+
+**Trade-offs conscientes:**
+
+- O texto do aceite está hardcoded em TypeScript. Funciona bem
+  agora (não muda com frequência e tem revisão via PR), mas se
+  no futuro tiver que ser editável por admin sem deploy, migra
+  pra tabela `acceptance_templates` sem precisar migrar os
+  registros antigos (que já têm o texto snapshot).
+
+- Cache de endereço no `customers` via `UPDATE` não-transacional
+  pode ficar desatualizado se falhar. Aceite prossegue mesmo
+  assim — esse campo é pura conveniência (pré-preencher próximo
+  form), e a fonte da verdade pra despacho é
+  `fulfillments.shipping_*`.
+
+**Deliverables (backend):** 1 migração + 4 libs puras + 17+11+22+8
+testes novos + view operacional.
+
+**Status:** backend pronto, aplicado em produção (Supabase remoto).
+**Próximo:** onda 2.C.2 — UI do `/paciente/oferta/[id]` + integração
+Asaas pra criar payment vinculado ao fulfillment.
+
+---
+
 ## D-044 · Painel da médica "finalizar consulta" (onda 2.B) · 2026-04-20
 
 **Contexto:** a onda 2.A (schema D-044) criou `fulfillments`,

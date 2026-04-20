@@ -6,6 +6,87 @@
 
 ---
 
+## 2026-04-20 · Endereço + termo jurídico do aceite (D-044 · onda 2.C.1 · backend) · IA
+
+**Por quê:** a onda 2.B deixa a médica declarando "prescrevi o plano
+X" e o fulfillment nasce em `pending_acceptance`. Faltava a parte do
+paciente: (i) **formalizar** o aceite com registro legal probatório,
+(ii) **informar o endereço de entrega** sem friccção, e (iii) garantir
+que a farmácia **nunca** receba endereço. Esta entrega resolve
+backend puro: schema, texto jurídico versionado, hash determinístico
+com endereço dentro, orquestração transacional do aceite. UI e Asaas
+ficam pra 2.C.2.
+
+**Entregáveis:**
+
+- **Migração `20260424010000_fulfillment_shipping_and_acceptance_snapshot.sql`:**
+  - Colunas `shipping_*` em `public.fulfillments` (recipient_name,
+    zipcode, street, number, complement, district, city, state) pra
+    snapshot do endereço de despacho. Nullable até o aceite.
+  - Coluna `shipping_snapshot jsonb` em `public.plan_acceptances` pra
+    prova legal imutável do endereço aceito (o `fulfillment.shipping_*`
+    é operacional; `plan_acceptances.shipping_snapshot` é legal).
+  - View `public.fulfillments_operational` unindo fulfillment +
+    customer + plan + doctor + appointment + payment. Vai alimentar
+    painel admin (2.E) e card do paciente (2.F).
+  - Índice `idx_ff_shipping_city_state` pra painel admin filtrar por
+    região.
+
+- **`src/lib/fulfillments.ts` estendida:**
+  - Novo tipo `ShippingSnapshot`.
+  - `FulfillmentRow` ganhou 8 campos `shipping_*`.
+  - `PlanAcceptanceRow` ganhou `shipping_snapshot`.
+  - `computeAcceptanceHash` agora inclui `shipping` canonicalizado
+    (CEP só-dígitos, UF maiúscula, complement null↔"" unificados).
+    Mudança de CEP → hash diferente. Whitespace no endereço → hash
+    estável.
+  - +8 testes cobrindo canonicalização.
+
+- **`src/lib/patient-address.ts` (novo · puro):**
+  - `validateAddress(input, recipientFallback)` — valida CEP, UF
+    (contra lista das 27), rua, número, bairro, cidade,
+    recipient_name. Agrega múltiplos erros de uma vez.
+  - `snapshotToCustomerPatch` / `snapshotToFulfillmentPatch` —
+    conversão pra colunas do banco.
+  - `customerToAddressInput` — pré-preenche form com endereço
+    salvo.
+  - 22 testes cobrindo happy paths, erros agregados, round-trip.
+
+- **`src/lib/acceptance-terms.ts` (novo · puro):**
+  - `ACCEPTANCE_TERMS_VERSION = "v1-2026-04"` imutável.
+  - Template v1 com 9 cláusulas, redação jurídica formal, citações
+    à LGPD art. 11 II "a", CFM 2.314/2022, CDC art. 49, Lei
+    5.991/1973, Lei 13.021/2014. Explícita sobre a farmácia **não**
+    receber endereço. Explícita sobre não-reembolso pós-manipulação.
+  - `renderAcceptanceTerms(params)` com verificação defensiva
+    contra placeholders não-substituídos.
+  - 11 testes cobrindo substituição completa, presença de bases
+    normativas, imutabilidade do texto final.
+
+- **`src/lib/fulfillment-acceptance.ts` (novo · orquestração):**
+  - `acceptFulfillment(supabase, params)` carrega fulfillment com
+    joins (appointment + plan + customer), valida ownership (por
+    `user_id` OU `customer_id`), valida estado (só aceita
+    `pending_acceptance`; `pending_payment`/`paid` são idempotentes
+    e devolvem registro existente; resto rejeita), valida plano
+    ativo e prescrição presente, valida endereço, computa hash,
+    persiste em 3 passos (update customer cache, insert acceptance
+    imutável, update fulfillment → `pending_payment` +
+    snapshot shipping_*).
+  - Trata `23505` (unique collision) como idempotência positiva.
+  - 17 testes cobrindo payload, not_found, forbidden, estado,
+    endereço, plano, happy path, race e falhas de DB.
+
+**Resultado:**
+
+- 15 test files / 241 testes passando (+50 desde 2.B).
+- typecheck + ESLint limpos.
+- Migração aplicada no Supabase remoto.
+- Pronto pra 2.C.2 montar UI sobre esta base sem mexer em nada
+  do backend.
+
+---
+
 ## 2026-04-20 · Painel da médica "finalizar consulta" (D-044 · onda 2.B) · IA
 
 **Por quê:** a onda 2.A criou o schema do fulfillment, mas ninguém

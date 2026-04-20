@@ -54,8 +54,41 @@ export type FulfillmentRow = {
   tracking_note: string | null;
   cancelled_reason: string | null;
   updated_by_user_id: string | null;
+  // Snapshot do endereço de despacho (D-044 · 2.C).
+  // A farmácia NUNCA recebe esses campos — só a clínica no passo
+  // `pharmacy_requested` → `shipped`. Nullable até o aceite.
+  shipping_recipient_name: string | null;
+  shipping_zipcode: string | null;
+  shipping_street: string | null;
+  shipping_number: string | null;
+  shipping_complement: string | null;
+  shipping_district: string | null;
+  shipping_city: string | null;
+  shipping_state: string | null;
   created_at: string;
   updated_at: string;
+};
+
+/**
+ * Snapshot normalizado do endereço de entrega no momento do aceite.
+ *
+ * Motivo pra existir separado do `FulfillmentRow.shipping_*`: é este
+ * shape que entra no hash SHA-256 do aceite. Mudança de um caractere
+ * aqui = hash diferente = auditoria detecta tampering.
+ *
+ * O `recipient_name` default é o nome do paciente, mas a UI permite
+ * editar (ex: "entregar aos cuidados de João da Silva"). CEP, número
+ * e estado são compulsórios; complemento é opcional.
+ */
+export type ShippingSnapshot = {
+  recipient_name: string;
+  zipcode: string;   // 8 dígitos, só números
+  street: string;
+  number: string;
+  complement: string | null;
+  district: string;
+  city: string;
+  state: string;     // UF, 2 letras maiúsculas
 };
 
 export type PlanAcceptanceRow = {
@@ -67,6 +100,7 @@ export type PlanAcceptanceRow = {
   accepted_at: string;
   acceptance_text: string;
   acceptance_hash: string;
+  shipping_snapshot: ShippingSnapshot | null;
   user_id: string | null;
   ip_address: string | null;
   user_agent: string | null;
@@ -154,6 +188,12 @@ export type AcceptanceHashInput = {
   prescriptionUrl: string;
   /** UUID do appointment — amarra o aceite a uma consulta específica. */
   appointmentId: string;
+  /**
+   * Endereço de entrega aceito naquele momento. Se o paciente
+   * mudar de endereço depois, isso **não** quebra o hash original —
+   * o hash é a foto do consentimento, e a foto é imutável.
+   */
+  shipping: ShippingSnapshot;
 };
 
 /**
@@ -173,6 +213,7 @@ export function computeAcceptanceHash(input: AcceptanceHashInput): string {
     appointmentId: input.appointmentId.trim(),
     planSlug: input.planSlug.trim().toLowerCase(),
     prescriptionUrl: input.prescriptionUrl.trim(),
+    shipping: canonicalizeShipping(input.shipping),
   });
 
   return createHash("sha256").update(canonical, "utf8").digest("hex");
@@ -180,6 +221,28 @@ export function computeAcceptanceHash(input: AcceptanceHashInput): string {
 
 function normalizeText(raw: string): string {
   return raw.normalize("NFC").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Canonicaliza um snapshot de endereço pra entrar no hash.
+ *
+ * Mantém a ORDEM das chaves (alfabética) e o SHAPE estável
+ * (complement: null quando vazio, nunca string vazia). Isso é
+ * essencial — `{"complement":""}` e `{"complement":null}`
+ * produzem JSONs diferentes e hashes diferentes.
+ */
+function canonicalizeShipping(s: ShippingSnapshot): ShippingSnapshot {
+  const complement = s.complement?.trim() ?? "";
+  return {
+    city: normalizeText(s.city),
+    complement: complement.length > 0 ? normalizeText(complement) : null,
+    district: normalizeText(s.district),
+    number: normalizeText(s.number),
+    recipient_name: normalizeText(s.recipient_name),
+    state: s.state.trim().toUpperCase(),
+    street: normalizeText(s.street),
+    zipcode: s.zipcode.replace(/\D/g, ""),
+  };
 }
 
 // ────────────────────────────────────────────────────────────────────────

@@ -513,10 +513,27 @@ automatizado (estorno já foi em D-034; NF-e upload flow fica aqui).
       `src/lib/appointment-finalize.ts` + endpoint
       `POST /api/medico/appointments/[id]/finalize`. 21 testes
       novos (186 totais). `next build` verde.
-- [ ] **D-044 onda 2.C · Oferta + aceite formal do paciente.**
-      `/paciente/oferta/[appointment_id]` com prescrição + plano +
-      texto legal + checkbox + submit imutável. Redireciona pra
-      checkout Asaas autenticado vinculado ao appointment.
+- [x] **D-044 onda 2.C.1 · Backend do aceite (endereço + termo jurídico).**
+      (2026-04-20) Migração adiciona `shipping_*` em `fulfillments` e
+      `shipping_snapshot jsonb` em `plan_acceptances` + view
+      `fulfillments_operational`. `src/lib/fulfillments.ts` estende
+      hash com endereço canonicalizado. Novas libs puras
+      `src/lib/patient-address.ts` (validação + normalização) e
+      `src/lib/acceptance-terms.ts` (template jurídico v1-2026-04
+      com LGPD, CFM 2.314/2022, CDC art. 49, Lei 5.991/1973) e
+      `src/lib/fulfillment-acceptance.ts` (orquestração idempotente
+      do aceite: update customer cache + insert acceptance imutável
+      + update fulfillment → pending_payment + snapshot shipping).
+      Trata `23505` como idempotência. 50 testes novos (241
+      totais). Migração aplicada.
+- [ ] **D-044 onda 2.C.2 · UI do aceite + integração Asaas.**
+      Endpoint `POST /api/paciente/fulfillments/[id]/accept` +
+      página `/paciente/oferta/[appointment_id]` com resumo da
+      prescrição, plano, termo completo, form de endereço com
+      ViaCEP, checkbox legal e submit. Após aceite: chama
+      `ensurePaymentForFulfillment` (idempotente) pra criar cobrança
+      Asaas e redirecionar pro checkout hospedado. Card "oferta
+      pendente" em `/paciente`.
 - [ ] **D-044 onda 2.D · Webhook Asaas promove `paid`.** Extensão
       do handler existente pra mover fulfillment
       `pending_payment` → `paid`; WhatsApp "pagamento ok".
