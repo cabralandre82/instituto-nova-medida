@@ -5,6 +5,100 @@
 
 ---
 
+## D-045 · Inbox do operador solo como home do /admin (onda 3.A) · 2026-04-20
+
+**Contexto:** o cliente opera a plataforma **sozinho**. Com todo o
+loop já automatizado (lead → consulta → aceite → pagamento →
+fulfillment → entrega → confirmação), o gargalo virou a **atenção
+humana**: saber o que fazer hoje sem abrir 5 painéis e cruzar as
+informações na cabeça. O `/admin` home existia como dashboard de
+métricas ("receita do mês", "consultas hoje") e uma lista plana de
+"próximos passos" que não respeitava urgência.
+
+**Decisões:**
+
+1. **Inbox acima de dashboard.** O primeiro elemento depois da
+   saudação é a seção de cards de ação pendente, ordenada por
+   urgência. Métricas financeiras ficam abaixo. A primeira
+   pergunta que o painel responde é "o que precisa de mim hoje?",
+   não "como fomos esse mês?".
+
+2. **SLAs centralizados e conservadores.** Sete SLAs em
+   `SLA_HOURS`:
+   - `paid_to_pharmacy: 24h` (1 dia útil pra acionar farmácia)
+   - `pharmacy_to_shipped: 5 dias` (SLA da farmácia + recebimento)
+   - `shipped_to_delivered: 14 dias` (antes disso, cron 3.C
+     auto-conclui)
+   - `acceptance_stale: 72h` (paciente não aceitou indicação)
+   - `payment_stale: 48h` (aceitou e não pagou)
+   - `refund_stale: 48h` (no-show da médica sem refund)
+   - `reconcile_stuck: 2h` (D-035)
+   Mudar um SLA é uma constante: reflete em inbox hoje, alertas
+   WhatsApp (3.D) e crons (3.C) depois.
+
+3. **Itens abaixo de 50% do SLA não aparecem.** Regra
+   `classifyUrgency`:
+   - `age > sla` → `overdue`
+   - `sla * 0.5 < age <= sla` → `due_soon`
+   - caso contrário → `null` (oculta)
+   Um pedido pago há 2h não vira card; há 13h sim (due_soon);
+   há 25h sim (overdue). A inbox só mostra o que importa agora.
+
+4. **Pendências de estado são sempre `overdue`.** Médicas `pending`
+   e notificações `failed` não têm SLA temporal — são estados que
+   pedem ação humana. Quando aparecem (count > 0), ficam como
+   `overdue`. Isso simplifica o modelo mental: "se tá na inbox,
+   faça ou classifique".
+
+5. **Uma lib pura, uma fonte de verdade.** `src/lib/admin-inbox.ts`
+   centraliza tudo. A onda 3.D (alertas WhatsApp) vai consumir
+   exatamente o mesmo `AdminInbox` — não vai reimplementar
+   thresholds. Isso evita dois lugares onde mudar o SLA.
+
+6. **Count + idade em uma só query por categoria.**
+   `countWithOldest` faz `select({count: 'exact'}).order(asc).limit(1)`
+   — PostgREST devolve `count` e a primeira linha (a mais antiga)
+   numa única ida. 9 queries total (uma por categoria), todas em
+   `Promise.all`. Latência dominada pela query mais lenta.
+   Aceitável com `dynamic = "force-dynamic"`.
+
+7. **Tipagem do helper relaxada.** O `PostgrestFilterBuilder` tem
+   genéricos complexos pra refletir fielmente. Call sites continuam
+   type-safe (`.from(table).select(col)`); só o helper aceita
+   `unknown` e valida shape em runtime.
+
+**Consequências:**
+
+- **`/admin/page.tsx` reescrita.** Mantém métricas (receita, saldo
+  médicas, repasses, reconciliação) e sinalizações complementares
+  (reliability, divergências financeiras), mas **rebaixa-as** a
+  posições secundárias. O topo é inbox.
+- **Convenção futura.** Quando uma nova pendência surgir na
+  plataforma (ex: "médica não uploadou NF há > 14d"), adicionar
+  uma nova categoria em `loadAdminInbox` + SLA em `SLA_HOURS` é
+  mecânico. Nenhum código de UI muda — a seção renderiza todo
+  item que a lib devolve.
+- **Próximos passos ancorados:**
+  - **3.B · Busca global + ficha do paciente.** Admin precisa
+    abrir uma pessoa específica em 2 segundos quando recebe WA.
+  - **3.C · Crons operacionais.** `shipped → delivered` automático
+    após 14d; nudge de reconsulta; lead nurturing.
+  - **3.D · Alertas WhatsApp do admin pra ele mesmo.** Consumir
+    `AdminInbox` e disparar rollup matinal se counts.overdue > 0.
+    Nada de spam: uma mensagem por dia, agregada.
+
+**Relação com D-036.** D-036 introduziu alertas de reliability
+(pausar médica por no-shows). D-045 puxa o sinal `reliability_paused`
+pra seção "Sinalizações complementares" (não pra inbox principal)
+porque é gerencial, não operacional do dia.
+
+**Relação com D-040.** D-040 automatizou repasses. Divergências de
+conciliação (`reconciliation_critical`) ficam em "Sinalizações
+complementares", não inbox — são investigativas, não acionáveis
+em 5 min.
+
+---
+
 ## D-044 · Desligar CTAs públicos do fluxo antigo (onda 2.G · FINAL) · 2026-04-20
 
 **Contexto:** com ondas 2.A–2.F, o fluxo novo está inteiro:

@@ -6,6 +6,86 @@
 
 ---
 
+## 2026-04-20 · Inbox do operador solo em /admin (D-045 · onda 3.A) · IA
+
+**Por quê:** com a plataforma inteira (funil, financeiro, fulfillment,
+patient self-service) no ar e o cliente administrando sozinho, o
+`/admin` precisa ser uma **inbox de ações pendentes** — e não um
+dashboard de métricas. Abrir o painel de manhã tem que responder, em
+10 segundos, uma única pergunta: _"o que eu preciso fazer hoje?"_.
+
+**Entregáveis:**
+
+- **Nova lib pura `src/lib/admin-inbox.ts`.** Fonte única de verdade
+  pra ações pendentes agregadas de 9 origens (fulfillments em 5
+  estados, refunds, notificações falhas, reconciliação, médicas
+  pending). Retorna `AdminInbox { items: InboxItem[], counts, generatedAt }`
+  já ordenado por urgência (overdue antes de due_soon) e, dentro de
+  cada urgência, pelo item mais antigo. Cada `InboxItem` traz
+  `urgency`, `count`, `oldestAgeHours`, `slaHours`, `title`,
+  `description`, `href` — pronto pra consumir em UI ou em rollup
+  WhatsApp (onda 3.D).
+- **SLAs centralizados em `SLA_HOURS`.** Uma constante com sete SLAs:
+  `paid_to_pharmacy: 24h`, `pharmacy_to_shipped: 5d`,
+  `shipped_to_delivered: 14d`, `acceptance_stale: 72h`,
+  `payment_stale: 48h`, `refund_stale: 48h`, `reconcile_stuck: 2h`.
+  Mudar SLA em um lugar reflete em inbox, alertas futuros e crons.
+- **Classificação por idade vs. SLA.** `classifyUrgency(age, sla)`:
+  `overdue` se age > sla, `due_soon` se age está entre 50%-100% do
+  sla, `null` (oculta da inbox) abaixo disso. Itens sem SLA temporal
+  (notificações falhas, médicas pending) viram `overdue` direto
+  quando count > 0 — são pendências de estado, não de tempo.
+- **Reescrita do `/admin` home.** Saudação dinâmica (bom dia / tarde /
+  noite), subtítulo com contagem inline (`2 urgentes · 1 em atenção`
+  ou `inbox zerada 🌿`), seção principal de cards da inbox (cada um
+  com dot colorido, título imperativo, descrição, badge de contagem,
+  idade do mais antigo formatada em pt-BR, SLA e CTA "abrir →").
+  Abaixo da inbox: métricas financeiras (4 cards), health do cron
+  Daily, agenda do dia e bloco lateral de sinalizações complementares
+  (reliability + conciliação). Cards de inbox linkam direto pro local
+  da ação (`/admin/fulfillments`, `/admin/refunds`, etc.).
+- **Estética na paleta da casa.** `overdue` usa terracotta-500 (dot),
+  terracotta-50 (fundo), terracotta-300 (borda). `due_soon` usa
+  terracotta-300 (dot mais suave), cream-100 (fundo), ink-200
+  (borda). Nada de amarelo/vermelho off-brand.
+- **31 testes novos** (319 totais). Cobertura inclui: os 3
+  classificadores puros (`classifyUrgency`, `formatAge`,
+  `sortInboxItems`), 8 cenários de `loadAdminInbox` (vazia, paid
+  overdue, paid due_soon, paid descartado por idade baixa,
+  notification sem SLA como overdue, médica pending sem SLA como
+  overdue, múltiplas categorias ordenadas corretamente, erro
+  propagado, `generatedAt` determinístico).
+- **Build/typecheck/lint verdes.** `next build`, `tsc --noEmit` e
+  `next lint` passam limpos.
+
+**Decisões-chave:**
+
+- **Ocultar itens abaixo de 50% do SLA.** A inbox tem que mostrar o
+  que precisa de ação hoje — não o que tá tranquilo. Pedido pago há
+  2h não vira card (SLA 24h). Pedido pago há 13h vira `due_soon`.
+  Pedido pago há 25h vira `overdue`. Isso mantém a tela enxuta e
+  garante que quando algo aparece, importa.
+- **Uma só query por categoria.** `countWithOldest` faz `select(
+  { count: 'exact' }).order(ageField, asc).limit(1)` numa única
+  ida ao PostgREST: pega contagem total e o item mais antigo.
+  9 queries ao todo, todas em `Promise.all` — latência dominada
+  pela mais lenta. Aceitável pra Server Component com
+  `dynamic = "force-dynamic"`.
+- **Tipagem relaxada no helper.** O PostgrestFilterBuilder tem
+  tipos genéricos complexos demais pra refletir sem acoplar
+  detalhes internos da lib; o helper aceita `unknown` e valida
+  shape em runtime. Trade-off consciente — o controle de tipos
+  fica nos call sites (supabase.from(...).select(...)), que
+  continuam type-safe.
+- **SLAs conservadores, não agressivos.** `paid → pharmacy: 24h`
+  dá ao operador 1 dia útil pra despachar; `shipped → delivered:
+  14 dias` reflete que não forçamos o paciente a confirmar antes
+  — o cron 3.C vai auto-marcar `delivered` após prazo. Nada aqui
+  é pra dar alarme-cri-cri; é pra avisar quando algo realmente
+  ficou pra trás.
+
+---
+
 ## 2026-04-20 · Desligar CTAs públicos do fluxo antigo de checkout (D-044 · onda 2.G · final) · IA
 
 **Por quê:** com o novo fluxo completo (ondas 2.A–2.F), qualquer

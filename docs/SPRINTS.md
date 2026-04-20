@@ -590,6 +590,63 @@ automatizado (estorno já foi em D-034; NF-e upload flow fica aqui).
       `noindex` ativo). Auditoria confirma zero `href="/checkout"`
       em CTAs públicos. D-044 **completo**. `next build` verde.
 
+**Frente 6 — Operador solo (D-045):**
+
+Agora que o ciclo completo roda sozinho, a plataforma precisa
+**trabalhar a favor do operador solo** — reduzir o custo cognitivo
+de saber o que fazer hoje, quando cutucar uma farmácia, quando
+avisar um paciente. O objetivo dessa frente é transformar o
+`/admin` de dashboard em **ferramenta de operação diária**.
+
+- [x] **D-045 onda 3.A · Inbox do operador em `/admin`.**
+      (2026-04-20) Nova lib pura `src/lib/admin-inbox.ts` agrega
+      9 origens de pendência (fulfillments em 5 estados, refunds,
+      notificações falhas, reconciliação D-035, médicas pending)
+      em `AdminInbox` ordenado por urgência (`overdue` →
+      `due_soon`). SLAs centralizados em `SLA_HOURS` (paid→pharm
+      24h, pharm→shipped 5d, shipped→delivered 14d, acceptance
+      72h, payment 48h, refund 48h, reconcile 2h). Regra:
+      `age > sla` = overdue; `age > sla*0.5` = due_soon; abaixo
+      disso oculta. Pendências sem SLA temporal (notifs failed,
+      médicas pending) são overdue direto. `/admin/page.tsx`
+      reescrita: saudação dinâmica (bom dia/tarde/noite),
+      subtítulo com contagem inline, seção principal de cards
+      da inbox (cada um com dot, título, descrição, badge count,
+      idade pt-BR, SLA, CTA "abrir →" linkando pro local da ação),
+      métricas financeiras e sinalizações complementares
+      (reliability, conciliação) em posições secundárias.
+      Paleta casa (terracotta pra overdue, cream pra due_soon).
+      23 testes novos (319 totais). Build/typecheck/lint verdes.
+- [ ] **3.B · Busca global + ficha do paciente.** Barra de busca
+      no topo do admin (nome/WA/email/cpf) + `/admin/pacientes/[id]`
+      com ficha consolidada (consultas, fulfillments, pagamentos,
+      refunds, timeline). Abrir pessoa específica em 2 segundos
+      quando chega um WA.
+- [ ] **3.C · Crons operacionais.** `shipped → delivered`
+      automático após 14d; nudge de reconsulta pro paciente em
+      fim-de-ciclo; lead nurturing (MSG 2-10 roteiro original).
+      O que trabalha enquanto o operador dorme.
+- [ ] **3.D · Alertas WhatsApp do admin pra ele mesmo.** Consumir
+      `AdminInbox` e mandar rollup matinal (08:00 BRT) se
+      `counts.overdue > 0`. Uma mensagem por dia, agregada.
+      SLAs configuráveis em `admin_alert_settings` (ajuste do
+      threshold sem deploy).
+- [ ] **3.E · Self-service paciente.** Cancelar fulfillment em
+      `pending_acceptance`/`pending_payment`; editar endereço
+      de entrega até estado `paid` (antes de ir à farmácia).
+      Reduz WA de "troca de endereço" pro admin.
+- [ ] **3.F · Dashboard financeiro unificado.** `/admin/financeiro`
+      (já existe) ganha visão operador: receita vs. payout vs.
+      saldo em caixa, ticket médio, LTV projetado por paciente
+      ativo, funil (lead → consulta → aceite → pago → entregue).
+      Export CSV.
+- [ ] **3.G · Error log + export/purge LGPD + runbook.** Tabela
+      `app_errors` persistindo stack de 500s críticos (com
+      dedupe por fingerprint); export e purge LGPD via
+      `/admin/pacientes/[id]` (um botão, gera zip com tudo +
+      deleta com auditoria); `docs/RUNBOOK-OPERACIONAL.md` com
+      fluxogramas "o que fazer quando X acontecer".
+
 ---
 
 ## ⚪ Sprint 6 · Admin + Indicação + Analytics + Split de comissão
