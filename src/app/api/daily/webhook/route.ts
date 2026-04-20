@@ -47,7 +47,10 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getVideoProvider, parseDailyEvent, type NormalizedVideoEvent } from "@/lib/video";
-import { applyNoShowPolicy, classifyFinalStatus } from "@/lib/no-show-policy";
+import {
+  reconcileAppointmentFromMeetings,
+  buildMeetingSummaryFromWebhookEvents,
+} from "@/lib/reconcile";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -255,102 +258,29 @@ async function processEvent(appointmentId: string, event: NormalizedVideoEvent) 
   }
 
   if (event.type === "meeting.ended") {
-    const { data: cur } = await supabase
-      .from("appointments")
-      .select("status, started_at, ended_at")
-      .eq("id", appointmentId)
-      .maybeSingle();
-    if (!cur) return;
-
-    // Estados terminais: não regredimos.
-    const terminal = [
-      "completed",
-      "no_show_patient",
-      "no_show_doctor",
-      "cancelled_by_patient",
-      "cancelled_by_doctor",
-      "cancelled_by_admin",
-    ];
-    if (terminal.includes(cur.status as string)) {
-      console.log(
-        "[daily-webhook] meeting.ended em estado terminal, ignorando:",
-        cur.status
-      );
-      return;
-    }
-
-    // Quem entrou nessa sessão? (consulta participant.joined deste appointment)
-    const { data: joined } = await supabase
-      .from("daily_events")
-      .select("payload")
-      .eq("appointment_id", appointmentId)
-      .eq("event_type", "participant.joined");
-
-    let patientJoined = false;
-    let doctorJoined = false;
-    for (const row of joined ?? []) {
-      const p = (row.payload as { payload?: { is_owner?: boolean } })?.payload;
-      if (p?.is_owner === true) doctorJoined = true;
-      if (p?.is_owner === false) patientJoined = true;
-    }
-
-    const updates: Record<string, unknown> = {
-      ended_at: event.occurredAt?.toISOString() ?? new Date().toISOString(),
-    };
-    if (event.durationSeconds != null) {
-      updates.duration_seconds = event.durationSeconds;
-    }
-
-    // Lógica de status final:
-    //   - Ambos entraram E houve duração razoável (>= 3 min) → completed
-    //   - Só um entrou → no_show da outra parte
-    //   - Ninguém entrou (sala expirou vazia) → cancelled_by_admin
-    //                                            (não temos no_show_both)
-    const hasMeaningfulDuration =
-      cur.started_at != null &&
-      (event.durationSeconds == null || event.durationSeconds >= 180);
-
-    if (patientJoined && doctorJoined && hasMeaningfulDuration) {
-      updates.status = "completed";
-    } else if (patientJoined && !doctorJoined) {
-      updates.status = "no_show_doctor";
-    } else if (!patientJoined && doctorJoined) {
-      updates.status = "no_show_patient";
-    } else if (!patientJoined && !doctorJoined) {
-      updates.status = "cancelled_by_admin";
-      updates.cancelled_at = new Date().toISOString();
-      updates.cancelled_reason = "expired_no_one_joined";
-    } else {
-      // Ambos entraram mas duração curta (<3 min): conservador → completed.
-      // Médica pode revisar manualmente no painel se necessário.
-      updates.status = "completed";
-    }
-
-    await supabase.from("appointments").update(updates).eq("id", appointmentId);
-    console.log("[daily-webhook] appointment encerrado:", appointmentId, updates);
-
-    // Aplica política financeira/notificação de no-show (D-032). Rodamos
-    // depois do update pra garantir que o status no DB já reflete o
-    // desfecho final antes da lib carregar e processar. Não bloqueia a
-    // resposta HTTP em caso de falha — log + retry manual via admin.
-    const finalStatus = classifyFinalStatus(
-      updates.status as string,
-      (updates.cancelled_reason as string | undefined) ?? null
+    // Delega ao reconciler central (D-035). Reconstrói
+    // `MeetingSummary[]` a partir dos `participant.joined` persistidos
+    // em `daily_events` + durationSeconds do evento em si, mantendo
+    // a lógica de classificação uniforme entre webhook e cron.
+    const summary = await buildMeetingSummaryFromWebhookEvents(
+      appointmentId,
+      event.durationSeconds,
+      event.occurredAt,
+      event.meetingId
     );
-    if (finalStatus) {
-      try {
-        const policyResult = await applyNoShowPolicy({
-          appointmentId,
-          finalStatus,
-          cancelledReason:
-            (updates.cancelled_reason as string | undefined) ?? null,
-          source: "daily-webhook",
-        });
-        console.log("[daily-webhook] no-show policy:", policyResult);
-      } catch (e) {
-        console.error("[daily-webhook] no-show policy falhou:", e);
-      }
-    }
+    const result = await reconcileAppointmentFromMeetings({
+      appointmentId,
+      meetings: [summary],
+      source: "daily_webhook",
+    });
+    console.log("[daily-webhook] reconcile:", {
+      appointment_id: appointmentId,
+      action: result.action,
+      doctor_joined: result.doctorJoined,
+      patient_joined: result.patientJoined,
+      max_duration_s: result.maxDurationSeconds,
+      policy: result.noShowPolicy?.action ?? null,
+    });
     return;
   }
 

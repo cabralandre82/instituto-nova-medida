@@ -20,6 +20,8 @@ type DashboardData = {
   appointmentsToday: number;
   refundsPending: number;
   notificationsFailed: number;
+  reconcileStuck: number;
+  reconciledLast24hBySource: Record<string, number>;
 };
 
 async function loadDashboard(): Promise<DashboardData> {
@@ -31,6 +33,13 @@ async function loadDashboard(): Promise<DashboardData> {
   todayStart.setHours(0, 0, 0, 0);
   const tomorrow = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
 
+  // Janela pra "reconcile stuck" (D-035):
+  // appointments com scheduled_at há > 2h mas ainda em status não-terminal
+  // — o cron deveria ter fechado. Se a contagem crescer, algo está errado
+  // (provider fora do ar, credencial expirada, bug no reconciler).
+  const stuckCutoff = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
   const [
     docsActive,
     docsPending,
@@ -40,6 +49,8 @@ async function loadDashboard(): Promise<DashboardData> {
     appsToday,
     refundsPending,
     notifsFailed,
+    reconcileStuck,
+    reconciledRecent,
   ] = await Promise.all([
     supabase
       .from("doctors")
@@ -76,6 +87,18 @@ async function loadDashboard(): Promise<DashboardData> {
       .from("appointment_notifications")
       .select("id", { head: true, count: "exact" })
       .eq("status", "failed"),
+    supabase
+      .from("appointments")
+      .select("id", { head: true, count: "exact" })
+      .in("status", ["scheduled", "confirmed", "in_progress"])
+      .not("video_room_name", "is", null)
+      .lt("scheduled_at", stuckCutoff.toISOString())
+      .is("reconciled_at", null),
+    supabase
+      .from("appointments")
+      .select("reconciled_by_source")
+      .gte("reconciled_at", last24h.toISOString())
+      .not("reconciled_by_source", "is", null),
   ]);
 
   const sumCents = (rows: { amount_cents: number }[] | null) =>
@@ -99,7 +122,22 @@ async function loadDashboard(): Promise<DashboardData> {
     appointmentsToday: appsToday.count ?? 0,
     refundsPending: refundsPending.count ?? 0,
     notificationsFailed: notifsFailed.count ?? 0,
+    reconcileStuck: reconcileStuck.count ?? 0,
+    reconciledLast24hBySource: countBySource(
+      reconciledRecent.data as { reconciled_by_source: string | null }[] | null
+    ),
   };
+}
+
+function countBySource(
+  rows: { reconciled_by_source: string | null }[] | null
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const r of rows ?? []) {
+    const key = r.reconciled_by_source ?? "unknown";
+    out[key] = (out[key] ?? 0) + 1;
+  }
+  return out;
 }
 
 function brl(cents: number): string {
@@ -107,6 +145,19 @@ function brl(cents: number): string {
     style: "currency",
     currency: "BRL",
   });
+}
+
+function sourceLabel(source: string): string {
+  switch (source) {
+    case "daily_webhook":
+      return "webhook";
+    case "daily_cron":
+      return "cron";
+    case "admin_manual":
+      return "admin";
+    default:
+      return source;
+  }
 }
 
 export default async function AdminDashboard() {
@@ -157,6 +208,42 @@ export default async function AdminDashboard() {
           hint={`${d.earningsAvailable.count} earning${d.earningsAvailable.count === 1 ? "" : "s"} disponíve${d.earningsAvailable.count === 1 ? "l" : "is"}`}
           tone="ink"
         />
+      </section>
+
+      <section className="rounded-2xl bg-cream-50 border border-ink-100 p-5 mb-6">
+        <div className="flex items-start justify-between flex-wrap gap-3">
+          <div>
+            <p className="text-[0.72rem] uppercase tracking-[0.14em] text-ink-500 font-medium">
+              Reconciliação Daily · últimas 24h
+            </p>
+            <p className="mt-1 text-sm text-ink-700">
+              {Object.keys(d.reconciledLast24hBySource).length === 0 ? (
+                <span className="text-ink-500">
+                  Nenhum appointment reconciliado ainda — esperado em ambiente
+                  sem consultas recentes.
+                </span>
+              ) : (
+                <span>
+                  {Object.entries(d.reconciledLast24hBySource)
+                    .map(
+                      ([source, count]) =>
+                        `${count} via ${sourceLabel(source)}`
+                    )
+                    .join(" · ")}
+                </span>
+              )}
+            </p>
+          </div>
+          {d.reconcileStuck > 0 ? (
+            <div className="rounded-xl bg-terracotta-50 border border-terracotta-200 px-3 py-2 text-sm text-terracotta-700 font-medium">
+              {d.reconcileStuck} em atraso (&gt;2h)
+            </div>
+          ) : (
+            <div className="rounded-xl bg-sage-50 border border-sage-200 px-3 py-2 text-sm text-sage-700 font-medium">
+              Cron saudável
+            </div>
+          )}
+        </div>
       </section>
 
       <section className="grid lg:grid-cols-2 gap-6">
@@ -233,10 +320,23 @@ export default async function AdminDashboard() {
                 </span>
               </li>
             )}
+            {d.reconcileStuck > 0 && (
+              <li className="flex items-start gap-3">
+                <span className="mt-1 h-2 w-2 rounded-full bg-terracotta-500 flex-shrink-0" />
+                <span>
+                  <strong className="text-ink-800">{d.reconcileStuck}</strong>{" "}
+                  consulta{d.reconcileStuck === 1 ? "" : "s"} vencida
+                  {d.reconcileStuck === 1 ? "" : "s"} há mais de 2h sem
+                  fechamento. Cron de reconciliação Daily deveria ter agido —
+                  verificar logs em <span className="font-mono text-xs">/api/internal/cron/daily-reconcile</span>.
+                </span>
+              </li>
+            )}
             {d.doctorsActive > 0 &&
               d.payoutsDraft.count === 0 &&
               d.refundsPending === 0 &&
-              d.notificationsFailed === 0 && (
+              d.notificationsFailed === 0 &&
+              d.reconcileStuck === 0 && (
                 <li className="flex items-start gap-3">
                   <span className="mt-1 h-2 w-2 rounded-full bg-sage-500 flex-shrink-0" />
                   <span>Tudo em dia.</span>

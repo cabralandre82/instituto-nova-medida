@@ -6,6 +6,94 @@
 
 ---
 
+## 2026-04-20 · Cron de reconciliação Daily (D-035) · IA
+
+**Por quê:** D-029 bloqueou o webhook Daily em produção (bug no cliente
+`superagent` deles contra hosts Vercel). Sem webhook,
+`meeting.ended` nunca chega, appointments ficam travados, política de
+no-show D-032 nunca dispara, `reliability_incidents` fica zerado,
+UI D-033/D-034 nunca recebem casos reais, E2E validation fica inviável.
+Em vez de esperar Daily consertar ou migrar DNS, implementamos fallback
+via polling da REST API do próprio Daily — destrava tudo sem depender
+de terceiros.
+
+**Entregáveis:**
+
+- **Migration 014** (`20260420220000_appointment_reconciliation.sql`):
+  `appointments.reconciled_at` + `appointments.reconciled_by_source`
+  (`daily_webhook` | `daily_cron` | `admin_manual`) + índice parcial
+  pra dashboards.
+
+- **`src/lib/video.ts`**: novo método `listMeetingsForRoom()` no
+  `VideoProvider` batendo em Daily `GET /meetings?room=…`. Normaliza
+  resposta em `MeetingSummary[]` com participantes e duração individual.
+
+- **`src/lib/reconcile.ts`** (novo): `reconcileAppointmentFromMeetings()`
+  é a função central consumida por webhook E cron. Decide status final
+  (completed, no_show_patient, no_show_doctor, cancelled_by_admin expired)
+  a partir da lista de meetings, atualiza appointment (status, ended_at,
+  duration_seconds, started_at, reconciled_at, reconciled_by_source),
+  chama `applyNoShowPolicy()` quando aplicável. Idempotente em 2 níveis:
+  colunas de audit trail + guard existente de `no_show_policy_applied_at`.
+
+- **Webhook Daily refatorado** (`src/app/api/daily/webhook/route.ts`):
+  `meeting.ended` agora delega a `reconcileAppointmentFromMeetings({source:
+  'daily_webhook'})` via `buildMeetingSummaryFromWebhookEvents()` que
+  reconstrói `MeetingSummary` a partir de `daily_events.participant.joined`
+  já persistidos. ~80 linhas de lógica duplicada removidas.
+
+- **Novo cron** (`src/app/api/internal/cron/daily-reconcile/route.ts`):
+  agendado `*/5 * * * *`. Janela `scheduled_at + consultation_minutes`
+  entre `now() - 2h` e `now() - 5min`, não-terminais, com
+  `video_room_name IS NOT NULL` e `reconciled_at IS NULL`. Pra cada
+  candidato, chama Daily REST + reconciler com `source='daily_cron'`.
+  Autenticado por `CRON_SECRET`. Report estruturado por action.
+
+- **`vercel.json`**: cron + `maxDuration: 60`.
+
+- **Dashboard admin**: novo card "Reconciliação Daily · últimas 24h"
+  com breakdown por source + alerta `reconcileStuck` na seção
+  "Próximos passos" quando houver appointments > 2h sem fechamento.
+
+**Operação:**
+
+- **Coexistência**: cron e webhook rodam em paralelo por design. Webhook
+  ganha em tempo real; cron é safety net com ~5 min de latência.
+  `reconciled_by_source` marca qual caminho fechou cada appointment —
+  observabilidade pura.
+- **Quando D-029 voltar**: nada muda. Dashboard vai mostrar
+  `daily_webhook` subindo e `daily_cron` caindo naturalmente.
+- **Sem env nova pra configurar**: reaproveita `DAILY_API_KEY` e
+  `DAILY_DOMAIN` já existentes.
+
+**Smoke tests:**
+
+```bash
+# 1. Sem CRON_SECRET → 401 (esperado)
+curl -i https://instituto-nova-medida.vercel.app/api/internal/cron/daily-reconcile
+
+# 2. Com secret → JSON report
+curl -H "x-cron-secret: $CRON_SECRET" \
+  https://instituto-nova-medida.vercel.app/api/internal/cron/daily-reconcile
+
+# 3. Forçar janela maior (manual):
+curl -H "x-cron-secret: $CRON_SECRET" \
+  "https://instituto-nova-medida.vercel.app/api/internal/cron/daily-reconcile?limit=100"
+```
+
+Response em ambiente sem appointments na janela:
+`{ ok: true, processed: 0, by_action: {...todas_em_zero}, errors: 0, empty_meetings: 0 }`.
+
+**Limites conhecidos:**
+
+- Janela do cron assume `consultation_minutes` máximo de 60 min. Se
+  médica configurar consulta de 90 min, estender a janela no código.
+- Sem retry dentro da mesma execução em caso de erro transiente do
+  Daily; como próximo tick vem em 5 min e `reconciled_at IS NULL` é
+  o filtro, a reconciliação retenta naturalmente.
+
+---
+
 ## 2026-04-20 · Estorno automático via Asaas API (D-034) · IA
 
 **Por quê:** A UI D-033 deixou o flow de estorno funcional mas manual

@@ -5,6 +5,175 @@
 
 ---
 
+## D-035 · Cron de reconciliação Daily como fallback do webhook · 2026-04-20
+
+**Contexto:** D-029 bloqueou o registro do webhook Daily em produção
+por um bug conhecido no cliente `superagent` usado pelos servidores do
+Daily — ele falha o SSL handshake quando o host de destino é do Vercel
+(problema recorrente reportado no support Daily desde meados de 2025).
+Consequência cascata em produção:
+
+1. `meeting.ended` nunca chega → appointments ficam travados em
+   `scheduled`/`in_progress` depois de terminar.
+2. Política de no-show (D-032) nunca dispara → `reliability_incidents`
+   = 0 em produção, UI D-033 "Estornos" sempre vazia, D-034 (estorno
+   automático) nunca é gatilhado.
+3. Earnings de consulta nunca são criadas via webhook
+   (`PAYMENT_RECEIVED` sozinho não basta — o webhook Daily é o que
+   efetivamente marca `completed`).
+4. Validação E2E ficou inviável.
+
+As opções "tradicionais" dependem de terceiros: esperar Daily consertar
+o cliente, ou migrar DNS pra Cloudflare (que tem um request path
+diferente e tende a não reproduzir o bug). Ambas fora da minha
+janela de controle direto.
+
+**Alternativas consideradas:**
+
+1. **Esperar Daily consertar.** ❌ Sem SLA; já se arrasta.
+2. **Migrar DNS pra Cloudflare.** ⚠️ Resolve mas é operação arriscada
+   pra todo o domínio, afeta cache de assets, certificados, e ainda
+   deixaria o sistema como **SPOF do webhook** — qualquer segundo
+   incidente nesse caminho trava tudo de novo.
+3. **Polling da REST API do Daily com cron.** ✅ **Escolhido.** O Daily
+   expõe `GET /meetings?room=…` que retorna todas as sessões da sala
+   com presença individual por participante. Um Vercel Cron a cada
+   5 min varre appointments cujo fim previsto está atrás no passado
+   recente e chama a mesma lógica de fechamento que o webhook chamaria.
+4. **Polling + remover o webhook.** ❌ Ingênuo. Webhook é tempo-real
+   (bom pra UX "paciente mal saiu e já apareceu 'completada'"), cron
+   tem ~5 min de latência. Manter os dois é defesa em profundidade.
+5. **Reescrever a lógica no cron.** ❌ Duas fontes de verdade
+   divergindo ao longo do tempo é certeza. Extrair pra função única.
+
+**Decisão:** Implementar cron de reconciliação, refatorar o webhook
+pra delegar à mesma função de reconciliação, manter os dois
+coexistindo. Schema ganha trilha de auditoria pra sabermos quem
+fechou cada appointment (webhook vs cron).
+
+**Implementação:**
+
+- **Migration 014** (`appointments.reconciled_at` +
+  `reconciled_by_source`) pra audit trail. Idempotente: só preenche
+  na primeira reconciliação; subsequentes são noop na coluna. Índice
+  parcial pra queries de observabilidade ("últimos N reconciliados
+  por source").
+
+- **`src/lib/video.ts` · `listMeetingsForRoom()`**  
+  Novo método no `VideoProvider` batendo em Daily
+  `GET /meetings?room=…&timeframe_*=…&limit=20`. Normaliza resposta em
+  `MeetingSummary[]` com participantes e duração individual. 404 da
+  sala (sala já deletada) vira `[]` — reconciler trata como "sala
+  expirou vazia".
+
+- **`src/lib/reconcile.ts` · `reconcileAppointmentFromMeetings()`**  
+  Função central, consumida por webhook E cron. Dada uma lista de
+  `MeetingSummary[]`, decide o status final:
+  - `cancelled_by_admin` + `expired_no_one_joined` se ninguém entrou.
+  - `no_show_patient` se só a médica.
+  - `no_show_doctor` se só o paciente.
+  - `completed` se ambos (curta ou longa).
+  
+  Atualiza `appointments` com status, ended_at, duration_seconds,
+  started_at (se ainda nulo — extrai do earliest `join_time`),
+  reconciled_at e reconciled_by_source. Chama `applyNoShowPolicy()`
+  para `no_show_*` e `cancelled_by_admin_expired`. Idempotente nos
+  dois níveis: colunas de audit + guard interno do `applyNoShowPolicy`.
+  
+  Helper `buildMeetingSummaryFromWebhookEvents()` reconstrói
+  `MeetingSummary` a partir de `daily_events.participant.joined`
+  acumulados — mantém a API do reconciler única (sempre recebe
+  `MeetingSummary[]`), independente da origem.
+
+- **Identificação de médica vs paciente**  
+  Via REST `/meetings`, Daily não expõe `is_owner` por participante.
+  O reconciler cruza o `user_name` retornado com o
+  `display_name`/`full_name` do doctor do appointment (match
+  case-insensitive, sem acentos). Já o webhook continua lendo
+  `payload.is_owner` diretamente de `participant.joined` (gravado
+  desde a criação dos eventos D-029 originais), então não depende
+  do matching por nome. Quando os dois caminhos rodam, o webhook
+  costuma ganhar pela latência menor.
+
+- **Webhook refatorado**  
+  `meeting.ended` em `src/app/api/daily/webhook/route.ts` agora chama
+  `buildMeetingSummaryFromWebhookEvents()` + `reconcileAppointmentFromMeetings({source: 'daily_webhook'})`.
+  A lógica de decisão sai do webhook; vira um adapter que apenas
+  traduz o shape do evento. Reduz ~80 linhas duplicadas e garante
+  que webhook e cron permaneçam sincronizados sobre o que é
+  "no_show".
+
+- **Novo cron `/api/internal/cron/daily-reconcile`**  
+  Agendado `*/5 * * * *` no Vercel. Carrega appointments cujo
+  `scheduled_at + consultation_minutes` está entre `now() - 2h` e
+  `now() - 5min`, não-terminais, com `video_room_name`, e com
+  `reconciled_at IS NULL`. Pra cada um, chama
+  `provider.listMeetingsForRoom()` + `reconcileAppointmentFromMeetings({source: 'daily_cron'})`.
+  Autenticado por `CRON_SECRET` igual aos outros crons. Log
+  estruturado por execução com quebra por action
+  (`completed`/`no_show_patient`/`no_show_doctor`/`cancelled_expired`).
+
+- **Janela**  
+  - `MIN_AGE_MINUTES = 5` → margem pra paciente/médica ainda estar na
+    sala passando do horário.
+  - `MAX_AGE_HOURS = 2` → lookback defensivo pra cobrir webhook
+    atrasado (se D-029 voltar) + retries de execuções falhadas do
+    próprio cron.
+  - `DEFAULT_LIMIT = 25`, `MAX_LIMIT = 200` — cabe em 60s de Vercel
+    function, com folga pro fetch no Daily.
+
+- **Dashboard admin (D-033 extendido)**  
+  Novo card "Reconciliação Daily · últimas 24h" com breakdown por
+  source (`webhook` / `cron` / `admin`). Alerta `reconcileStuck` na
+  seção "Próximos passos" quando aparecerem appointments > 2h sem
+  fechamento — sinal de que o cron está falhando ou o provider está
+  fora do ar.
+
+**Princípios reafirmados:**
+
+1. **Defesa em profundidade > single source of truth em integrações
+   externas.** Webhook é ótimo em regime normal, mas depende de um
+   sistema que não controlamos. Polling em cima dá resiliência
+   pagando 5 min de latência — trade aceitável pro domínio (política
+   de no-show não é tempo-real crítico).
+2. **Uma função, dois gatilhos.** Webhook e cron compartilham
+   `reconcileAppointmentFromMeetings` — drift de lógica zero.
+3. **Audit trail antes de precisar debugar.** `reconciled_by_source`
+   é barato no schema e caro se não existir no dia que alguém
+   perguntar "por que esse appointment fechou como no_show?".
+4. **Idempotência em todos os níveis.** Coluna de audit + guard na
+   política de no-show. Webhook voltando em produção amanhã + cron
+   rodando em paralelo = zero conflito.
+
+**Consequências imediatas:**
+
+- Produção volta a fechar appointments automaticamente (via cron)
+  mesmo com D-029 bloqueado.
+- `reliability_incidents` volta a ser populado — destrava regras
+  futuras (#3 da lista de TODOs).
+- Políticas D-032/D-034 passam a efetivamente gatilhar em produção.
+- E2E validation fica viável: paciente + médica entram na sala, saem;
+  em até 5 min o status terminal aparece; se for no-show, estorno
+  pipeline completo roda (flag D-034 ligada em sandbox primeiro).
+
+**Pendências explícitas:**
+
+- **Sprint futura / D-029 resolvido**: quando o webhook voltar a
+  registrar em produção, nada muda — os dois continuam rodando. Ganho
+  é observabilidade via dashboard: "% de reconcile via webhook"
+  sobe naturalmente e o cron vira contingência silenciosa.
+- **Limite de consulta muito longa**: hoje assume máximo 60 min pra
+  calcular janela do cron. Se médica configurar 90 min no futuro, a
+  janela precisa aumentar ou o cron pode pular appointments. Trivial
+  de estender (ler o consultation_minutes máximo do sistema), mas
+  deixei hardcoded até surgir o caso.
+- **Retry automático em falha de Daily API**: hoje o cron só loga o
+  erro e avança. Como o próximo tick em 5 min vai tentar de novo, é
+  naturalmente auto-resiliente. Se precisarmos de retry mais rápido
+  (dentro da mesma execução), trivial.
+
+---
+
 ## D-034 · Estorno automático via Asaas API (`REFUNDS_VIA_ASAAS`) · 2026-04-20
 
 **Contexto:** D-033 entregou a superfície admin pra marcar refunds como

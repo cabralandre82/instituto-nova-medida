@@ -154,7 +154,55 @@ export interface VideoProvider {
    * pra ler header + body.
    */
   validateWebhook(req: Request): Promise<WebhookValidation>;
+
+  /**
+   * Lista sessões de uma sala (REST API). Usado pelo cron de
+   * reconciliação (D-035) como fallback do webhook. Retorna lista
+   * vazia se ninguém entrou na sala — aí tratamos como "sala expirou
+   * vazia".
+   */
+  listMeetingsForRoom(input: ListMeetingsInput): Promise<MeetingSummary[]>;
 }
+
+export type ListMeetingsInput = {
+  roomName: string;
+  /** Filtra por `start_time >= timeframeStart` (Unix segundos). Opcional. */
+  timeframeStart?: number;
+  /** Filtra por `start_time <= timeframeEnd` (Unix segundos). Opcional. */
+  timeframeEnd?: number;
+};
+
+/**
+ * Resumo normalizado de uma sessão de meeting — forma independente
+ * de provider. Consumido pelo reconciler pra decidir status final
+ * da consulta sem depender de eventos `participant.joined` persistidos.
+ */
+export type MeetingSummary = {
+  meetingId: string | null;
+  /** `start_time` em UTC, em segundos. */
+  startTime: number | null;
+  /** Duração total da sessão em segundos. */
+  durationSeconds: number | null;
+  /** Se a sessão ainda está em curso. */
+  ongoing: boolean;
+  /** Participantes da sessão, com presença individual. */
+  participants: MeetingParticipantSummary[];
+  /** Raw do provider — útil pra debug. */
+  raw: unknown;
+};
+
+export type MeetingParticipantSummary = {
+  /** `user_id` do provider (estável por participante). */
+  userId: string | null;
+  /** `user_name` passado no meeting-token (ex: "Dra. Ana" ou "Paciente"). */
+  userName: string | null;
+  /** Tempo total em segundos que esse participante ficou na sala. */
+  durationSeconds: number | null;
+  /** Quando entrou (Unix segundos). */
+  joinTime: number | null;
+  /** Se é owner (criado com is_owner=true no meeting-token). */
+  isOwner: boolean | null;
+};
 
 // ────────────────────────────────────────────────────────────────────────
 // DailyProvider — implementação concreta
@@ -193,6 +241,58 @@ type DailyRoomResponse = {
 type DailyMeetingTokenResponse = {
   token: string;
 };
+
+/**
+ * Resposta do Daily `GET /meetings`.
+ * Docs: https://docs.daily.co/reference/rest-api/meetings/list-meetings
+ *
+ * Cada meeting tem 1+ participantes com presença individual. Quando
+ * ninguém entrou na sala, a API responde `data: []` (não um meeting
+ * vazio) — o reconciler trata isso como "sala expirou vazia".
+ */
+type DailyMeetingsResponse = {
+  total_count?: number;
+  data?: DailyMeetingRow[];
+};
+
+type DailyMeetingRow = {
+  id?: string;
+  room?: string;
+  start_time?: number;
+  duration?: number;
+  ongoing?: boolean;
+  participants?: DailyParticipantRow[];
+};
+
+type DailyParticipantRow = {
+  user_id?: string;
+  user_name?: string;
+  participant_id?: string;
+  join_time?: number;
+  duration?: number;
+  // Daily não expõe `is_owner` diretamente no /meetings. A gente
+  // reconstrói a propriedade a partir do `user_name` comparando com
+  // o nome da médica no reconciler — mais detalhe em scheduling.ts.
+};
+
+function normalizeDailyMeeting(row: DailyMeetingRow): MeetingSummary {
+  return {
+    meetingId: row.id ?? null,
+    startTime: typeof row.start_time === "number" ? row.start_time : null,
+    durationSeconds: typeof row.duration === "number" ? row.duration : null,
+    ongoing: row.ongoing === true,
+    participants: (row.participants ?? []).map((p) => ({
+      userId: p.user_id ?? p.participant_id ?? null,
+      userName: p.user_name ?? null,
+      durationSeconds: typeof p.duration === "number" ? p.duration : null,
+      joinTime: typeof p.join_time === "number" ? p.join_time : null,
+      // A API pública não expõe is_owner. Deixamos null e o
+      // reconciler cruza com o doctor_name do appointment.
+      isOwner: null,
+    })),
+    raw: row,
+  };
+}
 
 async function dailyRequest<T>(
   apiKey: string,
@@ -331,6 +431,42 @@ class DailyProvider implements VideoProvider {
     if (result.ok) return { ok: true };
     if (result.status === 404) return { ok: true, notFound: true };
     return { ok: false, error: result.error };
+  }
+
+  async listMeetingsForRoom(
+    input: ListMeetingsInput
+  ): Promise<MeetingSummary[]> {
+    const cfg = loadDailyConfig();
+    const params = new URLSearchParams({ room: input.roomName });
+    if (input.timeframeStart != null) {
+      params.set("timeframe_start", String(input.timeframeStart));
+    }
+    if (input.timeframeEnd != null) {
+      params.set("timeframe_end", String(input.timeframeEnd));
+    }
+    // Limite alto — um appointment típico tem 1-2 sessões no histórico.
+    // Se a sala foi reutilizada, pode ter mais; cortamos aqui pra não
+    // explodir a resposta.
+    params.set("limit", "20");
+
+    const result = await dailyRequest<DailyMeetingsResponse>(
+      cfg.apiKey,
+      "GET",
+      `/meetings?${params.toString()}`
+    );
+
+    if (!result.ok) {
+      // 404 = sala não existe mais no Daily (já foi deletada ou
+      // nunca existiu). Tratamos como "sem sessões" pra o reconciler
+      // decidir — geralmente "cancelled_by_admin/expired".
+      if (result.status === 404) return [];
+      throw new Error(
+        `[daily] listMeetingsForRoom falhou (${result.status}): ${result.error}`
+      );
+    }
+
+    const rows = result.data.data ?? [];
+    return rows.map(normalizeDailyMeeting);
   }
 
   async validateWebhook(req: Request): Promise<WebhookValidation> {

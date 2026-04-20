@@ -130,11 +130,12 @@ Foco: subir um fluxo end-to-end "paciente paga → agenda → médica
 atende → recebe earning → admin paga via PIX no fim do mês". Sem fila
 on-demand ainda, sem Memed ainda — esses entram na 4.2.
 
-**Status (2026-04-20):** 90% entregue. Bloqueio conhecido: registro
-do webhook no Daily via `POST /v1/webhooks` falha por bug HTTP/2 do
-superagent antigo do Daily (D-029). Código está deployed e funcional
-— telemetria de consulta fica parada até migrarmos atrás do
-Cloudflare com `institutonovamedida.com.br`.
+**Status (2026-04-20):** 95% entregue. Bloqueio D-029 (webhook Daily
+falha no registro por bug HTTP/2 do superagent deles) **mitigado** em
+D-035: cron `/api/internal/cron/daily-reconcile` rodando a cada 5 min
+fecha o ciclo dos appointments via polling da Daily REST API. Webhook
+continuará no código — quando Daily consertar ou migrarmos pra
+Cloudflare, passa a rodar em paralelo como caminho primário.
 
 **Entregáveis:**
 
@@ -229,6 +230,19 @@ Cloudflare com `institutonovamedida.com.br`.
       iniciados fora da nossa UI (painel Asaas direto, chargeback).
       **Flag OFF em produção por default** — valida em sandbox antes de
       flipar. Full-refund-only por ora.
+- [x] **Cron de reconciliação Daily (D-035)** — destrava produção
+      enquanto D-029 (webhook Daily) permanece bloqueado. Migration 014
+      adiciona `appointments.reconciled_at` + `reconciled_by_source`.
+      Novo `src/lib/reconcile.ts` centraliza `reconcileAppointmentFromMeetings()`,
+      consumido por webhook (refatorado) E pelo novo cron
+      `/api/internal/cron/daily-reconcile` (agendado `*/5 * * * *`). Cron
+      faz polling da Daily REST API `/meetings`, aplica mesma lógica de
+      classificação (completed / no_show_patient / no_show_doctor /
+      cancelled_expired) e dispara `applyNoShowPolicy()`. Dashboard
+      admin ganha card de observabilidade com breakdown por source e
+      alerta quando há appointments > 2h sem fechamento.
+      Defesa em profundidade: quando D-029 voltar, webhook e cron
+      continuam rodando em paralelo.
 - [ ] **Auth:** roles `doctor` e `admin` no Supabase, middleware
       protegendo `/medico/*` e `/admin/*`
 - [ ] **API routes:**

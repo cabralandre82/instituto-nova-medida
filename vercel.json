@@ -16,6 +16,9 @@
     },
     "src/app/api/internal/cron/wa-reminders/route.ts": {
       "maxDuration": 60
+    },
+    "src/app/api/internal/cron/daily-reconcile/route.ts": {
+      "maxDuration": 60
     }
   },
   "crons": [
@@ -26,6 +29,10 @@
     {
       "path": "/api/internal/cron/wa-reminders",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/internal/cron/daily-reconcile",
+      "schedule": "*/5 * * * *"
     }
   ],
   "headers": [
