@@ -8,6 +8,7 @@ import {
   enqueueImmediate,
   scheduleRemindersForAppointment,
 } from "@/lib/notifications";
+import { markRefundProcessed } from "@/lib/refunds";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -167,7 +168,8 @@ export async function POST(req: Request) {
             supabase,
             body.event,
             payment.status,
-            internalPaymentId
+            internalPaymentId,
+            asaasPaymentId
           );
         }
       }
@@ -221,13 +223,14 @@ async function handleEarningsLifecycle(
   supabase: ReturnType<typeof getSupabaseAdmin>,
   event: string,
   paymentStatus: string,
-  internalPaymentId: string
+  internalPaymentId: string,
+  asaasPaymentId: string | null
 ): Promise<void> {
   // Busca appointment vinculado ao payment (se houver)
   const { data: appt } = await supabase
     .from("appointments")
     .select(
-      "id, doctor_id, kind, customer_id, status, scheduled_at, recording_consent, video_room_url, video_patient_token, customers ( name )"
+      "id, doctor_id, kind, customer_id, status, scheduled_at, recording_consent, video_room_url, video_patient_token, refund_required, refund_processed_at, customers ( name )"
     )
     .eq("payment_id", internalPaymentId)
     .maybeSingle();
@@ -368,6 +371,58 @@ async function handleEarningsLifecycle(
       console.error("[asaas-webhook] clawback falhou:", result.error);
     } else if (result.clawbacks > 0) {
       console.log("[asaas-webhook] clawbacks criados:", result.clawbacks);
+    }
+
+    // ── Dedupe de refund processed (D-034) ────────────────────────
+    // Quando o webhook chega pra um appointment que a política de
+    // no-show marcou como `refund_required=true` mas que ainda não
+    // foi processado, fechamos o ciclo automaticamente. Três casos
+    // possíveis cobertos:
+    //
+    //   1. Admin clicou "Estornar no Asaas" na nossa UI → nossa API
+    //      já marcou refund_processed_at ANTES deste webhook chegar.
+    //      `markRefundProcessed` retorna alreadyProcessed=true, noop.
+    //
+    //   2. Admin abriu o painel Asaas e estornou por lá sem usar a
+    //      nossa UI. Este webhook é a única forma do sistema saber.
+    //      Marcamos agora com processedBy=null (assinatura do webhook).
+    //
+    //   3. Paciente abriu chargeback direto na operadora do cartão.
+    //      Mesmo tratamento do caso 2 — é estorno igual, mesmo motivo.
+    //
+    // Rodar apenas em PAYMENT_REFUNDED (estorno efetivamente concluído).
+    // PAYMENT_REFUND_IN_PROGRESS é transiente — esperamos o final.
+    const apptRefundFlagged =
+      (appt as { refund_required?: boolean }).refund_required === true;
+    const apptNotProcessed =
+      (appt as { refund_processed_at?: string | null })
+        .refund_processed_at == null;
+    const isFinalRefund =
+      event === "PAYMENT_REFUNDED" || paymentStatus === "REFUNDED";
+
+    if (apptRefundFlagged && apptNotProcessed && isFinalRefund) {
+      const markResult = await markRefundProcessed({
+        appointmentId: appt.id as string,
+        method: "asaas_api",
+        externalRef: asaasPaymentId,
+        notes:
+          event === "PAYMENT_CHARGEBACK_REQUESTED" ||
+          event === "PAYMENT_CHARGEBACK_DISPUTE"
+            ? "Fechado via webhook — chargeback do paciente."
+            : "Fechado via webhook — estorno concluído no Asaas.",
+        processedBy: null, // null = sem admin humano direto nesta ação
+      });
+      if (!markResult.ok) {
+        console.error(
+          "[asaas-webhook] markRefundProcessed via webhook falhou:",
+          markResult
+        );
+      } else {
+        console.log("[asaas-webhook] refund marcado via webhook:", {
+          appointment_id: appt.id,
+          already: markResult.alreadyProcessed,
+        });
+      }
     }
   }
 }

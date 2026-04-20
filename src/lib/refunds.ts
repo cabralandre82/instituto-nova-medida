@@ -26,8 +26,25 @@
  */
 
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { refundPayment } from "@/lib/asaas";
 
 export type RefundMethod = "manual" | "asaas_api";
+
+/**
+ * Feature flag do estorno automático via Asaas API.
+ *
+ * OFF por default — UI segue só com registro manual (fluxo D-033).
+ * Admin precisa setar `REFUNDS_VIA_ASAAS=true` explicitamente no env
+ * do Vercel pra habilitar.
+ *
+ * A escolha por default OFF é conservadora: em caso de bug na
+ * integração (ex: Asaas retornando erro inesperado e a gente marcando
+ * como processado sem ter estornado), o raio é zero — máximo que
+ * acontece é o admin ter que marcar manual, status-quo.
+ */
+export function isAsaasRefundsEnabled(): boolean {
+  return process.env.REFUNDS_VIA_ASAAS === "true";
+}
 
 export type RefundInput = {
   appointmentId: string;
@@ -38,6 +55,16 @@ export type RefundInput = {
   processedBy?: string | null;
 };
 
+export type RefundErrorCode =
+  | "appointment_not_found"
+  | "refund_not_required"
+  | "already_processed"
+  | "db_error"
+  | "asaas_disabled"
+  | "asaas_payment_missing"
+  | "asaas_api_error"
+  | "appointment_no_payment";
+
 export type RefundResult =
   | {
       ok: true;
@@ -45,16 +72,16 @@ export type RefundResult =
       processedAt: string;
       method: RefundMethod;
       alreadyProcessed: boolean;
+      externalRef?: string | null;
     }
   | {
       ok: false;
       appointmentId: string;
-      code:
-        | "appointment_not_found"
-        | "refund_not_required"
-        | "already_processed"
-        | "db_error";
+      code: RefundErrorCode;
       message: string;
+      /** Dados da resposta do Asaas quando aplicável (pra debug). */
+      asaasStatus?: number | null;
+      asaasCode?: string | null;
     };
 
 type AppointmentRefundRow = {
@@ -162,34 +189,196 @@ export async function markRefundProcessed(
     processedAt: now,
     method: input.method,
     alreadyProcessed: false,
+    externalRef: input.externalRef?.trim() || null,
   };
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Estorno automático via Asaas API (D-034)
+// ────────────────────────────────────────────────────────────────────────────
+
 /**
- * Placeholder pra Sprint 5 — estorno automático via Asaas API.
- *
- * Quando implementarmos:
- *   1. Carregar appointment + payment_id + asaas_payment_id.
- *   2. Chamar `POST /payments/{asaas_payment_id}/refund` com value (full
- *      ou partial) e description.
- *   3. Em sucesso, chamar `markRefundProcessed()` com
- *      method='asaas_api', external_ref=refund.id, processedBy=admin.id.
- *   4. Em falha, não marcar — retornar erro pro admin decidir entre
- *      re-tentar ou marcar manual.
- *
- * Por ora, a função retorna erro "not_implemented" pra deixar explícito no
- * código que o fluxo existe mas está desligado. O endpoint admin de refund
- * nem expõe essa opção ainda — UI só oferece manual.
+ * Linhas que precisamos pra montar o refund request.
  */
-export async function processRefundViaAsaas(_input: {
+type AppointmentForRefundRow = {
+  id: string;
+  refund_required: boolean;
+  refund_processed_at: string | null;
+  payment_id: string | null;
+  customer_id: string | null;
+  doctor_id: string | null;
+  status: string;
+  payments: {
+    id: string;
+    asaas_payment_id: string | null;
+    amount_cents: number;
+    status: string;
+  } | null;
+};
+
+/**
+ * Estorna a cobrança vinculada ao appointment via Asaas API e marca
+ * como processado no nosso lado. Full refund only (pedido explícito do
+ * operador — política D-032 assume devolução integral em casos de no-show
+ * da médica ou sala expirada).
+ *
+ * Fluxo:
+ *   1. Carregar appointment + payment associado.
+ *   2. Validar pré-condições (refund_required, não processado, tem
+ *      asaas_payment_id).
+ *   3. Chamar `POST /payments/{id}/refund` no Asaas.
+ *   4. Em sucesso, marcar via `markRefundProcessed(method='asaas_api')`.
+ *      `external_ref` = asaas_payment_id (suficiente pra rastreio no
+ *      painel Asaas + dedupe com webhook `PAYMENT_REFUNDED`).
+ *   5. Em falha do Asaas, NÃO marcar — devolver erro estruturado pra
+ *      UI decidir entre retry ou pivot pro modo manual.
+ *
+ * Idempotência:
+ *   - Guard em `refund_processed_at IS NULL` evita duplo estorno.
+ *   - Asaas também rejeita 2º refund com `invalid_action` — cinto +
+ *     suspensório.
+ */
+export async function processRefundViaAsaas(input: {
   appointmentId: string;
   processedBy: string;
 }): Promise<RefundResult> {
-  return {
-    ok: false,
-    appointmentId: _input.appointmentId,
-    code: "db_error",
-    message:
-      "processRefundViaAsaas() ainda não implementado — Sprint 5. Use markRefundProcessed(method='manual') até lá.",
-  };
+  if (!isAsaasRefundsEnabled()) {
+    return {
+      ok: false,
+      appointmentId: input.appointmentId,
+      code: "asaas_disabled",
+      message:
+        "Estorno automático via Asaas está desligado (REFUNDS_VIA_ASAAS!='true'). Use method='manual'.",
+    };
+  }
+
+  const supabase = getSupabaseAdmin();
+
+  const { data: appt, error: loadErr } = await supabase
+    .from("appointments")
+    .select(
+      "id, refund_required, refund_processed_at, payment_id, customer_id, doctor_id, status, payments ( id, asaas_payment_id, amount_cents, status )"
+    )
+    .eq("id", input.appointmentId)
+    .maybeSingle();
+
+  if (loadErr) {
+    console.error("[refunds/asaas] load:", loadErr);
+    return {
+      ok: false,
+      appointmentId: input.appointmentId,
+      code: "db_error",
+      message: loadErr.message,
+    };
+  }
+  if (!appt) {
+    return {
+      ok: false,
+      appointmentId: input.appointmentId,
+      code: "appointment_not_found",
+      message: "Appointment não encontrado.",
+    };
+  }
+
+  const row = appt as unknown as AppointmentForRefundRow;
+
+  if (!row.refund_required) {
+    return {
+      ok: false,
+      appointmentId: row.id,
+      code: "refund_not_required",
+      message:
+        "Appointment não tem refund_required=true. A política de no-show não marcou direito a estorno.",
+    };
+  }
+
+  if (row.refund_processed_at) {
+    return {
+      ok: true,
+      appointmentId: row.id,
+      processedAt: row.refund_processed_at,
+      method: "asaas_api",
+      alreadyProcessed: true,
+    };
+  }
+
+  if (!row.payment_id || !row.payments) {
+    return {
+      ok: false,
+      appointmentId: row.id,
+      code: "appointment_no_payment",
+      message:
+        "Appointment sem payment vinculado. Não há o que estornar via Asaas — marque manualmente.",
+    };
+  }
+
+  const asaasPaymentId = row.payments.asaas_payment_id;
+  if (!asaasPaymentId) {
+    return {
+      ok: false,
+      appointmentId: row.id,
+      code: "asaas_payment_missing",
+      message:
+        "Payment vinculado não tem asaas_payment_id. Isso indica que o pagamento não foi efetivado no Asaas — marque manualmente.",
+    };
+  }
+
+  const asaas = await refundPayment({
+    asaasPaymentId,
+    description: `Estorno automático · appointment ${row.id} · política de no-show (D-032)`,
+  });
+
+  if (!asaas.ok) {
+    console.error("[refunds/asaas] refund API falhou:", {
+      appointment_id: row.id,
+      asaas_payment_id: asaasPaymentId,
+      status: asaas.status,
+      code: asaas.code,
+      message: asaas.message,
+    });
+    return {
+      ok: false,
+      appointmentId: row.id,
+      code: "asaas_api_error",
+      message: `Asaas rejeitou o estorno: ${asaas.message}`,
+      asaasStatus: asaas.status,
+      asaasCode: asaas.code,
+    };
+  }
+
+  // Asaas aceitou. Agora marcar no nosso lado — se isto falhar, o
+  // estorno JÁ rodou no Asaas (dinheiro já saiu). A flag vai ficar
+  // dessincronizada e o webhook `PAYMENT_REFUNDED` provavelmente
+  // conserta (ele também chama markRefundProcessed). Se não consertar,
+  // é trabalho pro admin via SQL — melhor dessincronizar no favor
+  // do paciente do que manter a flag dizendo "precisa estornar".
+  const mark = await markRefundProcessed({
+    appointmentId: row.id,
+    method: "asaas_api",
+    externalRef: asaasPaymentId,
+    notes: `Estorno automático via Asaas API. Status Asaas após request: ${asaas.data.status}.`,
+    processedBy: input.processedBy,
+  });
+
+  if (!mark.ok) {
+    console.error(
+      "[refunds/asaas] CRITICAL: Asaas aceitou mas markRefundProcessed falhou:",
+      mark
+    );
+    return {
+      ok: false,
+      appointmentId: row.id,
+      code: "db_error",
+      message: `Asaas estornou com sucesso mas falhou ao registrar internamente: ${mark.message}. Webhook deve reconciliar — monitore.`,
+    };
+  }
+
+  console.log("[refunds/asaas] estorno concluído:", {
+    appointment_id: row.id,
+    asaas_payment_id: asaasPaymentId,
+    asaas_status: asaas.data.status,
+    by: input.processedBy,
+  });
+
+  return mark;
 }

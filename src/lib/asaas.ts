@@ -359,6 +359,69 @@ export async function getPaymentPixQrCode(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Refunds (estorno total ou parcial)
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Resposta do endpoint `POST /payments/{id}/refund`.
+ *
+ * O Asaas devolve o objeto Payment atualizado (status='REFUNDED' ou
+ * 'REFUND_IN_PROGRESS'). Não existe um id separado pra "o refund" na V3
+ * pública — a entidade Payment mantém o histórico de estornos e muda de
+ * status. Por isso, quando a gente precisa de um `external_ref` único no
+ * nosso lado, a estratégia é usar o próprio `asaasPaymentId` — que é
+ * suficiente pra rastrear "quem foi estornado" no painel Asaas e no
+ * webhook `PAYMENT_REFUNDED`.
+ *
+ * Docs: https://docs.asaas.com/reference/estornar-cobranca
+ */
+export type AsaasRefundResponse = AsaasPayment & {
+  // campos que o V3 às vezes expõe além do Payment bruto
+  dateRefunded?: string;
+  refundDescription?: string;
+};
+
+export type RefundPaymentInput = {
+  asaasPaymentId: string;
+  /** Valor em centavos a estornar. Se omitido, refund total. */
+  amountCents?: number;
+  /** Descrição que fica no painel Asaas pro operador entender o contexto. */
+  description?: string;
+};
+
+/**
+ * Solicita estorno de uma cobrança ao Asaas.
+ *
+ * Comportamento da Asaas:
+ *   - PIX: estorno automático e instantâneo (status vira REFUNDED).
+ *   - Cartão: requer N dias de compensação pro adquirente; devolve
+ *     REFUND_IN_PROGRESS e dispara PAYMENT_REFUNDED no webhook depois.
+ *   - Boleto: não tem estorno automático — o Asaas devolve erro, a
+ *     devolução tem que ser manual via TED.
+ *
+ * Idempotência: tentar estornar 2x a mesma cobrança devolve erro
+ * `invalid_action` do Asaas (não é um problema de dados). A gente
+ * protege a montante via `markRefundProcessed()` que só chama isto
+ * quando `refund_processed_at IS NULL`.
+ */
+export async function refundPayment(
+  input: RefundPaymentInput
+): Promise<AsaasResult<AsaasRefundResponse>> {
+  const body: Record<string, unknown> = {};
+  if (typeof input.amountCents === "number" && input.amountCents > 0) {
+    body.value = centsToReais(input.amountCents);
+  }
+  if (input.description) {
+    body.description = input.description;
+  }
+  return request<AsaasRefundResponse>(
+    "POST",
+    `/payments/${input.asaasPaymentId}/refund`,
+    Object.keys(body).length > 0 ? body : undefined
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Subscriptions (estrutura pronta pra Sprint 5)
 // ────────────────────────────────────────────────────────────────────────────
 

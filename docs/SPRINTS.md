@@ -217,6 +217,18 @@ Cloudflare com `institutonovamedida.com.br`.
       páginas (`/admin/notifications`, `/admin/refunds`) + 2 API
       routes + 2 alertas novos no dashboard. UI só oferece modo
       manual hoje; Sprint 5 liga o modo `asaas_api` sem refactor.
+- [x] **Estorno automático via Asaas API (D-034)** — antecipa o que
+      seria Sprint 5. `refundPayment()` em `src/lib/asaas.ts` chama
+      `POST /payments/{id}/refund` com full refund; `processRefundViaAsaas()`
+      em `src/lib/refunds.ts` orquestra + valida + marca com
+      `method='asaas_api'`. API `/api/admin/appointments/[id]/refund`
+      aceita `method` no body com default inteligente pelo flag
+      `REFUNDS_VIA_ASAAS`. UI `/admin/refunds` ganha botão primário
+      "Estornar no Asaas" + fallback manual inline auto-expandido em
+      erro. Webhook Asaas `PAYMENT_REFUNDED` fecha o loop pra refunds
+      iniciados fora da nossa UI (painel Asaas direto, chargeback).
+      **Flag OFF em produção por default** — valida em sandbox antes de
+      flipar. Full-refund-only por ora.
 - [ ] **Auth:** roles `doctor` e `admin` no Supabase, middleware
       protegendo `/medico/*` e `/admin/*`
 - [ ] **API routes:**
@@ -275,6 +287,7 @@ da "consulta agora".
 - Templates de mensagem 1-clique pra médica (Sprint 5)
 - Detector de alertas de efeitos colaterais (Sprint 5)
 - Reembolso self-service (Sprint 7)
+- Refund parcial (quando surgir caso real — hoje tudo full refund)
 
 ### Definição de pronto da Sprint 4.1
 

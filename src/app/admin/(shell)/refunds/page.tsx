@@ -20,8 +20,8 @@
  * (`refund_processed_method`, `refund_external_ref`).
  */
 
-import Link from "next/link";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { isAsaasRefundsEnabled } from "@/lib/refunds";
 import { RefundForm } from "./_RefundForm";
 
 export const dynamic = "force-dynamic";
@@ -130,6 +130,8 @@ export default async function RefundsPage() {
     loadProcessed(),
   ]);
 
+  const asaasEnabled = isAsaasRefundsEnabled();
+
   const totalPendingCents = pending.reduce(
     (acc, r) => acc + (r.payments?.amount_cents ?? 0),
     0
@@ -166,10 +168,14 @@ export default async function RefundsPage() {
           tone="ink"
         />
         <Card
-          label="Método hoje"
-          value="Manual"
-          hint="Asaas API: Sprint 5"
-          tone="sage"
+          label="Método ativo"
+          value={asaasEnabled ? "Asaas API" : "Manual"}
+          hint={
+            asaasEnabled
+              ? "REFUNDS_VIA_ASAAS=true"
+              : "ative REFUNDS_VIA_ASAAS pra automatizar"
+          }
+          tone={asaasEnabled ? "sage" : "ink"}
         />
       </section>
 
@@ -190,7 +196,11 @@ export default async function RefundsPage() {
         ) : (
           <div className="space-y-4">
             {pending.map((r) => (
-              <PendingCard key={r.id} row={r} />
+              <PendingCard
+                key={r.id}
+                row={r}
+                asaasEnabled={asaasEnabled}
+              />
             ))}
           </div>
         )}
@@ -296,7 +306,13 @@ function Card({
   );
 }
 
-function PendingCard({ row }: { row: PendingRow }) {
+function PendingCard({
+  row,
+  asaasEnabled,
+}: {
+  row: PendingRow;
+  asaasEnabled: boolean;
+}) {
   const patient = row.customers?.name ?? "(sem cliente)";
   const doctor =
     row.doctors?.display_name ?? row.doctors?.full_name ?? "—";
@@ -397,11 +413,22 @@ function PendingCard({ row }: { row: PendingRow }) {
           </dl>
 
           <div className="mt-3 rounded-xl bg-cream-50 border border-ink-100 p-3 text-xs text-ink-600 leading-relaxed">
-            <strong className="text-ink-800">Fluxo:</strong> 1) abra o
-            Asaas, localize o payment <span className="font-mono">{asaasId ?? "—"}</span>, emita o
-            estorno. 2) copie o id do refund (algo como{" "}
-            <span className="font-mono">rf_xxx</span>) ou o end-to-end do
-            PIX. 3) cole ao lado + clique <em>Registrar</em>.
+            {asaasEnabled ? (
+              <>
+                <strong className="text-ink-800">Fluxo automático:</strong>{" "}
+                clique <em>Estornar no Asaas</em>. O sistema chama a API do
+                Asaas, registra o estorno e marca o caso como processado.
+                Se falhar, aparece a opção manual como fallback.
+              </>
+            ) : (
+              <>
+                <strong className="text-ink-800">Fluxo manual:</strong> 1)
+                abra o Asaas, localize o payment{" "}
+                <span className="font-mono">{asaasId ?? "—"}</span>, emita
+                o estorno. 2) copie o id do refund ou end-to-end PIX. 3)
+                cole ao lado + clique <em>Registrar</em>.
+              </>
+            )}
           </div>
         </div>
 
@@ -409,6 +436,8 @@ function PendingCard({ row }: { row: PendingRow }) {
           <RefundForm
             appointmentId={row.id}
             defaultNotes={row.no_show_notes ?? ""}
+            asaasEnabled={asaasEnabled}
+            hasAsaasPayment={Boolean(asaasId)}
           />
         </div>
       </div>

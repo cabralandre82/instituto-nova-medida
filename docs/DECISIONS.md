@@ -5,6 +5,144 @@
 
 ---
 
+## D-034 · Estorno automático via Asaas API (`REFUNDS_VIA_ASAAS`) · 2026-04-20
+
+**Contexto:** D-033 entregou a superfície admin pra marcar refunds como
+processados, mas o estorno em si ficou 100% manual: admin abre o painel
+Asaas, emite o refund no botão deles, cola o id de volta no nosso form.
+Funcional, mas caro em atenção humana e com janela de erro (operador
+esquece de marcar no nosso lado após estornar → flag `refund_required=true`
+fica pra sempre e o caso reaparece como pendente amanhã).
+
+A ideia original era deixar essa automação pra "Sprint 5". Mas o
+ganho é grande e o risco é cirúrgico:
+
+- **Ganho**: 2 cliques ("Estornar no Asaas" → toast de sucesso) em vez
+  de 5-6 passos cross-tab com copy/paste de ids frágeis.
+- **Risco técnico**: a Asaas API pode falhar (saldo insuficiente no
+  wallet do Asaas, payment antigo, adquirente recusando, cartão
+  invalidado). Se a gente marcar como processado confiando cegamente na
+  resposta 200, pode ter flag dessincronizada.
+
+**Alternativas consideradas:**
+
+1. **Esperar Sprint 5** (status quo D-033, full-manual). ❌ Adiciona
+   atrito recorrente em ação de alta frequência no crescimento.
+2. **Automatizar sem feature flag** (commit direto, tudo via API). ❌
+   Sem válvula de escape em produção se a integração der problema.
+3. **Automatizar com feature flag OFF em produção + fallback manual
+   inline em caso de erro Asaas.** ✅ **Escolhido.** O flag
+   `REFUNDS_VIA_ASAAS=false` começa desligado em produção, permitindo
+   validar em dev/sandbox antes do flip. Quando a Asaas API retornar
+   erro, a UI mostra o erro e **auto-abre o form manual pré-preenchido**
+   com o contexto da falha — zero atrito pro admin pivotar.
+4. **Automatizar + remover o manual.** ❌ Ingênuo. Há sempre casos
+   patológicos onde o manual é necessário (Asaas sobrecarregado,
+   chargeback em andamento, pagamento em boleto).
+5. **Refund parcial** (passar `value` no payload). ❌ Por ora. A
+   política D-032 assume devolução integral em no-show. Casos de
+   refund parcial (médica atendeu meia consulta) viram pedido manual
+   conversado por fora — raros o bastante pra não complicar a UI.
+
+**Decisão:** Implementar estorno automático **full-refund-only** via
+Asaas API, gated por `REFUNDS_VIA_ASAAS=true`, com fallback manual
+inline em erro. Webhook Asaas `PAYMENT_REFUNDED` fecha o loop
+idempotentemente quando o admin estorna direto no painel Asaas ou
+quando há chargeback.
+
+**Implementação:**
+
+- **`src/lib/asaas.ts` · `refundPayment(input)`**  
+  Novo helper que chama `POST /payments/{id}/refund`. Payload: `{ value?,
+  description? }` — omitimos `value` pra garantir full refund. Resposta
+  tipada como `AsaasRefundResponse` (Payment atualizado com
+  `status=REFUNDED` ou `REFUND_IN_PROGRESS`).
+
+- **`src/lib/refunds.ts` · `isAsaasRefundsEnabled()` + `processRefundViaAsaas()`**  
+  `isAsaasRefundsEnabled()` é um one-liner que lê
+  `process.env.REFUNDS_VIA_ASAAS === "true"`. Por default OFF —
+  conservador. `processRefundViaAsaas({ appointmentId, processedBy })`
+  orquestra: carrega appointment + payment, valida pré-condições
+  (`refund_required=true`, não já processado, tem `asaas_payment_id`),
+  chama `refundPayment()`, e **só** marca `refund_processed_at` após a
+  Asaas confirmar. Se a Asaas falhar, retorna `RefundResult` com
+  `code='asaas_api_error'` + `asaasStatus`/`asaasCode` — sem tocar o
+  banco. `external_ref` usado é o `asaas_payment_id` mesmo (suficiente
+  pra rastreio no painel Asaas + dedupe com webhook).
+
+- **`POST /api/admin/appointments/[id]/refund`**  
+  Agora aceita `method?: 'manual' | 'asaas_api'` no body. Resolução:
+  - Sem `method` → usa `asaas_api` se flag ligada, senão `manual`
+    (preserva comportamento D-033).
+  - `asaas_api` explícito com flag desligada → 400.
+  - Erros do Asaas viram HTTP 502 com `{ code, error, asaas_status,
+    asaas_code }` estruturados pra UI pivotar.
+
+- **`src/app/admin/(shell)/refunds/_RefundForm.tsx` (reescrito)**  
+  Quando `asaasEnabled=true`: botão primário grande verde "Estornar no
+  Asaas" + link sutil "ou registrar manualmente (fallback)" que
+  expande o form antigo. Quando `asaasEnabled=false`: comportamento
+  D-033 inalterado. Em erro do Asaas, fallback manual é
+  auto-expandido e o textarea de notas vem **pré-preenchido** com o
+  motivo da falha (`"Tentativa automática falhou: {msg}.
+  Processado manualmente."`) — admin só precisa colar a referência e
+  clicar.
+
+- **Dedupe no webhook Asaas**  
+  `src/app/api/asaas/webhook/route.ts` ganhou bloco que, em
+  `PAYMENT_REFUNDED` (ou `status=REFUNDED`), se o appointment tiver
+  `refund_required=true` e `refund_processed_at IS NULL`, chama
+  `markRefundProcessed({method:'asaas_api', externalRef:asaasPaymentId,
+  processedBy:null})`. Isso cobre três casos limpamente:
+  1. **Nossa UI estornou**: o status já foi marcado antes do webhook
+     chegar; `markRefundProcessed` retorna `alreadyProcessed=true` e vira
+     noop.
+  2. **Admin estornou direto no painel Asaas**: webhook é o único sinal;
+     marca com `processedBy=null` sinalizando que não houve admin humano
+     na nossa trilha.
+  3. **Chargeback da bandeira**: tratamento idêntico — estorno é estorno.
+
+**Princípios reafirmados:**
+
+1. **Feature flags são válvulas, não botões.** Começamos OFF em
+   produção, validamos em sandbox, flipamos. Fácil desligar se algo
+   correr mal.
+2. **Fallback inline é mais honesto que retry automático.** Se a Asaas
+   recusou o refund, há motivo — admin precisa ler e decidir. Não é
+   problema só de "tentar de novo".
+3. **Webhook fecha o loop mesmo quando a ação veio de fora.** O sistema
+   é consistente independente de quem disparou o estorno.
+4. **Full-refund-only até haver caso real de parcial.** Evita UI
+   confusa pra cobrir 0,5% dos casos.
+
+**Consequências imediatas:**
+
+- Admin em sandbox vê os 2 botões e pode testar o fluxo automático
+  contra pagamentos de teste Asaas.
+- Admin em produção continua vendo só o manual (flag OFF) —
+  comportamento D-033 preservado.
+- Quando aprovado + CNPJ regularizado, basta setar
+  `REFUNDS_VIA_ASAAS=true` no Vercel e flipar. Zero deploy adicional.
+- Webhook `PAYMENT_REFUNDED` agora reconcilia automático casos
+  "admin estornou direto no Asaas" que antes ficavam eternamente
+  pendentes na UI D-033.
+
+**Pendências explícitas pra uma evolução futura:**
+
+- **Refund parcial**: schema não suporta hoje. Quando necessário, adicionar
+  `amount_cents` opcional no input de `processRefundViaAsaas()` +
+  repassar pro `refundPayment()` (que já aceita o argumento), e expor
+  campo na UI.
+- **Retry automático em erro transiente do Asaas**: hoje a UI só exibe
+  o erro e pivota pro manual. Se `asaas_code` indicar erro transiente
+  (timeout, 500), poderíamos auto-retry 1 vez com backoff — decisão
+  pra quando tivermos estatística de erro real.
+- **Métrica "% estornos via Asaas vs manual"**: a coluna
+  `refund_processed_method` permite, basta uma query no dashboard admin
+  quando houver volume suficiente pra ser interessante.
+
+---
+
 ## D-033 · Observabilidade operacional do admin (`/admin/notifications` + `/admin/refunds`) · 2026-04-20
 
 **Contexto:** D-031 (fila persistente de WhatsApp) e D-032 (política de
