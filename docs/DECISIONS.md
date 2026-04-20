@@ -5,6 +5,97 @@
 
 ---
 
+## D-044 · Painel da médica "finalizar consulta" (onda 2.B) · 2026-04-20
+
+**Contexto:** a onda 2.A (schema D-044) criou `fulfillments`,
+`plan_acceptances`, e os 3 campos novos em `appointments`
+(`prescribed_plan_id`, `prescription_status`, `finalized_at`). Tudo
+dormindo — ninguém escrevia essas colunas nem gerava fulfillment.
+A onda 2.B é a **primeira** entrada real de dados nesse pipeline: é
+onde a médica declara o desfecho clínico e, se houver prescrição,
+nasce o fulfillment que alimenta todas as ondas seguintes.
+
+**Decisões-chave desta onda:**
+
+- **Só 2 decisões possíveis**: `declined` (avaliou sem indicar) ou
+  `prescribed` (indicou plano). Não existe "pendente" — médica
+  finaliza = decisão tomada. Isso simplifica a UI e elimina estado
+  intermediário ambíguo. `prescription_status='none'` continua
+  existindo só pra consultas **ainda não finalizadas**.
+
+- **Idempotência por `finalized_at`**: uma vez preenchido, qualquer
+  nova tentativa de finalizar retorna 409 `already_finalized`. A
+  UI nesse caso mostra a consulta em modo read-only. Correção
+  explícita só via admin (deliberado: fechamento clínico é evento
+  legal, não deve ser reversível pela própria médica).
+
+- **Fulfillment nasce aqui, não no pagamento**. Decisão contra-
+  intuitiva defensável: `pending_acceptance` representa "médica
+  já prescreveu, aguardando aceite do paciente". Isso dá
+  visibilidade operacional imediata (admin vê que há prescrição
+  pendente no paciente), permite follow-up de WhatsApp sem
+  depender do pagamento e mantém 1:1 com `appointment`.
+
+- **Upsert idempotente em `fulfillments`** na lib, não só via
+  constraint. Checa existência antes do INSERT pra devolver o `id`
+  correto mesmo em caso de re-execução (ex: UPDATE de appointment
+  falhou depois do INSERT — próxima tentativa encontra o
+  fulfillment e segue pro UPDATE).
+
+- **URL Memed obrigatória no prescribed**. Validação `isHttpUrl()`
+  rejeita `javascript:`, `data:`, etc. A URL é o que a operadora
+  vai abrir pra encaminhar à farmácia e é o que entra no hash do
+  aceite (onda 2.C) — precisa ser estável e acessível.
+
+- **Hipótese e conduta opcionais**. Médica que só avalia e declina
+  pode marcar "declined" sem precisar justificar por escrito. A
+  responsabilidade clínica existe, mas o sistema não obriga
+  preencher texto — isso seria paternalista e criaria fricção.
+
+- **Validação estrita dupla**: `validateFinalizeInput` (pura) +
+  `finalizeAppointment` (com I/O). A pura cobre tudo que pode ser
+  decidido sem banco (UUID válido, URL válida, tamanhos); a outra
+  cobre ownership, estado do appointment, existência do plano.
+
+- **Transição de `appointments.status`**: quando o atual é
+  `scheduled`/`confirmed`/`in_progress`, o update força
+  `status='completed'`. Pra `no_show_patient`/`no_show_doctor`
+  preservamos o status original — é possível e legítimo finalizar
+  com "paciente faltou" + declined.
+
+- **Lib pura, rota fina**. Toda a lógica em
+  `src/lib/appointment-finalize.ts` (com `FinalizeInput`,
+  `FinalizeResult` tagged union, `FinalizeFailure.code` mapeado
+  pra HTTP status no endpoint). A rota `POST
+  /api/medico/appointments/[id]/finalize` é 90 linhas, quase só
+  transport. Facilita testar e reusar.
+
+**Fora do escopo da onda 2.B:**
+
+- Envio de WhatsApp pro paciente avisando "sua oferta está
+  pronta" — entra na onda 2.C/2.E junto com a tela de aceite e o
+  painel admin de fulfillment, quando o destino do link existir.
+- Tela `/paciente/oferta/[id]` onde o paciente aceita — onda 2.C.
+- Painel admin de gestão de fulfillment — onda 2.E.
+
+**Arquivos tocados:**
+
+- `src/lib/appointment-finalize.ts` (novo · 250 linhas)
+- `src/lib/appointment-finalize.test.ts` (novo · 21 casos)
+- `src/app/api/medico/appointments/[id]/finalize/route.ts` (novo)
+- `src/app/medico/(shell)/consultas/[id]/finalizar/page.tsx` (novo)
+- `src/app/medico/(shell)/consultas/[id]/finalizar/FinalizeForm.tsx` (novo)
+- `src/app/medico/(shell)/agenda/page.tsx` (editado — botão
+  "Finalizar" no histórico, labels de status com finalized_at)
+- Docs (DECISIONS · CHANGELOG · SPRINTS)
+
+**Estado:** 186 testes passando (21 novos). TypeScript, ESLint e
+Next build verdes. Migração da onda 2.A já aplicada em produção —
+esta onda pode ir pro ar sem banco extra. Próxima: onda 2.C
+(tela de aceite formal do paciente).
+
+---
+
 ## D-044 · Inversão do fluxo financeiro — consulta grátis, aceite formal e fulfillment (onda 2.A) · 2026-04-20
 
 **Contexto:** até D-043, o pipeline comercial assumia que o paciente

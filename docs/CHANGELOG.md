@@ -6,6 +6,88 @@
 
 ---
 
+## 2026-04-20 · Painel da médica "finalizar consulta" (D-044 · onda 2.B) · IA
+
+**Por quê:** a onda 2.A criou o schema do fulfillment, mas ninguém
+escrevia nele. A médica ainda tratava anamnese/conduta como texto
+solto que ficava no appointment sem desfecho claro, e não havia
+como declarar oficialmente "prescrevi o plano X" ou "avaliei sem
+indicar". A onda 2.B é o primeiro produtor real de dados na nova
+máquina de estados — sem ela, nenhum fulfillment nasce.
+
+**Entregáveis:**
+
+- **`src/lib/appointment-finalize.ts`** (novo · puro):
+  - `validateFinalizeInput` — checagens síncronas (UUID, URL
+    http/https, limites de tamanho, campos obrigatórios por
+    decisão).
+  - `finalizeAppointment(supabase, params)` — orquestra:
+    1. valida ownership (doctor_id bate) e estado (não cancelado,
+       não finalizado);
+    2. se prescribed, valida que o plano existe e está ativo;
+    3. faz upsert idempotente de `fulfillment(pending_acceptance)`
+       — se já existe pra esse appointment, reusa o id em vez de
+       tentar INSERT (evita conflito de `unique(appointment_id)`);
+    4. atualiza `appointments` com `finalized_at`, decisão,
+       snapshot de anamnese/hipótese/conduta e, se prescribed,
+       `prescribed_plan_id` + `memed_prescription_url` +
+       `memed_prescription_id`.
+    5. transiciona `status` pra `completed` apenas quando atual
+       é `scheduled`/`confirmed`/`in_progress` — preserva
+       `no_show_*` quando médica finaliza paciente que faltou.
+  - Tagged union `FinalizeResult` com `.code` mapeado pra HTTP
+    status no endpoint (`not_found`, `forbidden`, `cancelled`,
+    `already_finalized`, `invalid_payload`, `plan_not_active`,
+    `db_error`).
+
+- **`src/lib/appointment-finalize.test.ts`** (novo · 21 casos):
+  validação pura + happy path declined/prescribed, ownership,
+  já-finalizado, cancelada, plano inativo, idempotência do
+  upsert, db_error em cada etapa.
+
+- **`/api/medico/appointments/[id]/finalize`** (POST):
+  rota fina em cima da lib. `requireDoctor()` + parse seguro do
+  body (strings vazias viram null; anamnese aceita string OU
+  objeto). Mapeia `FinalizeFailure.code` pra HTTP status.
+
+- **`/medico/consultas/[id]/finalizar`** (novo):
+  - Server component com `requireDoctor()`, dupla filtragem
+    por `doctor_id`, e 3 estados de renderização:
+    (a) finalizável → `FinalizeForm`;
+    (b) já finalizada → tela read-only com campos salvos
+        (inclui link pra receita Memed);
+    (c) cancelada → mensagem + voltar.
+  - Client `FinalizeForm`: radio grande com 2 opções,
+    textareas de anamnese/hipótese/conduta, e bloco condicional
+    de prescrição (select de plano + URL Memed + ID opcional).
+    Em erro do backend, mostra a mensagem e destaca o campo via
+    `field` retornado.
+
+- **`/medico/agenda`** (editado):
+  - Lê também `finalized_at` e `prescription_status`.
+  - Labels de status refletem finalização ("Prescrita" / "Sem
+    indicação" / "Finalizada" / "Concluída (não fechada)").
+  - Histórico ganhou botão **Finalizar** em cada consulta
+    passada não-finalizada (e "Ver" nas finalizadas, pra abrir
+    a tela read-only).
+  - `isFinalizable()` como helper explícito — qualquer cancel
+    bloqueia.
+
+**Fora do escopo (ondas seguintes):**
+
+- WhatsApp pro paciente avisando "sua oferta está pronta" —
+  espera a tela de aceite (2.C) e o painel admin (2.E).
+- `/paciente/oferta/[id]` (2.C).
+- Admin que move `paid` → `pharmacy_requested` → `shipped` →
+  `delivered` (2.E).
+
+**Status:** 186 testes passando (21 novos). `tsc`, `eslint`,
+`next build` verdes. Rota `/medico/consultas/[id]/finalizar`
+aparece no bundle (2.36 kB). Nenhuma migração nova — tudo em
+cima do schema da onda 2.A.
+
+---
+
 ## 2026-04-20 · Inversão do fluxo: fulfillment + aceite formal (D-044 · onda 2.A) · IA
 
 **Por quê:** o fluxo antigo obrigava o paciente a pagar **antes** de

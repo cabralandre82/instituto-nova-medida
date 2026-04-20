@@ -8,6 +8,7 @@
  * (futuro: link para anamnese/prescrição).
  */
 
+import Link from "next/link";
 import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { JoinButton } from "./JoinButton";
@@ -21,11 +22,13 @@ type ApptRow = {
   scheduled_until: string | null;
   kind: "scheduled" | "on_demand";
   status: string;
+  finalized_at: string | null;
+  prescription_status: "none" | "prescribed" | "declined";
   customers: { name: string | null; email: string | null; phone: string | null } | null;
 };
 
 const ALL_FIELDS =
-  "id, scheduled_at, scheduled_until, kind, status, customers ( name, email, phone )";
+  "id, scheduled_at, scheduled_until, kind, status, finalized_at, prescription_status, customers ( name, email, phone )";
 
 async function loadAppointments(doctorId: string): Promise<{
   upcoming: ApptRow[];
@@ -84,8 +87,29 @@ function fmtTime(iso: string): string {
   });
 }
 
-function statusLabel(status: string): { label: string; className: string } {
-  switch (status) {
+function statusLabel(
+  appt: Pick<ApptRow, "status" | "finalized_at" | "prescription_status">
+): { label: string; className: string } {
+  if (appt.finalized_at) {
+    if (appt.prescription_status === "prescribed") {
+      return {
+        label: "Prescrita",
+        className: "bg-sage-50 text-sage-800 border-sage-200",
+      };
+    }
+    if (appt.prescription_status === "declined") {
+      return {
+        label: "Sem indicação",
+        className: "bg-ink-50 text-ink-600 border-ink-200",
+      };
+    }
+    return {
+      label: "Finalizada",
+      className: "bg-ink-50 text-ink-700 border-ink-200",
+    };
+  }
+
+  switch (appt.status) {
     case "scheduled":
       return {
         label: "Agendada",
@@ -98,25 +122,40 @@ function statusLabel(status: string): { label: string; className: string } {
       };
     case "completed":
       return {
-        label: "Concluída",
-        className: "bg-ink-50 text-ink-700 border-ink-200",
+        label: "Concluída (não fechada)",
+        className: "bg-terracotta-50 text-terracotta-800 border-terracotta-200",
       };
-    case "no_show":
+    case "no_show_patient":
       return {
-        label: "Faltou",
+        label: "Paciente faltou",
+        className: "bg-ink-50 text-ink-500 border-ink-200",
+      };
+    case "no_show_doctor":
+      return {
+        label: "Médica faltou",
         className: "bg-ink-50 text-ink-500 border-ink-200",
       };
     case "cancelled":
+    case "cancelled_by_patient":
+    case "cancelled_by_doctor":
+    case "cancelled_by_admin":
       return {
         label: "Cancelada",
         className: "bg-ink-50 text-ink-400 border-ink-100",
       };
     default:
       return {
-        label: status,
+        label: appt.status,
         className: "bg-ink-50 text-ink-600 border-ink-200",
       };
   }
+}
+
+function isFinalizable(appt: ApptRow): boolean {
+  if (appt.finalized_at) return false;
+  return !["cancelled", "cancelled_by_patient", "cancelled_by_doctor", "cancelled_by_admin"].includes(
+    appt.status
+  );
 }
 
 function joinAvailability(scheduledAt: string, scheduledUntil: string | null) {
@@ -212,7 +251,7 @@ export default async function DoctorAgendaPage() {
           <div className="rounded-2xl border border-ink-100 bg-white overflow-hidden">
             <ul className="divide-y divide-ink-100">
               {rest.map((appt) => {
-                const status = statusLabel(appt.status);
+                const status = statusLabel(appt);
                 const av = joinAvailability(appt.scheduled_at, appt.scheduled_until);
                 return (
                   <li key={appt.id} className="flex items-center gap-4 px-5 py-4">
@@ -264,7 +303,8 @@ export default async function DoctorAgendaPage() {
           <div className="rounded-2xl border border-ink-100 bg-white overflow-hidden">
             <ul className="divide-y divide-ink-100">
               {past.map((appt) => {
-                const status = statusLabel(appt.status);
+                const status = statusLabel(appt);
+                const finalizable = isFinalizable(appt);
                 return (
                   <li key={appt.id} className="flex items-center gap-4 px-5 py-3">
                     <div className="w-24 flex-shrink-0">
@@ -284,6 +324,21 @@ export default async function DoctorAgendaPage() {
                     >
                       {status.label}
                     </span>
+                    {finalizable ? (
+                      <Link
+                        href={`/medico/consultas/${appt.id}/finalizar`}
+                        className="ml-2 inline-flex items-center rounded-full bg-sage-700 hover:bg-sage-800 text-cream-50 text-xs font-medium px-3 py-1.5 transition-colors"
+                      >
+                        Finalizar
+                      </Link>
+                    ) : appt.finalized_at ? (
+                      <Link
+                        href={`/medico/consultas/${appt.id}/finalizar`}
+                        className="ml-2 inline-flex items-center text-xs text-ink-500 hover:text-ink-700 underline-offset-2 hover:underline"
+                      >
+                        Ver
+                      </Link>
+                    ) : null}
                   </li>
                 );
               })}

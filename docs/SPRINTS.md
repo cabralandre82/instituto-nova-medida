@@ -502,10 +502,17 @@ automatizado (estorno já foi em D-034; NF-e upload flow fica aqui).
       RLS admin-ALL + médica-self, `src/lib/fulfillments.ts`
       com máquina de estados pura + hash SHA-256 canonicalizado
       do aceite. 24 testes novos (165 totais). Migração aplicada.
-- [ ] **D-044 onda 2.B · Painel da médica — finalizar consulta.**
-      `/medico/consultas/[id]/finalizar` com anamnese, hipótese,
-      conduta, Memed e seletor de plano. Cria
-      `fulfillment(pending_acceptance)` ao finalizar.
+- [x] **D-044 onda 2.B · Painel da médica — finalizar consulta.**
+      (2026-04-20) `/medico/consultas/[id]/finalizar` com radio
+      declined/prescribed, textareas de anamnese/hipótese/conduta,
+      seletor de plano ativo e URL Memed (validada http/https).
+      Finalização é **idempotente** (409 em re-tentativa) e
+      cria `fulfillment(pending_acceptance)` quando há prescrição.
+      Tela read-only automática pós-finalização. Botão
+      "Finalizar" no histórico de `/medico/agenda`. Lib pura
+      `src/lib/appointment-finalize.ts` + endpoint
+      `POST /api/medico/appointments/[id]/finalize`. 21 testes
+      novos (186 totais). `next build` verde.
 - [ ] **D-044 onda 2.C · Oferta + aceite formal do paciente.**
       `/paciente/oferta/[appointment_id]` com prescrição + plano +
       texto legal + checkbox + submit imutável. Redireciona pra
