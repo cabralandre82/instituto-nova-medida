@@ -6,6 +6,74 @@
 
 ---
 
+## 2026-04-19 · Sprint 4.1 (3/3 cont.) — Webhook do Daily fecha o ciclo · IA
+
+**Por quê:** sem telemetria de meeting, o painel financeiro não sabe
+distinguir "consulta realizada" de "no-show". Decisão: **D-028**.
+
+**Migration aplicada (009 — `20260419080000_daily_events.sql`):**
+
+- Tabela `daily_events` (raw + idempotência), espelho do
+  `asaas_events`. Campos: `event_id`, `event_type`, `event_ts`,
+  `daily_room_name`, `daily_meeting_id`, `appointment_id` (FK),
+  `signature` + `signature_valid`, `payload jsonb`, `processed_at`,
+  `processing_error`, `received_at`.
+- Índices: unique `(event_id, event_type)` para idempotência,
+  por `appointment_id+type` (lookup de no-show), por `room_name`,
+  parcial nos não-processados (retry).
+- RLS deny-by-default; só service role escreve/lê.
+
+**Lib `src/lib/video.ts` — extensões:**
+
+- `validateWebhook()` agora suporta o **HMAC oficial do Daily**:
+  `X-Webhook-Signature` = base64(HMAC-SHA256(secret, "ts.body")),
+  janela anti-replay de 5 min. Fallback antigo (`x-daily-webhook-secret`
+  com secret bruto) mantido. Modo dev permissivo explícito (sem
+  `DAILY_WEBHOOK_SECRET` configurado).
+- Tipos públicos novos: `VideoEventType`,
+  `NormalizedVideoEvent`.
+- `parseDailyEvent(raw)` — normaliza payload em forma agnóstica de
+  provider (event_id, type, occurredAt, roomName, meetingId,
+  participantName, participantIsOwner, durationSeconds, raw).
+
+**Endpoint novo `POST /api/daily/webhook`:**
+
+1. Valida assinatura (consome body cru).
+2. Resolve `appointment_id` por `video_room_name = payload.room`.
+3. Persiste raw em `daily_events` (idempotente).
+4. Roteia o tipo:
+   - `meeting.started`: `started_at`, `daily_meeting_session_id`,
+     status `scheduled`/`confirmed` → `in_progress`.
+   - `meeting.ended`: `ended_at`, `duration_seconds`. Decide status
+     final agregando `participant.joined` por `is_owner`:
+       - paciente + médica → `completed`
+       - só paciente → `no_show_doctor`
+       - só médica → `no_show_patient`
+       - ninguém → `cancelled_by_admin` (motivo
+         `expired_no_one_joined`).
+     Estados terminais existentes não são regredidos.
+   - `participant.joined`/`participant.left`: só persistência
+     (necessária pro cálculo de no-show acima).
+   - `recording.ready`: só persistência (gravação só vira coluna
+     quando ligarmos D-023).
+5. Sempre **200** quando auth passou (Daily faz retry agressivo em
+   5xx). Falhas viram `processing_error` no `daily_events`.
+
+**Configuração no Daily:**
+
+- Painel Daily → Webhooks → URL
+  `https://institutonovamedida.com.br/api/daily/webhook` (ou Vercel
+  preview).
+- Eventos: `meeting.started`, `meeting.ended`, `participant.joined`,
+  `participant.left` (mín). Opcional: `recording.ready`.
+- O `hmac` que o Daily mostra ao criar o webhook → vai pra env
+  `DAILY_WEBHOOK_SECRET`.
+
+**Build:** +1 rota (`/api/daily/webhook`), bundle inalterado
+(server-only).
+
+---
+
 ## 2026-04-19 · Sprint 4.1 (3/3 cont.) — Fluxo do paciente E2E · IA
 
 **Por quê:** o produto sem fluxo de paciente é só uma tela bonita

@@ -100,6 +100,43 @@ export type WebhookValidation =
   | { ok: true; rawBody: string }
   | { ok: false; reason: string };
 
+// ────────────────────────────────────────────────────────────────────────
+// Tipos públicos de evento (independentes de provider)
+// ────────────────────────────────────────────────────────────────────────
+
+export type VideoEventType =
+  | "meeting.started"
+  | "meeting.ended"
+  | "participant.joined"
+  | "participant.left"
+  | "recording.ready"
+  | "unknown";
+
+/**
+ * Forma normalizada de evento do provider. Mantemos o `raw` pra
+ * auditoria, mas as chaves abaixo são suficientes pra atualizar
+ * `appointments`.
+ */
+export type NormalizedVideoEvent = {
+  /** ID único do evento (do provider). Usado pra idempotência. */
+  eventId: string | null;
+  type: VideoEventType;
+  /** Quando o evento ocorreu no provider (não quando o webhook chegou). */
+  occurredAt: Date | null;
+  /** Nome da sala (ex: 'c-12345678'). Usamos pra resolver o appointment. */
+  roomName: string | null;
+  /** ID interno do meeting/sessão no provider. */
+  meetingId: string | null;
+  /** participant.* events: nome do participante (do meeting token). */
+  participantName: string | null;
+  /** participant.* events: true se entrou como owner (médica). */
+  participantIsOwner: boolean | null;
+  /** meeting.ended: duração total em segundos, se reportada. */
+  durationSeconds: number | null;
+  /** Payload bruto (não-normalizado) — sempre persistido. */
+  raw: unknown;
+};
+
 export interface VideoProvider {
   readonly name: VideoProviderName;
 
@@ -297,28 +334,62 @@ class DailyProvider implements VideoProvider {
   }
 
   async validateWebhook(req: Request): Promise<WebhookValidation> {
-    // Daily envia o secret estático no header x-webhook-signature (HMAC-SHA256
-    // do body). Pra MVP simples, aceitamos secret bruto via header
-    // x-daily-webhook-secret também (configurável no painel Daily).
-    // Em produção real, validar HMAC é mais forte.
+    // Daily assina cada webhook com HMAC-SHA256 do body usando o
+    // `hmac` (secret) que aparece no payload de criação do webhook.
+    // Header oficial: `X-Webhook-Signature` (timestamp + assinatura).
+    //
+    // Spec: https://docs.daily.co/reference/rest-api/webhooks/verify-webhook-signature
+    //   X-Webhook-Timestamp: <unix-seconds>
+    //   X-Webhook-Signature: <base64 HMAC-SHA256 de "timestamp.body">
+    //
+    // Compatibilidade: se o painel for configurado com header bruto
+    // `x-daily-webhook-secret` (forma antiga / proxy), ainda aceitamos
+    // pra não quebrar setups existentes.
     const cfg = loadDailyConfig();
-    const headerSecret = req.headers.get("x-daily-webhook-secret");
     const rawBody = await req.text();
 
-    if (cfg.webhookSecret && headerSecret) {
-      // Comparação constante
-      if (!constantTimeEqual(headerSecret, cfg.webhookSecret)) {
+    const sigHeader = req.headers.get("x-webhook-signature");
+    const tsHeader = req.headers.get("x-webhook-timestamp");
+    const secretHeader = req.headers.get("x-daily-webhook-secret");
+
+    // Caminho 1: HMAC oficial (timestamp + body)
+    if (sigHeader && tsHeader && cfg.webhookSecret) {
+      const ts = Number(tsHeader);
+      if (!Number.isFinite(ts)) return { ok: false, reason: "timestamp inválido" };
+      // Anti-replay: aceita janela de 5 min
+      if (Math.abs(Math.floor(Date.now() / 1000) - ts) > 5 * 60) {
+        return { ok: false, reason: "timestamp fora da janela (replay?)" };
+      }
+      try {
+        // ESM-friendly require — runtime já é nodejs
+        const cryptoMod = await import("node:crypto");
+        const h = cryptoMod.createHmac("sha256", cfg.webhookSecret);
+        h.update(`${tsHeader}.${rawBody}`);
+        const expected = h.digest("base64");
+        if (!constantTimeEqual(sigHeader, expected)) {
+          return { ok: false, reason: "assinatura HMAC inválida" };
+        }
+        return { ok: true, rawBody };
+      } catch (e) {
+        return { ok: false, reason: `falha ao validar HMAC: ${String(e)}` };
+      }
+    }
+
+    // Caminho 2: secret bruto (legado / proxy)
+    if (cfg.webhookSecret && secretHeader) {
+      if (!constantTimeEqual(secretHeader, cfg.webhookSecret)) {
         return { ok: false, reason: "secret inválido" };
       }
       return { ok: true, rawBody };
     }
 
-    // Em dev sem secret configurado, aceita pra facilitar (loga em produção)
+    // Caminho 3: dev sem secret configurado (libera, loga)
     if (!cfg.webhookSecret) {
+      console.warn("[daily] webhook sem DAILY_WEBHOOK_SECRET — aceitando em modo dev");
       return { ok: true, rawBody };
     }
 
-    return { ok: false, reason: "header de autenticação ausente" };
+    return { ok: false, reason: "headers de autenticação ausentes" };
   }
 }
 
@@ -406,4 +477,80 @@ export async function provisionConsultationRoom(opts: {
   });
 
   return { room, tokens };
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Parser de eventos Daily → forma normalizada
+// ────────────────────────────────────────────────────────────────────────
+
+type DailyEventRaw = {
+  version?: string;
+  type?: string;
+  event_ts?: number;
+  id?: string;
+  payload?: {
+    meeting_id?: string;
+    room?: string;
+    start_ts?: number;
+    end_ts?: number;
+    duration?: number; // em segundos (meeting.ended)
+    user_name?: string;
+    user_id?: string;
+    is_owner?: boolean;
+    joined_at?: number;
+    left_at?: number;
+    [k: string]: unknown;
+  };
+};
+
+const KNOWN_EVENT_TYPES: Record<string, VideoEventType> = {
+  "meeting.started": "meeting.started",
+  "meeting.ended": "meeting.ended",
+  "participant.joined": "participant.joined",
+  "participant.left": "participant.left",
+  "recording.ready-to-download": "recording.ready",
+  "recording.ready": "recording.ready",
+};
+
+function tsToDate(ts: unknown): Date | null {
+  if (typeof ts !== "number" || !Number.isFinite(ts)) return null;
+  // Daily envia em segundos (com fração); aceita ms também por defesa.
+  const ms = ts > 1e12 ? ts : ts * 1000;
+  return new Date(ms);
+}
+
+/**
+ * Converte payload bruto do Daily em `NormalizedVideoEvent`. Tolerante:
+ * campos faltantes viram null. Tipo desconhecido vira `unknown`.
+ */
+export function parseDailyEvent(raw: unknown): NormalizedVideoEvent {
+  const ev = (raw ?? {}) as DailyEventRaw;
+  const payload = ev.payload ?? {};
+  const type = KNOWN_EVENT_TYPES[ev.type ?? ""] ?? "unknown";
+
+  // Daily reporta duração só em meeting.ended; calculamos um fallback
+  // se start_ts + end_ts vierem soltos.
+  let durationSeconds: number | null = null;
+  if (typeof payload.duration === "number") {
+    durationSeconds = Math.round(payload.duration);
+  } else if (
+    typeof payload.start_ts === "number" &&
+    typeof payload.end_ts === "number" &&
+    payload.end_ts >= payload.start_ts
+  ) {
+    durationSeconds = Math.round(payload.end_ts - payload.start_ts);
+  }
+
+  return {
+    eventId: typeof ev.id === "string" ? ev.id : null,
+    type,
+    occurredAt: tsToDate(ev.event_ts) ?? tsToDate(payload.start_ts) ?? tsToDate(payload.joined_at),
+    roomName: typeof payload.room === "string" ? payload.room : null,
+    meetingId: typeof payload.meeting_id === "string" ? payload.meeting_id : null,
+    participantName: typeof payload.user_name === "string" ? payload.user_name : null,
+    participantIsOwner:
+      typeof payload.is_owner === "boolean" ? payload.is_owner : null,
+    durationSeconds,
+    raw,
+  };
 }

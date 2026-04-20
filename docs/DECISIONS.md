@@ -5,6 +5,69 @@
 
 ---
 
+## D-028 · Webhook do Daily fecha o ciclo da consulta + detecta no-show · 2026-04-19
+
+**Contexto:** com o paciente entrando na sala (D-027), faltava
+**telemetria de consulta**: saber quando começou, quando terminou,
+quanto durou e — crucialmente — se alguma das partes não
+compareceu. Sem isso o painel financeiro não consegue distinguir
+"consulta realizada (gera earning)" de "no-show paciente (estorna)".
+
+**Decisão:** consumimos os webhooks `meeting.started`, `meeting.ended`,
+`participant.joined` e `participant.left` do Daily. Persistimos
+TODOS os payloads em `daily_events` (auditoria + idempotência via
+unique `(event_id, event_type)`), e atualizamos `appointments` com
+`started_at`, `ended_at`, `duration_seconds` e `status` final.
+
+**Resolução do appointment:** pelo `payload.room` que é o nome
+determinístico que criamos (`c-<8 hex>`). Eventos sem appointment
+correspondente são marcados como órfãos e ignorados (salas de teste).
+
+**Lógica de status final em `meeting.ended`** (executada só se o
+status atual NÃO for terminal):
+
+| Quem entrou         | Duração reportada    | Novo status          |
+|---------------------|----------------------|----------------------|
+| paciente + médica   | ≥ 3 min              | `completed`          |
+| paciente + médica   | < 3 min              | `completed` (cons.)  |
+| só paciente         | qualquer             | `no_show_doctor`     |
+| só médica           | qualquer             | `no_show_patient`    |
+| ninguém             | qualquer             | `cancelled_by_admin` (`expired_no_one_joined`) |
+
+A presença de cada parte é deduzida agregando `participant.joined`
+(filtrando `is_owner`) já persistidos em `daily_events` — por isso
+**precisamos persistir TODO `participant.joined`**, mesmo sem ação
+imediata.
+
+**Auth:** HMAC-SHA256 oficial do Daily
+(`X-Webhook-Signature` = base64 de `HMAC(secret, "<ts>.<body>")`,
+janela anti-replay de 5 min). Fallback `x-daily-webhook-secret`
+(secret bruto via header) mantido pra setups antigos / proxy. Em
+dev sem `DAILY_WEBHOOK_SECRET`, aceita e loga (modo permissivo
+explícito).
+
+**Resposta:** sempre 200 quando a auth passa (tem o RAW pra
+reprocessar). Falhas no processamento ficam em
+`daily_events.processing_error` para retry manual. Daily retenta
+agressivamente em 5xx — por isso jamais respondemos 5xx pós-auth.
+
+**Não decidido aqui:**
+
+- `recording.ready` é só persistido — quando ligarmos gravação por
+  default (vide D-023), implementamos extração de URL e gravação no
+  bucket privado.
+- "No-show paciente" hoje **não** dispara estorno automático no Asaas.
+  Decisão financeira pendente (D-029?): regra é "estornar 100%" ou
+  "cobrar taxa de no-show"? Por enquanto a admin opera manualmente
+  pela UI de payouts.
+- Reabrir consulta após `meeting.ended` (paciente caiu, volta) ainda
+  funciona porque o `JoinRoomButton` regenera o token Daily a cada
+  clique e o status `in_progress` é restaurado por um próximo
+  `meeting.started`. Mas o status final calculado pode "regredir" pra
+  `completed` quando o segundo `meeting.ended` chegar — aceitável.
+
+---
+
 ## D-027 · Fluxo do paciente: reserva atomic + token HMAC + ativação no webhook · 2026-04-19
 
 **Contexto:** o produto vende "consulta + medicação manipulada" como

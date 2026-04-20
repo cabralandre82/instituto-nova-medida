@@ -72,11 +72,17 @@ vinculado à compra via `localStorage`.
   provisionamento da sala Daily ao confirmar pagamento (webhook Asaas),
   link público da consulta `/consulta/[id]?t=<HMAC>` com contagem
   regressiva e botão "Entrar na sala" (`/api/paciente/.../join`).
+  ✅ **Webhook do Daily** (D-028): `/api/daily/webhook` com HMAC
+  oficial, persistência crua em `daily_events` (migration 009),
+  detecção automática de no-show por agregação de
+  `participant.joined`, atualização de `started_at`/`ended_at`/
+  `duration_seconds`/`status` (`in_progress` → `completed`/
+  `no_show_patient`/`no_show_doctor`/`cancelled_by_admin`).
 
-**Restante da Sprint 4.1 (3/3):** webhook Daily
-(`meeting.started/ended` atualiza `appointment.status`), cron de
-expiração de `pending_payment`, helpers WhatsApp pros 7 templates,
-env vars Daily + `PATIENT_TOKEN_SECRET` no Vercel.
+**Restante da Sprint 4.1 (3/3):** cron de expiração de
+`pending_payment`, helpers WhatsApp pros 7 templates, env vars Daily
++ `PATIENT_TOKEN_SECRET` no Vercel, política de estorno automático
+em no-show (D-029?).
 
 Veja [`docs/SPRINTS.md`](./docs/SPRINTS.md) para o roadmap completo.
 
@@ -161,6 +167,7 @@ instituto-nova-medida/
 │   │       ├── wa/webhook/route.ts
 │   │       ├── auth/                         # magic-link / callback / signout
 │   │       ├── agendar/reserve/route.ts      # cria customer + reserva slot + cobra
+│   │       ├── daily/webhook/route.ts        # meeting.* → status do appointment
 │   │       ├── admin/                        # APIs do painel admin
 │   │       │   ├── doctors/[id]/(compensation|payment-method|availability)
 │   │       │   └── payouts/[id]/(approve|pay|confirm|cancel|proof)
@@ -192,7 +199,8 @@ instituto-nova-medida/
 │   ├── 20260419040000_doctors_appointments_finance.sql
 │   ├── 20260419050000_payouts_admin_fields.sql
 │   ├── 20260419060000_payout_proofs_bucket.sql
-│   └── 20260419070000_appointment_booking.sql   # 008: pending_payment + slot reserve
+│   ├── 20260419070000_appointment_booking.sql   # 008: pending_payment + slot reserve
+│   └── 20260419080000_daily_events.sql          # 009: webhook Daily (raw + idempot.)
 ├── package.json
 ├── tailwind.config.ts
 ├── tsconfig.json
