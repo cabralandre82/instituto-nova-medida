@@ -112,7 +112,36 @@ function formatBRL(cents: number) {
 // Componente principal
 // ────────────────────────────────────────────────────────────────────────────
 
-export function CheckoutForm({ plan }: { plan: CheckoutPlan }) {
+/**
+ * Slot de consulta selecionado pelo paciente em /agendar/[plano].
+ * Quando presente, o submit faz POST em /api/agendar/reserve em vez de
+ * /api/checkout — e ao confirmar, o webhook do Asaas ativa o appointment
+ * já reservado e provisiona a sala Daily.
+ */
+export type CheckoutSlot = {
+  /** ISO UTC do start. Deve ser EXATAMENTE um dos slots ofertados pelo backend. */
+  startsAt: string;
+  /** Para display ("seg, 22 abr · 14:00"). */
+  doctorName: string;
+};
+
+export type CheckoutFormProps = {
+  plan: CheckoutPlan;
+  slot?: CheckoutSlot;
+};
+
+export function CheckoutForm({ plan, slot }: CheckoutFormProps) {
+  const reserveMode = Boolean(slot);
+  const slotDisplay = slot
+    ? new Date(slot.startsAt).toLocaleString("pt-BR", {
+        weekday: "long",
+        day: "2-digit",
+        month: "long",
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZone: "America/Sao_Paulo",
+      })
+    : null;
   const router = useRouter();
   const [form, setForm] = useState<FormState>(INITIAL);
   const [submitting, setSubmitting] = useState(false);
@@ -231,7 +260,8 @@ export function CheckoutForm({ plan }: { plan: CheckoutPlan }) {
         leadId = null;
       }
 
-      const res = await fetch("/api/checkout", {
+      const endpoint = reserveMode ? "/api/agendar/reserve" : "/api/checkout";
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -252,6 +282,9 @@ export function CheckoutForm({ plan }: { plan: CheckoutPlan }) {
           },
           consent: form.consent,
           leadId,
+          ...(reserveMode && slot
+            ? { scheduledAt: slot.startsAt, recordingConsent: false }
+            : {}),
         }),
       });
 
@@ -259,18 +292,31 @@ export function CheckoutForm({ plan }: { plan: CheckoutPlan }) {
         ok?: boolean;
         error?: string;
         details?: string;
+        message?: string;
         invoiceUrl?: string;
         paymentId?: string;
         method?: PaymentMethod;
+        appointmentId?: string;
+        consultaUrl?: string;
+        patientToken?: string;
       };
 
       if (!res.ok || !data.ok) {
+        const friendly =
+          data.error === "slot_taken"
+            ? "Esse horário acabou de ser reservado por outra pessoa. Volte e escolha outro."
+            : data.error === "slot_unavailable"
+              ? "O horário escolhido não está mais disponível. Volte e escolha outro."
+              : null;
         setServerError(
-          data.error
-            ? data.details
-              ? `${data.error} — ${data.details}`
+          friendly ??
+            (data.message
+              ? data.message
               : data.error
-            : "Não foi possível gerar a cobrança. Tente novamente."
+                ? data.details
+                  ? `${data.error} — ${data.details}`
+                  : data.error
+                : "Não foi possível gerar a cobrança. Tente novamente.")
         );
         setSubmitting(false);
         return;
@@ -280,6 +326,12 @@ export function CheckoutForm({ plan }: { plan: CheckoutPlan }) {
       try {
         if (data.paymentId) {
           localStorage.setItem("inm_last_payment_id", data.paymentId);
+        }
+        if (data.consultaUrl) {
+          localStorage.setItem("inm_last_consulta_url", data.consultaUrl);
+        }
+        if (data.appointmentId) {
+          localStorage.setItem("inm_last_appointment_id", data.appointmentId);
         }
       } catch {
         // localStorage indisponível, ok
@@ -596,6 +648,23 @@ export function CheckoutForm({ plan }: { plan: CheckoutPlan }) {
             </p>
           )}
         </div>
+
+        {reserveMode && slot && slotDisplay && (
+          <div className="border-t border-cream-100/15 pt-5">
+            <p className="text-[0.78rem] uppercase tracking-[0.16em] text-cream-100/60 font-medium mb-1.5">
+              Sua consulta
+            </p>
+            <p className="font-medium text-cream-100 leading-snug capitalize">
+              {slotDisplay}
+            </p>
+            <p className="mt-0.5 text-[0.84rem] text-cream-100/70">
+              com {slot.doctorName}
+            </p>
+            <p className="mt-2 text-[0.78rem] text-cream-100/50">
+              Reservado por 15 min — finalize o pagamento pra confirmar.
+            </p>
+          </div>
+        )}
 
         <div className="border-t border-cream-100/15 pt-5">
           <div className="flex justify-between text-[0.92rem] text-cream-100/80">

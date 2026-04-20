@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Logo } from "@/components/Logo";
 import { Footer } from "@/components/Footer";
+import { ConsultaLinkBanner } from "@/components/ConsultaLinkBanner";
 
 export const metadata: Metadata = {
   title: "Aguardando confirmação do pagamento · Instituto Nova Medida",
@@ -56,6 +57,8 @@ export default function CheckoutAguardandoPage() {
             até <strong>1 dia útil</strong> para ser compensado pelo seu
             banco.
           </p>
+
+          <ConsultaLinkBanner />
 
           <div className="mt-10 rounded-3xl bg-cream-50 border border-ink-100 px-6 py-6 text-left">
             <h2 className="font-serif text-[1.15rem] text-ink-800">

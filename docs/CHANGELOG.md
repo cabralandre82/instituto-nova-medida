@@ -6,6 +6,108 @@
 
 ---
 
+## 2026-04-19 · Sprint 4.1 (3/3 cont.) — Fluxo do paciente E2E · IA
+
+**Por quê:** o produto sem fluxo de paciente é só uma tela bonita
+de admin. Esta entrega fecha o ciclo: paciente escolhe horário → paga
+→ entra na sala. Decisão: **D-027**.
+
+**Migration aplicada (008 — `20260419070000_appointment_booking.sql`):**
+
+- `pending_payment` adicionado ao enum `appointment_status`.
+- Coluna `pending_payment_expires_at timestamptz` em `appointments`.
+- Índice unique parcial `ux_app_doctor_slot_alive` em
+  `(doctor_id, scheduled_at) WHERE status in ('pending_payment',
+  'scheduled', 'confirmed', 'in_progress')` — bloqueia race condition
+  na reserva.
+- Função `book_pending_appointment_slot()` — atomic, com auto-limpeza
+  de pending expirado no mesmo slot e tradução de unique_violation
+  → `slot_taken`.
+- Função `activate_appointment_after_payment()` — idempotente, promove
+  pending_payment → scheduled e vincula payment_id.
+
+**Libs novas:**
+
+- `src/lib/scheduling.ts` (DEFAULT_TZ=America/Sao_Paulo):
+  - `getPrimaryDoctor()` — primeira médica ativa (MVP).
+  - `getDoctorAvailability()` — só `agendada`/`scheduled`.
+  - `listAvailableSlots(doctorId, mins, opts)` — janela de N dias,
+    minLead, maxPerDay; filtra slots já ocupados (pending vivos +
+    scheduled + confirmed + in_progress).
+  - `isSlotAvailable()` — anti-tampering server-side.
+  - `bookPendingSlot()` / `activateAppointmentAfterPayment()` —
+    wrappers das funções SQL.
+- `src/lib/patient-tokens.ts`:
+  - HMAC-SHA256 truncado a 16 bytes (128 bits).
+  - Formato `appointment_id.exp.sig`, timing-safe compare.
+  - TTL padrão 14 dias, mín 60s, máx 60 dias.
+  - `buildConsultationUrl()` usa `NEXT_PUBLIC_BASE_URL`.
+
+**APIs novas:**
+
+- `POST /api/agendar/reserve` — body com plano + slot + dados do
+  paciente. Sequência: validar → upsert customer → garantir customer
+  Asaas → insert payment PENDING → reserva slot atomic → vincular
+  payment_id no appointment → cobrança Asaas → assinar token →
+  retornar `{ invoiceUrl, appointmentId, patientToken, consultaUrl }`.
+- `POST /api/paciente/appointments/[id]/join` — autenticado por token
+  HMAC (header `x-patient-token`, body, ou query `?t=`). Valida token
+  + appointment_id, status, janela de entrada (30 min antes a 30 min
+  depois do fim). Provisiona sala Daily on-demand se webhook não
+  tiver feito. Retorna URL Daily com token paciente fresco (anti-replay).
+
+**Webhook Asaas — estendido:**
+
+- Ao receber `RECEIVED`/`CONFIRMED`: chama
+  `activateAppointmentAfterPayment()`. Se appointment ainda não tem
+  sala, chama `provisionConsultationRoom()` (best-effort, loga e
+  segue se falhar). Cria earning como antes.
+- **Bug fix correlato**: corrigido `customers ( full_name )` →
+  `customers ( name )` (mesmo padrão do dashboard da médica).
+
+**UI nova:**
+
+- `/agendar/[plano]` (sem `?slot=`) — slot picker server-side
+  agrupado por dia, máximo 6 horários/dia, próximos 7 dias, fuso BRT.
+- `/agendar/[plano]?slot=<iso>` — reusa `CheckoutForm` em modo
+  reserve (nova prop `slot`); resumo lateral mostra horário escolhido
+  e prazo de 15 min.
+- `/consulta/[id]?t=<token>` — página pública do paciente:
+  status badge, data/hora, contagem regressiva pra abertura da sala
+  (30 min antes), botão "Entrar na sala" (chama API e abre URL
+  Daily na mesma janela), instruções de preparação.
+- `JoinRoomButton` (client) — countdown live de 1s, estados
+  closed/before-window/open, mensagens amigáveis.
+- `ConsultaLinkBanner` (client) — exibido em
+  `/checkout/sucesso` e `/checkout/aguardando` quando o localStorage
+  tem `inm_last_consulta_url` (gravado pelo CheckoutForm em modo
+  reserve). Banner sage com CTA pra `/consulta/[id]?t=...`.
+
+**CheckoutForm:**
+
+- Nova prop opcional `slot?: { startsAt, doctorName }`. Quando
+  presente, faz POST em `/api/agendar/reserve` em vez de
+  `/api/checkout`, envia `scheduledAt` e `recordingConsent`, persiste
+  `inm_last_consulta_url`/`inm_last_appointment_id`/`inm_last_payment_id`
+  no localStorage. Erros amigáveis pra `slot_taken`/`slot_unavailable`.
+- Resumo lateral ganha card "Sua consulta" quando em modo reserve.
+
+**Env nova:**
+
+- `PATIENT_TOKEN_SECRET` (32+ chars, base64url 256 bits) — secret
+  HMAC do link de consulta. Geramos local; precisa entrar nas 3 envs
+  do Vercel (production/preview/development).
+- `NEXT_PUBLIC_BASE_URL` — usado por `buildConsultationUrl()` pra
+  formar links absolutos no payload da API (e nas mensagens de
+  WhatsApp futuras).
+
+**Build:** 4 rotas novas (`/agendar/[plano]`, `/consulta/[id]`,
+`/api/agendar/reserve`, `/api/paciente/appointments/[id]/join`) +
+componentes client. Bundle do checkout cresceu marginalmente
+(reuso, não duplicação).
+
+---
+
 ## 2026-04-19 · Sprint 4.1 (3/3 cont.) — Comprovantes PIX em Storage privado · IA
 
 **Por quê:** o passo "Confirmar recebimento" pedia URL externa colada

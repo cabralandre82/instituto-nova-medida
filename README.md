@@ -65,11 +65,18 @@ vinculado à compra via `localStorage`.
   (`display_name`, `bio`, `phone`, `consultation_minutes`).
   ✅ Storage privado para comprovantes PIX (bucket `payouts-proofs`,
   upload + signed URL via API mediada — D-026). Migration 007 aplicada.
+  ✅ **Fluxo do paciente E2E** (D-027): `/agendar/[plano]` com slot
+  picker, reserva atomic (migration 008 + função SQL
+  `book_pending_appointment_slot`), checkout em modo reserve
+  (`/api/agendar/reserve`), ativação automática do appointment +
+  provisionamento da sala Daily ao confirmar pagamento (webhook Asaas),
+  link público da consulta `/consulta/[id]?t=<HMAC>` com contagem
+  regressiva e botão "Entrar na sala" (`/api/paciente/.../join`).
 
-**Restante da Sprint 4.1 (3/3):** fluxo do paciente (`/agendar` +
-reserva → checkout → criação automática de appointment + sala Daily),
-webhook Daily (`meeting.started/ended` atualiza `appointment.status`),
-helpers WhatsApp pros 7 templates, env vars Daily no Vercel.
+**Restante da Sprint 4.1 (3/3):** webhook Daily
+(`meeting.started/ended` atualiza `appointment.status`), cron de
+expiração de `pending_payment`, helpers WhatsApp pros 7 templates,
+env vars Daily + `PATIENT_TOKEN_SECRET` no Vercel.
 
 Veja [`docs/SPRINTS.md`](./docs/SPRINTS.md) para o roadmap completo.
 
@@ -122,8 +129,14 @@ instituto-nova-medida/
 │   │   ├── planos/page.tsx           # catálogo de planos
 │   │   ├── checkout/
 │   │   │   ├── [plano]/page.tsx
-│   │   │   ├── sucesso/page.tsx
-│   │   │   └── aguardando/page.tsx
+│   │   │   ├── sucesso/page.tsx     # + ConsultaLinkBanner
+│   │   │   └── aguardando/page.tsx  # + ConsultaLinkBanner
+│   │   ├── agendar/[plano]/         # slot picker → checkout reserve
+│   │   │   ├── page.tsx
+│   │   │   └── SlotPicker.tsx
+│   │   ├── consulta/[id]/           # link público com token HMAC
+│   │   │   ├── page.tsx
+│   │   │   └── JoinRoomButton.tsx
 │   │   ├── sobre/page.tsx
 │   │   ├── termos/page.tsx
 │   │   ├── privacidade/page.tsx
@@ -144,16 +157,19 @@ instituto-nova-medida/
 │   │   └── api/
 │   │       ├── lead/route.ts
 │   │       ├── checkout/route.ts
-│   │       ├── asaas/webhook/route.ts
+│   │       ├── asaas/webhook/route.ts        # + ativa appt + provisiona Daily
 │   │       ├── wa/webhook/route.ts
-│   │       ├── auth/                 # magic-link / callback / signout
-│   │       ├── admin/                # APIs do painel admin
+│   │       ├── auth/                         # magic-link / callback / signout
+│   │       ├── agendar/reserve/route.ts      # cria customer + reserva slot + cobra
+│   │       ├── admin/                        # APIs do painel admin
 │   │       │   ├── doctors/[id]/(compensation|payment-method|availability)
 │   │       │   └── payouts/[id]/(approve|pay|confirm|cancel|proof)
-│   │       └── medico/               # APIs do painel da médica
-│   │           ├── profile (PATCH)
-│   │           ├── payouts/[id]/proof (GET → signed URL 60s)
-│   │           └── appointments/[id]/join (POST → cria sala Daily)
+│   │       ├── medico/                       # APIs do painel da médica
+│   │       │   ├── profile (PATCH)
+│   │       │   ├── payouts/[id]/proof (GET → signed URL 60s)
+│   │       │   └── appointments/[id]/join (POST → cria sala Daily)
+│   │       └── paciente/                     # APIs públicas (token HMAC)
+│   │           └── appointments/[id]/join (POST → URL Daily, janela 30 min)
 │   ├── components/                   # 16+ componentes
 │   └── lib/
 │       ├── asaas.ts                  # cliente Asaas (sandbox/prod)
@@ -161,6 +177,8 @@ instituto-nova-medida/
 │       ├── earnings.ts               # geração de earnings/clawbacks
 │       ├── payouts.ts                # state machine de payouts
 │       ├── payout-proofs.ts          # bucket privado de comprovantes PIX
+│       ├── scheduling.ts             # slots disponíveis + reserva atomic
+│       ├── patient-tokens.ts         # HMAC do link /consulta/[id]
 │       ├── supabase.ts               # admin (service role) + anon
 │       ├── supabase-server.ts        # @supabase/ssr (server components)
 │       ├── video.ts                  # VideoProvider + DailyProvider
@@ -173,7 +191,8 @@ instituto-nova-medida/
 │   ├── 20260419030000_asaas_payments.sql
 │   ├── 20260419040000_doctors_appointments_finance.sql
 │   ├── 20260419050000_payouts_admin_fields.sql
-│   └── 20260419060000_payout_proofs_bucket.sql
+│   ├── 20260419060000_payout_proofs_bucket.sql
+│   └── 20260419070000_appointment_booking.sql   # 008: pending_payment + slot reserve
 ├── package.json
 ├── tailwind.config.ts
 ├── tsconfig.json

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Logo } from "@/components/Logo";
 import { Footer } from "@/components/Footer";
+import { ConsultaLinkBanner } from "@/components/ConsultaLinkBanner";
 
 export const metadata: Metadata = {
   title: "Pagamento confirmado · Instituto Nova Medida",
@@ -47,6 +48,8 @@ export default function CheckoutSucessoPage() {
             receberá um WhatsApp da nossa equipe com o link da sua avaliação
             médica e os próximos passos do tratamento.
           </p>
+
+          <ConsultaLinkBanner />
 
           <div className="mt-10 grid sm:grid-cols-3 gap-3 text-left">
             {[

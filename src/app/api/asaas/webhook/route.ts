@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { isWebhookTokenValid, type AsaasWebhookEvent } from "@/lib/asaas";
 import { createConsultationEarning, createClawback } from "@/lib/earnings";
+import { activateAppointmentAfterPayment } from "@/lib/scheduling";
+import { provisionConsultationRoom } from "@/lib/video";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -220,7 +222,9 @@ async function handleEarningsLifecycle(
   // Busca appointment vinculado ao payment (se houver)
   const { data: appt } = await supabase
     .from("appointments")
-    .select("id, doctor_id, kind, customer_id, customers(full_name)")
+    .select(
+      "id, doctor_id, kind, customer_id, status, scheduled_at, recording_consent, video_room_url, video_patient_token, customers ( name )"
+    )
     .eq("payment_id", internalPaymentId)
     .maybeSingle();
 
@@ -245,8 +249,73 @@ async function handleEarningsLifecycle(
     paymentStatus === "CHARGEBACK_REQUESTED";
 
   if (isReceived) {
+    // 1) Ativa appointment se ainda estiver em pending_payment
+    const activation = await activateAppointmentAfterPayment(
+      appt.id as string,
+      internalPaymentId
+    );
+    if (!activation.ok) {
+      console.error("[asaas-webhook] activate falhou:", activation.error);
+    } else if (activation.wasActivated) {
+      console.log("[asaas-webhook] appointment ativado:", appt.id);
+    }
+
+    // 2) Provisiona sala Daily (best-effort, idempotente)
+    const alreadyHasRoom = Boolean(
+      (appt as { video_room_url?: string | null }).video_room_url
+    );
+    if (!alreadyHasRoom && process.env.DAILY_API_KEY && process.env.DAILY_DOMAIN) {
+      try {
+        const customerName =
+          (appt as { customers?: { name?: string } }).customers?.name ?? "Paciente";
+        // Carrega doctor display_name + consultation_minutes
+        const { data: doctorRow } = await supabase
+          .from("doctors")
+          .select("full_name, display_name, consultation_minutes")
+          .eq("id", appt.doctor_id as string)
+          .maybeSingle();
+
+        const doctorName =
+          doctorRow?.display_name || doctorRow?.full_name || "Médica";
+        const durationMinutes = doctorRow?.consultation_minutes ?? 30;
+
+        const { room, tokens } = await provisionConsultationRoom({
+          appointmentId: appt.id as string,
+          scheduledAt: new Date(appt.scheduled_at as string),
+          durationMinutes,
+          patientName: customerName,
+          doctorName,
+          recordingConsent: Boolean(appt.recording_consent),
+        });
+
+        await supabase
+          .from("appointments")
+          .update({
+            video_provider: "daily",
+            video_room_name: room.name,
+            video_room_url: room.url,
+            video_doctor_token: tokens.doctorToken,
+            video_patient_token: tokens.patientToken,
+            daily_room_id: room.providerId,
+            daily_raw: room.raw as unknown as Record<string, unknown>,
+          })
+          .eq("id", appt.id as string);
+
+        console.log(
+          "[asaas-webhook] sala Daily provisionada:",
+          room.name,
+          "appt=",
+          appt.id
+        );
+      } catch (e) {
+        // Não bloqueia o webhook — admin pode reprovisionar via UI/API depois.
+        console.error("[asaas-webhook] provisionConsultationRoom falhou:", e);
+      }
+    }
+
+    // 3) Cria earning pra médica
     const customerName =
-      (appt as { customers?: { full_name?: string } }).customers?.full_name ?? "paciente";
+      (appt as { customers?: { name?: string } }).customers?.name ?? "paciente";
     const result = await createConsultationEarning(supabase, {
       paymentId: internalPaymentId,
       doctorId: appt.doctor_id as string,

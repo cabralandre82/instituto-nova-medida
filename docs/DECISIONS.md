@@ -5,6 +5,93 @@
 
 ---
 
+## D-027 · Fluxo do paciente: reserva atomic + token HMAC + ativação no webhook · 2026-04-19
+
+**Contexto:** o produto vende "consulta + medicação manipulada" como
+plano. Até aqui tínhamos o checkout do plano funcionando, mas nenhuma
+forma do paciente escolher o horário da consulta nem entrar na sala.
+Faltava a coluna vertebral do produto.
+
+**Decisão:** o paciente escolhe o slot ANTES de pagar, em
+`/agendar/[plano]`. A reserva é atomic via SQL function, o appointment
+fica em `pending_payment` com TTL de 15 min, e o webhook do Asaas
+ativa para `scheduled` + provisiona sala Daily quando o pagamento
+confirma. O link da sala é HMAC-assinado, sem login.
+
+**Por que esse desenho:**
+
+- **Atomic em SQL, não na app**: `book_pending_appointment_slot`
+  (PL/pgSQL) faz a inserção contra um índice unique parcial
+  `(doctor_id, scheduled_at) WHERE status in ('pending_payment',
+  'scheduled', 'confirmed', 'in_progress')`. Duas requisições
+  concorrentes para o mesmo slot — uma ganha (recebe UUID), a outra
+  recebe `unique_violation` que viramos `slot_taken`. Sem race no JS.
+- **TTL curto (15 min)**: tempo razoável de checkout. Se o pagamento
+  não chegar nesse prazo, o slot é liberado por cron (próxima
+  migration) e/ou pela própria função na próxima tentativa de reserva
+  ("fast path" de auto-limpeza de pending expirado no mesmo slot).
+- **`pending_payment` como estado novo no enum** (em vez de NULL ou
+  flag): deixa claro no banco que aquele slot está reservado mas não
+  confirmado. Aparece nos relatórios como tal, sem inflar métricas
+  de consultas pagas.
+- **Ativação assíncrona via webhook Asaas**: o paciente pode fechar
+  a aba após pagar — o appointment é ativado pelo Asaas, e a sala
+  Daily é provisionada nesse mesmo handler (best-effort, não bloqueia
+  a resposta 200 do webhook). Se o Daily estiver fora do ar, há
+  fallback no `/api/paciente/.../join` que provisiona sob demanda.
+- **Token HMAC-SHA256 no link da consulta**: `appointment_id.exp.sig`,
+  truncado a 16 bytes (128 bits). Sem login, sem cookie, sem JWT lib.
+  O segredo (`PATIENT_TOKEN_SECRET`, 256 bits) só vive no servidor.
+  TTL padrão 14 dias — suficiente pra cobrir reagendamento e revisita.
+  Não carrega claims sensíveis (só o appointment_id), e mesmo de
+  posse dele o paciente ainda precisa de um token Daily efêmero
+  (gerado pelo `/api/paciente/.../join`) pra entrar na sala.
+- **Janela de entrada na sala** = 30 min antes a 30 min depois do
+  fim da consulta. Igual à janela da médica (D-021).
+
+**Anti-tampering:**
+
+- O slot enviado no `/api/agendar/reserve` é VALIDADO contra
+  `listAvailableSlots()` (mesmo source-of-truth do picker). Se o
+  paciente forçar um horário que não está ofertado, devolve 409.
+- Token HMAC com timing-safe compare; tampering vira 401.
+- O appointment_id na URL TEM que bater com o do token (anti-substituição).
+
+**Componentes implementados:**
+
+- Migration 008 (`20260419070000_appointment_booking.sql`):
+  - `pending_payment` no enum.
+  - Coluna `pending_payment_expires_at`.
+  - Índice unique parcial.
+  - Função `book_pending_appointment_slot()`.
+  - Função `activate_appointment_after_payment()`.
+- `src/lib/scheduling.ts` — `getPrimaryDoctor`, `listAvailableSlots`,
+  `isSlotAvailable`, `bookPendingSlot`, `activateAppointmentAfterPayment`.
+- `src/lib/patient-tokens.ts` — `signPatientToken`, `verifyPatientToken`,
+  `buildConsultationUrl`.
+- `POST /api/agendar/reserve` — fluxo completo: customer + slot +
+  payment Asaas + token + URL.
+- `POST /api/paciente/appointments/[id]/join` — autenticado por token,
+  janela de entrada, fallback de provisioning.
+- `/agendar/[plano]` — slot picker + reuso do CheckoutForm em modo
+  "reserve".
+- `/consulta/[id]?t=<token>` — página pública do paciente com
+  contagem regressiva e botão "Entrar na sala".
+- Webhook Asaas estendido: ativa appointment + provisiona sala
+  (best-effort) ao receber `RECEIVED`/`CONFIRMED`.
+
+**Não decidido aqui (futuro):**
+
+- Cron de expiração de `pending_payment` (Supabase pg_cron — Sprint
+  4.1 final).
+- Webhook Daily (`meeting.started/ended` → `appointments.status`).
+- Reagendamento sem repagamento (precisa fluxo "trocar horário").
+- WhatsApp templates (envio do link da consulta + lembrete H-1h).
+- On-demand / fila ("falar agora com a próxima médica disponível").
+- Multi-doctor.
+
+---
+
 ## D-026 · Comprovantes PIX em bucket Supabase privado, mediados por API · 2026-04-19
 
 **Contexto:** o passo "Confirmar recebimento" do payout aceitava só uma
