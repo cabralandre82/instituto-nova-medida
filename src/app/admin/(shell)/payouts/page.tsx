@@ -21,6 +21,7 @@ type Payout = {
   amount_cents: number;
   status: "draft" | "approved" | "pix_sent" | "confirmed" | "cancelled" | "failed";
   earnings_count: number;
+  auto_generated: boolean | null;
   approved_at: string | null;
   pix_sent_at: string | null;
   confirmed_at: string | null;
@@ -49,7 +50,7 @@ async function loadPayouts(): Promise<Payout[]> {
   const { data, error } = await supabase
     .from("doctor_payouts")
     .select(
-      "id, doctor_id, reference_period, amount_cents, status, earnings_count, approved_at, pix_sent_at, confirmed_at, created_at, doctors(full_name, display_name)"
+      "id, doctor_id, reference_period, amount_cents, status, earnings_count, auto_generated, approved_at, pix_sent_at, confirmed_at, created_at, doctors(full_name, display_name)"
     )
     .order("created_at", { ascending: false })
     .limit(200);
@@ -124,7 +125,19 @@ export default async function PayoutsPage() {
                       {list.map((p) => (
                         <tr key={p.id} className="hover:bg-cream-50">
                           <td className="px-5 py-4 font-medium text-ink-800">
-                            {p.doctors?.display_name ?? p.doctors?.full_name ?? "—"}
+                            <div className="flex items-center gap-2">
+                              <span>
+                                {p.doctors?.display_name ?? p.doctors?.full_name ?? "—"}
+                              </span>
+                              {p.auto_generated ? (
+                                <span
+                                  className="inline-flex items-center text-[0.7rem] px-2 py-0.5 rounded-full border border-sage-200 bg-sage-50 text-sage-800 font-medium"
+                                  title="Este rascunho foi criado automaticamente pelo cron mensal (D-040)."
+                                >
+                                  auto
+                                </span>
+                              ) : null}
+                            </div>
                           </td>
                           <td className="px-5 py-4 text-ink-600 font-mono text-sm">
                             {p.reference_period}

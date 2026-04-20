@@ -148,6 +148,13 @@ D-039 (prova de fogo E2E) entregue: `src/lib/system-health.ts` com 9
 checks paralelos, `/admin/health` dashboard server-rendered,
 `GET /api/internal/e2e/smoke` endpoint protegido (200/503 pra
 UptimeRobot) e `docs/RUNBOOK-E2E.md` com 7 cenários de prova de fogo.
+D-040 (crons financeiros em Node) entregue: `earnings-availability.ts`
++ `monthly-payouts.ts` + `cron-runs.ts` + 2 Vercel crons observáveis,
+tabela `cron_runs` pra auditoria, badge "auto" em `/admin/payouts`
+nos drafts gerados pelo cron, e 2 checks novos em system-health
+(`cron_earnings_availability`, `cron_monthly_payouts`). Ciclo
+financeiro end-to-end finalmente automatizado e visível. Total: 28
+testes novos (85 no total).
 
 **Entregáveis:**
 
@@ -179,12 +186,16 @@ UptimeRobot) e `docs/RUNBOOK-E2E.md` com 7 cenários de prova de fogo.
 - [x] **Cron de expiração de reservas (D-030)** — pg_cron
       `*/1 min` + Vercel Cron `*/1 min` → libera slots em
       `pending_payment` expirados (TTL 15 min). Migration 010.
-- [ ] **pg_cron jobs (faltantes):**
-  - [ ] `recalculate_earnings_availability()` — diário 00:00, passa
-        `pending` → `available` conforme política D+7/D+3/D+30
-  - [ ] `generate_monthly_payouts()` — dia 1 às 06:00, agrega
-        earnings available em payouts `draft`
-  - [ ] `notify_pending_documents()` — diário 06:00, cobra NF
+- [x] **Crons financeiros (D-040)** — Node + Vercel Cron, observável:
+  - [x] `GET /api/internal/cron/recalculate-earnings` (diário 03:15 UTC)
+        promove `pending` → `available` (D+7 PIX / D+3 BOLETO /
+        D+30 CARTÃO + UNDEFINED). RPC SQL mantida como backup.
+  - [x] `GET /api/internal/cron/generate-payouts` (mensal dia 1, 09:15
+        UTC) agrega earnings available em payouts `draft` com
+        `auto_generated=true`. Idempotente via UNIQUE constraint +
+        handler 23505. Warnings pra médica sem PIX ativo.
+  - [x] Tabela `cron_runs` + system-health checks freshness.
+  - [ ] `notify_pending_documents()` — diário 06:00, cobra NF (Sprint 5)
 - [ ] **Lib `src/lib/video.ts`:**
   - [ ] Interface `VideoProvider` (createRoom, getJoinUrl, deleteRoom,
         validateWebhook)
@@ -395,23 +406,49 @@ da "consulta agora".
 
 ---
 
-## ⚪ Sprint 5 · Área da Médica avançada + ciclo do paciente
+## 🟡 Sprint 5 · Área da Médica + ciclo do paciente · aberta 2026-04-20
 
-**Objetivo:** Médica consegue atender com fluxo enxuto (~10 min/consulta
-inicial, ~5 min/reconsulta) e paciente vê seu tratamento evoluir.
+**Objetivo:** agora que o ciclo financeiro está completo e automatizado
+(D-040), fechar a área da médica (auto-serviço de PIX, NF, saldo) e
+começar o ciclo do paciente (renovação, histórico). Financeiro mais
+automatizado (estorno já foi em D-034; NF-e upload flow fica aqui).
 
-### Entregáveis
+### Entregáveis priorizados
+
+**Frente 1 — Completar área da médica:**
+
+- [ ] Página `/medico/financeiro` com saldo atual (available + pending),
+      próximo payout estimado, histórico de payouts, upload de NF-e
+- [ ] Página `/medico/configuracoes` com PIX auto-serviço (CRUD de
+      `doctor_payment_methods`, idealmente validação Asaas do holder)
+- [ ] Página `/medico/agenda` (CRUD de `doctor_availability`)
+- [ ] Auto-serviço de desmarque pela médica com janela mínima de
+      aviso (liga na política de reliability D-036)
+- [ ] `notify_pending_documents()` — cron diário 06:00 WhatsApp
+      cobra NF pendente pros payouts confirmados há > 7 dias
+
+**Frente 2 — Ciclo do paciente:**
+
+- [ ] Página `/paciente/meu-tratamento`: dose atual, próxima
+      reconsulta, histórico de prescrições, evolução
+- [ ] Upload de exames (PDF/imagem) para histórico clínico
+- [ ] Renovação automática de plano com lembrete antes do fim do ciclo
+- [ ] MSG 2-10 do roteiro WhatsApp original (ainda não disparadas)
+
+**Frente 3 — Clínica:**
 
 - [ ] Verificação automática de CRM (CFM API ou scraping autorizado)
 - [ ] Triagem automática (regras de aptidão / contraindicações absolutas
       pré-consulta com sugestão de prescrição que a médica revisa)
 - [ ] Templates de mensagem WhatsApp 1-clique pra médica
 - [ ] Detector de alertas (efeitos colaterais graves → escalação)
-- [ ] Página `/paciente/meu-tratamento`: dose atual, próxima reconsulta,
-      exames, evolução
-- [ ] Upload de exames (PDF/imagem) para histórico clínico
-- [ ] Renovação automática de plano com lembrete antes do fim do ciclo
-- [ ] MSG 2-10 do roteiro WhatsApp original (ainda não disparadas)
+
+**Frente 4 — Teste + robustez:**
+
+- [ ] Cobertura de testes pra `no-show-policy`, `slot-reservation`,
+      tokens HMAC (pontos críticos não cobertos em D-038)
+- [ ] E2E Playwright contra staging (se criarmos staging)
+- [ ] Relatório financeiro consolidado por médica (export CSV mês)
 
 ---
 

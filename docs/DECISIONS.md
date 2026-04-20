@@ -5,6 +5,141 @@
 
 ---
 
+## D-040 · Crons financeiros reimplementados em Node, com observabilidade · 2026-04-20
+
+**Contexto:** a migration 005 (D-022) já tinha criado as RPCs Postgres
+`recalculate_earnings_availability()` e `generate_monthly_payouts()`
+agendadas via `pg_cron`. Em teoria, o ciclo financeiro estava
+"pronto". Na prática:
+
+1. `pg_cron` pode não estar habilitado em um ambiente (o próprio
+   bloco `CREATE EXTENSION` faz apenas `raise notice` e segue). Se
+   alguém esqueceu, earnings ficam presas em `pending` indefinidamente
+   e nenhum payout é gerado — sem alerta.
+2. As RPCs retornam só um `int`. **Zero observabilidade**: ninguém sabe
+   se rodou, quantas earnings foram promovidas, se houve erro, quais
+   médicas foram puladas por falta de PIX.
+3. Médicas com saldo `available` mas sem `doctor_payment_methods.active=true`
+   são silenciosamente ignoradas pelo `JOIN` do SQL. Admin só descobre
+   a lacuna quando a médica pergunta "cadê meu repasse?".
+4. A lógica era difícil de testar em unit test (exigiria fixture SQL
+   de banco de teste isolado).
+
+**Decisão:** reimplementar os dois crons em **Node puro** (com Supabase
+service role), chamados via **Vercel Crons**, mantendo as RPCs no banco
+como **backup idempotente** rodando sob `pg_cron` (quando habilitado).
+
+**Arquitetura:**
+
+- `src/lib/earnings-availability.ts`
+  - Função: `recalculateEarningsAvailability(supabase)`
+  - Regra (paridade com COMPENSATION.md):
+    - Earning sem `payment_id` → `available_at = earned_at`, promove já.
+    - Earning com `payment_id` → `available_at = payment.paid_at + janela`
+      onde janela = 7 dias (PIX), 3 dias (BOLETO), 30 dias (CREDIT_CARD
+      e UNDEFINED — pior caso conservador).
+    - `available_at <= now()` → `status='available'` via UPDATE com
+      `.eq("status","pending")` (guard contra corrida).
+  - Retorno estruturado: `{ inspected, scheduledFuture, promoted,
+    skippedMissingPaidAt, errors, errorDetails }`.
+
+- `src/lib/monthly-payouts.ts`
+  - Função: `generateMonthlyPayouts(supabase, { referencePeriod? })`
+  - `defaultReferencePeriod(now)` → mês anterior no fuso UTC, 'YYYY-MM'.
+  - Pipeline:
+    1. SELECT earnings `available` + `payout_id IS NULL` + `available_at
+       < currentMonthStartIso()`.
+    2. Agrega por `doctor_id`, descarta quem tem `sum=0`.
+    3. SELECT `doctors` e `doctor_payment_methods (active=true)` em
+       batch (2 queries pro N de médicas).
+    4. Por médica: se inativa OU sem PIX → `warning` no payload, pula.
+       Se ok → INSERT com `auto_generated=true`. Em `23505` (unique)
+       → trata como idempotente, warning `existing_payout`.
+    5. UPDATE `doctor_earnings` linked com guard `.eq("status","available")
+       .is("payout_id",null)` + `.in("id", earningIds)`.
+  - Retorno: `{ referencePeriod, doctorsEvaluated, payoutsCreated,
+    payoutsSkippedExisting, payoutsSkippedMissingPix, earningsLinked,
+    totalCentsDrafted, warnings[], errors, errorDetails }`.
+
+- `src/lib/cron-runs.ts`
+  - Wrapper `startCronRun` / `finishCronRun` que persiste cada execução
+    na nova tabela `public.cron_runs` (migration 014): job, status,
+    duration_ms, payload (counters + warnings), error_message.
+
+- `GET /api/internal/cron/recalculate-earnings` (daily, 03:15 UTC)
+- `GET /api/internal/cron/generate-payouts` (monthly, dia 1 09:15 UTC)
+  - Autenticados por `CRON_SECRET` (mesmo padrão das outras crons).
+  - Param opcional `?period=YYYY-MM` pra backfill manual.
+
+**Schema complementar (migration 014):**
+
+- `doctor_payouts.auto_generated boolean default false` — destaca na
+  UI `/admin/payouts` drafts gerados pelo cron (badge "auto") vs.
+  ajustes manuais futuros.
+- `cron_runs (id, job, started_at, finished_at, status, duration_ms,
+   payload jsonb, error_message)` + índices em `(job, started_at)`
+  e `(status)`. Service role only.
+
+**Observabilidade (D-039 + D-040):**
+
+- `system-health.ts` ganhou dois checks:
+  - `cron_earnings_availability` — warning > 36h sem run, error > 7d.
+  - `cron_monthly_payouts` — warning > 40d, error > 70d (cron mensal,
+    folga grande).
+  - Se a última execução foi `error`, eleva o status em 1 nível mesmo
+    que fresca.
+  - `payload_summary` no details expõe contagens chave (`promoted`,
+    `payoutsCreated`, `errors`) direto no dashboard.
+
+**Coexistência com pg_cron:**
+
+As RPCs SQL continuam no banco e rodam junto com os crons Vercel.
+Ambas são idempotentes (UPDATE com guard de status; INSERT com
+UNIQUE). Se uma rodar primeiro, a segunda vira noop. Em prod, se o
+Vercel cair num minuto específico, o `pg_cron` cobre (e vice-versa).
+No dev/teste sem `pg_cron`, o Vercel é o único motor — e agora é
+observável.
+
+**Alternativas consideradas:**
+
+- **Manter só o pg_cron.** Rejeitada: 3 problemas acima intocados.
+- **Trigger SQL em INSERT/UPDATE de earnings.** Rejeitada: viola
+  imutabilidade (D-022), não resolve `generate_monthly_payouts` que é
+  intrinsicamente batch.
+- **Webhook vindo do Asaas disparando re-calc.** Rejeitada: só cobre
+  consultas; não resolve ajustes/plantão; cria acoplamento a um
+  provider externo pra coisa interna.
+
+**Testes:**
+
+- `earnings-availability.test.ts` — 16 testes cobrindo cada billing_type,
+  payment sem paid_at, earnings sem payment_id, idempotência, erro de
+  select, agregado com múltiplas earnings mistas.
+- `monthly-payouts.test.ts` — 12 testes cobrindo happy path,
+  `defaultReferencePeriod` (janeiro→dezembro, meses 1-12), PIX missing,
+  PIX vazia, médica inativa, sum-zero por clawback, unique violation
+  (idempotência), erro parcial isolado de uma médica, 2 médicas
+  simultâneas.
+
+**Consequências:**
+
+- Médicas recebem PIX no primeiro dia útil do mês sem intervenção
+  manual — earnings avançam diariamente e viram draft no dia 1º.
+- Admin tem feedback imediato no `/admin/health` sobre o ciclo
+  financeiro — quebra não fica silenciosa por 30 dias até alguém
+  reclamar.
+- Admin sabe exatamente quais médicas têm saldo mas faltam PIX
+  cadastrado (warning `missing_pix_active` no payload da cron_run).
+- Badge "auto" em `/admin/payouts` deixa evidente quais drafts
+  nasceram do cron (base futura pra permitir edição/aprovação diferente).
+- Duplicação controlada de lógica (Node + SQL). Mitigada pela paridade
+  documentada aqui e pelos testes.
+- **Abre Sprint 5:** financeiro agora flui. Próximos blocos
+  naturais são NF-e upload flow, relatório financeiro por médica,
+  automação PIX via Asaas, e o Painel da Médica propriamente dito.
+
+---
+
 ## D-039 · Prova de fogo E2E (runbook + health endpoint + dashboard) · 2026-04-20
 
 **Contexto:** antes desta entrega, validar que "tudo está funcionando

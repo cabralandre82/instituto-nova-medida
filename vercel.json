@@ -19,6 +19,12 @@
     },
     "src/app/api/internal/cron/daily-reconcile/route.ts": {
       "maxDuration": 60
+    },
+    "src/app/api/internal/cron/recalculate-earnings/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/internal/cron/generate-payouts/route.ts": {
+      "maxDuration": 120
     }
   },
   "crons": [
@@ -33,6 +39,14 @@
     {
       "path": "/api/internal/cron/daily-reconcile",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/internal/cron/recalculate-earnings",
+      "schedule": "15 3 * * *"
+    },
+    {
+      "path": "/api/internal/cron/generate-payouts",
+      "schedule": "15 9 1 * *"
     }
   ],
   "headers": [

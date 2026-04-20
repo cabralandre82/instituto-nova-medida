@@ -29,6 +29,7 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getReconciliationCounts } from "@/lib/reconciliation";
 import { listDoctorReliabilityOverview } from "@/lib/reliability";
+import { getLatestRun, type CronJob } from "@/lib/cron-runs";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Tipos
@@ -84,6 +85,14 @@ const DAILY_SIGNAL_ERROR_DAYS = 30;
 
 /** WhatsApp event: sem evento há muito tempo pode ser ambiente ocioso. */
 const WHATSAPP_EVENT_WARN_DAYS = 14;
+
+/** Cron earnings (diário): falta > 36h = warning, > 7d = erro. */
+const CRON_EARNINGS_WARN_HOURS = 36;
+const CRON_EARNINGS_ERROR_DAYS = 7;
+
+/** Cron payouts (mensal): folga grande, roda dia 1; 40d = warning, 70d = erro. */
+const CRON_PAYOUTS_WARN_DAYS = 40;
+const CRON_PAYOUTS_ERROR_DAYS = 70;
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
@@ -146,6 +155,28 @@ export async function runHealthCheck(
       "reliability",
       "Confiabilidade das médicas",
       checkReliability,
+      timeoutMs
+    ),
+    withTimeout(
+      "cron_earnings_availability",
+      "Cron · availability de earnings",
+      () =>
+        checkCronFreshness(
+          "recalc_earnings_availability",
+          CRON_EARNINGS_WARN_HOURS * 60 * 60 * 1000,
+          CRON_EARNINGS_ERROR_DAYS * 24 * 60 * 60 * 1000
+        ),
+      timeoutMs
+    ),
+    withTimeout(
+      "cron_monthly_payouts",
+      "Cron · geração mensal de payouts",
+      () =>
+        checkCronFreshness(
+          "generate_monthly_payouts",
+          CRON_PAYOUTS_WARN_DAYS * 24 * 60 * 60 * 1000,
+          CRON_PAYOUTS_ERROR_DAYS * 24 * 60 * 60 * 1000
+        ),
       timeoutMs
     ),
   ]);
@@ -572,6 +603,80 @@ async function checkReliability(): Promise<
       in_soft_warn: softWarn,
     },
   };
+}
+
+async function checkCronFreshness(
+  job: CronJob,
+  warnThresholdMs: number,
+  errorThresholdMs: number
+): Promise<Omit<HealthCheck, "key" | "label" | "elapsedMs">> {
+  const supabase = getSupabaseAdmin();
+  const latest = await getLatestRun(supabase, job);
+
+  if (!latest) {
+    return {
+      status: "unknown",
+      summary: "Nenhuma execução registrada ainda.",
+      details: { last_run_at: null, job },
+    };
+  }
+
+  const referenceTs =
+    latest.finished_at ?? latest.started_at; // freshness = último término
+  const ageMs = Date.now() - new Date(referenceTs).getTime();
+  const ageHours = Math.round(ageMs / (60 * 60 * 1000));
+  const freshness = decideFreshness(ageMs, warnThresholdMs, errorThresholdMs);
+
+  // Se a última execução foi erro, eleva pelo menos pra warning
+  // (mesmo que fresh). Erro recente e persistente vira error.
+  let status: HealthStatus = freshness;
+  if (latest.status === "error") {
+    status = status === "ok" ? "warning" : "error";
+  }
+
+  const when = `${ageHours}h atrás`;
+  const summary =
+    latest.status === "error"
+      ? `Última execução FALHOU ${when}: ${latest.error_message ?? "erro"}`
+      : latest.status === "running"
+      ? `Execução em curso iniciada ${when}.`
+      : `Última execução ok ${when}.`;
+
+  return {
+    status,
+    summary,
+    details: {
+      job,
+      last_run_at: referenceTs,
+      last_run_status: latest.status,
+      last_run_duration_ms: latest.duration_ms,
+      age_hours: ageHours,
+      payload_summary: payloadSummary(latest.payload),
+    },
+  };
+}
+
+function payloadSummary(
+  payload: Record<string, unknown> | null
+): string | null {
+  if (!payload) return null;
+  const keys = [
+    "promoted",
+    "scheduledFuture",
+    "inspected",
+    "payoutsCreated",
+    "payoutsSkippedExisting",
+    "payoutsSkippedMissingPix",
+    "totalCentsDrafted",
+    "errors",
+  ];
+  const parts: string[] = [];
+  for (const k of keys) {
+    if (k in payload && typeof payload[k] === "number") {
+      parts.push(`${k}=${payload[k]}`);
+    }
+  }
+  return parts.length > 0 ? parts.join(" ") : null;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
