@@ -5,6 +5,54 @@
 
 ---
 
+## D-025 · Autenticação por magic link (Supabase Auth) + roles via app_metadata · 2026-04-19
+
+**Contexto:** Sprint 4.1 (entrega 2/3) precisa habilitar acesso ao painel
+administrativo (operador) e ao painel da médica. Decisão deliberada de
+não construir login com senha:
+
+- Senha = mais superfície de ataque (vazamento de hash, brute-force,
+  reset flow), mais código a manter, e zero benefício real pra um time
+  pequeno onde cada usuário tem e-mail confiável.
+- Magic link delega o "fator de posse" ao provedor de e-mail —
+  o que já é o fator de recuperação efetivo de qualquer senha.
+- Supabase Auth já suporta nativamente; cookies HttpOnly via `@supabase/ssr`.
+
+**Decisão:**
+
+- **Magic link only** para operador e médicas. Sem senha, sem TOTP no MVP
+  (avaliar TOTP em Sprint 6 quando houver dados clínicos sensíveis no
+  painel da médica).
+- Roles ficam em `auth.users.app_metadata.role` (`'admin' | 'doctor' | 'patient'`).
+  **Nunca** em `user_metadata` — esse o usuário pode editar via API.
+- Middleware (`src/middleware.ts`) faz hard-gate sobre `/admin/*` e
+  `/medico/*` (refresh + presença de sessão). Validação fina de role
+  acontece nos Server Components via `requireAdmin()` / `requireDoctor()`.
+- Endpoint `/api/auth/magic-link` é **anti-enumeração**: sempre responde
+  200, mesmo quando o e-mail não existe. Rate limit por IP (5 / 15 min)
+  em memória — substituir por Upstash quando tiver tráfego real.
+- Convite de médica via `/admin/doctors/new` cria o usuário com
+  `email_confirm=true` e dispara magic link de boas-vindas — médica
+  completa o perfil sozinha no `/medico` (Sprint 4.1 entrega 3).
+
+**Alternativas descartadas:**
+
+- **Auth0/Clerk:** custo desnecessário, lock-in adicional, e o Supabase
+  Auth já está incluído.
+- **Senha + TOTP:** mais segurança no papel, mas operacionalmente caro
+  pra time de 1 pessoa. Reavaliar quando houver +5 médicas atendendo.
+- **OAuth (Google):** funcionaria pro operador (que tem Workspace), mas
+  exige cada médica ter conta Google compatível. Magic link é universal.
+
+**Consequências:**
+
+- Toda rota admin é dinâmica (lê cookies). Custo extra de Vercel
+  Functions é desprezível neste estágio.
+- Compromisso de manter o painel na mesma origem do site público
+  (cookie `httpOnly` + `sameSite=lax` em `instituto-nova-medida.vercel.app`).
+
+---
+
 ## D-024 · Modelo de remuneração de médicas (PJ + valores fixos) · 2026-04-19
 
 **Contexto:** Sprint 4 abre o cadastro de médicas. Precisávamos definir

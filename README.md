@@ -38,24 +38,32 @@ Validado E2E na produção. Landing conectada (Header, Hero, Cost e
 Success modal apontam para `/planos`); lead capturado pelo quiz é
 vinculado à compra via `localStorage`.
 
-**Sprint 4.1** 🟡 — **Em andamento** (entrega 1/3 concluída). Fundação
-multi-médico: schema completo (`doctors`, `doctor_availability`,
-`doctor_payment_methods`, `doctor_compensation_rules`, `appointments`,
-`appointment_notifications`, `doctor_earnings`, `doctor_payouts`,
-`doctor_billing_documents`), funções Postgres pra cálculo de
-disponibilidade e geração de payouts mensais, 2 cron jobs ativos
-(`pg_cron`), RLS deny-by-default com helpers `current_doctor_id()` /
-`jwt_role()`, view pública `doctors_public`, lib `src/lib/video.ts`
-abstraindo provider (DailyProvider operacional). Decisões registradas:
-**D-021** Daily.co MVP, **D-022** controle financeiro interno (sem
-split Asaas), **D-023** não gravar por default (opt-in), **D-024**
-médicas como PJ + valores fixos. Veja `docs/COMPENSATION.md` e
-`docs/WHATSAPP_TEMPLATES.md`.
+**Sprint 4.1** 🟡 — **Em andamento** (entregas 1/3 e 2/3 concluídas).
 
-**Próximas entregas Sprint 4.1:** auth (médica + admin), páginas
-admin (`/admin/doctors|payouts|financeiro`), painel médica (`/medico*`),
-fluxo paciente (`/agendar`), API routes (appointments, webhook Daily,
-extensão webhook Asaas, payouts), helpers WhatsApp pros 7 templates.
+- **1/3** ✅ Schema completo (`doctors`, `doctor_availability`,
+  `doctor_payment_methods`, `doctor_compensation_rules`, `appointments`,
+  `appointment_notifications`, `doctor_earnings`, `doctor_payouts`,
+  `doctor_billing_documents`), funções Postgres pra cálculo de
+  disponibilidade e geração de payouts mensais, 2 cron jobs ativos
+  (`pg_cron`), RLS deny-by-default, view `doctors_public`, lib
+  `src/lib/video.ts` (DailyProvider operacional). Decisões: **D-021**
+  Daily.co MVP, **D-022** controle financeiro interno, **D-023** não
+  gravar por default, **D-024** PJ + valores fixos.
+- **2/3** ✅ Auth magic-link (Supabase Auth + `@supabase/ssr`),
+  middleware com hard-gate `/admin/*` e `/medico/*`, painel admin
+  completo: dashboard, CRUD de médicas (perfil + agenda + compensação
+  versionada + PIX), gestão de payouts com workflow draft → approved
+  → pix_sent → confirmed → cancelled. Webhook Asaas estendido pra
+  gerar `doctor_earnings` em `PAYMENT_RECEIVED` e clawbacks em
+  `PAYMENT_REFUNDED`/CHARGEBACK. Decisão: **D-025** magic-link only,
+  roles em `app_metadata`. Usuário admin inicial:
+  `cabralandre@yahoo.com.br`.
+
+**Próxima entrega Sprint 4.1 (3/3):** painel médica (`/medico/*`),
+fluxo paciente (`/agendar` + reserva → checkout → criação automática
+de appointment + sala Daily), webhook Daily (`meeting.started/ended`
+atualiza `appointment.status`), helpers WhatsApp pros 7 templates,
+Storage privado pra comprovantes/NF-e, env vars Daily no Vercel.
 
 Veja [`docs/SPRINTS.md`](./docs/SPRINTS.md) para o roadmap completo.
 
@@ -97,6 +105,7 @@ instituto-nova-medida/
 ├── docs/                    # Documentação viva
 ├── public/                  # Imagens e assets estáticos
 ├── src/
+│   ├── middleware.ts        # auth + refresh de sessão Supabase
 │   ├── app/                 # Rotas, layout, API
 │   │   ├── layout.tsx
 │   │   ├── page.tsx         # Landing
@@ -106,22 +115,36 @@ instituto-nova-medida/
 │   │   ├── icon.svg
 │   │   ├── planos/page.tsx           # catálogo de planos
 │   │   ├── checkout/
-│   │   │   ├── [plano]/page.tsx      # formulário de checkout
+│   │   │   ├── [plano]/page.tsx
 │   │   │   ├── sucesso/page.tsx
 │   │   │   └── aguardando/page.tsx
 │   │   ├── sobre/page.tsx
 │   │   ├── termos/page.tsx
 │   │   ├── privacidade/page.tsx
+│   │   ├── admin/                    # painel administrativo
+│   │   │   ├── login/                # magic link form
+│   │   │   └── (shell)/              # layout com sidebar (requer admin)
+│   │   │       ├── page.tsx          # dashboard
+│   │   │       ├── doctors/          # CRUD de médicas
+│   │   │       └── payouts/          # gestão de repasses
 │   │   └── api/
 │   │       ├── lead/route.ts
 │   │       ├── checkout/route.ts
 │   │       ├── asaas/webhook/route.ts
-│   │       └── wa/webhook/route.ts
+│   │       ├── wa/webhook/route.ts
+│   │       ├── auth/                 # magic-link / callback / signout
+│   │       └── admin/                # APIs do painel
+│   │           ├── doctors/[id]/(compensation|payment-method|availability)
+│   │           └── payouts/[id]/(approve|pay|confirm|cancel)
 │   ├── components/                   # 16+ componentes
 │   └── lib/
 │       ├── asaas.ts                  # cliente Asaas (sandbox/prod)
+│       ├── auth.ts                   # requireAdmin/requireDoctor + getSessionUser
+│       ├── earnings.ts               # geração de earnings/clawbacks
+│       ├── payouts.ts                # state machine de payouts
+│       ├── supabase.ts               # admin (service role) + anon
+│       ├── supabase-server.ts        # @supabase/ssr (server components)
 │       ├── video.ts                  # VideoProvider + DailyProvider
-│       ├── supabase.ts
 │       ├── whatsapp.ts
 │       └── utils.ts
 ├── supabase/migrations/              # SQL versionado
@@ -129,7 +152,8 @@ instituto-nova-medida/
 │   ├── 20260419010000_leads_whatsapp_tracking.sql
 │   ├── 20260419020000_whatsapp_events.sql
 │   ├── 20260419030000_asaas_payments.sql
-│   └── 20260419040000_doctors_appointments_finance.sql
+│   ├── 20260419040000_doctors_appointments_finance.sql
+│   └── 20260419050000_payouts_admin_fields.sql
 ├── package.json
 ├── tailwind.config.ts
 ├── tsconfig.json

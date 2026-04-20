@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { isWebhookTokenValid, type AsaasWebhookEvent } from "@/lib/asaas";
+import { createConsultationEarning, createClawback } from "@/lib/earnings";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -129,10 +130,12 @@ export async function POST(req: Request) {
         updates.refunded_at = new Date().toISOString();
       }
 
-      const { error: updateErr } = await supabase
+      const { data: updatedPayment, error: updateErr } = await supabase
         .from("payments")
         .update(updates)
-        .eq("asaas_payment_id", asaasPaymentId);
+        .eq("asaas_payment_id", asaasPaymentId)
+        .select("id")
+        .maybeSingle();
 
       if (updateErr) {
         console.error("[asaas-webhook] update payment falhou:", updateErr);
@@ -148,6 +151,19 @@ export async function POST(req: Request) {
           event: body.event,
           status: payment.status,
         });
+
+        // === Geração de earnings para a médica vinculada ===
+        // Se a payment tem appointment_id, criamos earning(s) ao receber
+        // o pagamento, e clawback ao receber estorno.
+        const internalPaymentId = updatedPayment?.id as string | undefined;
+        if (internalPaymentId) {
+          await handleEarningsLifecycle(
+            supabase,
+            body.event,
+            payment.status,
+            internalPaymentId
+          );
+        }
       }
     }
 
@@ -184,4 +200,82 @@ export function GET() {
     service: "instituto-nova-medida-asaas-webhook",
     env: process.env.ASAAS_ENV ?? "sandbox",
   });
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Helpers internos
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * Roteador de eventos Asaas → criação/cancelamento de earnings.
+ * Tudo silencioso por design: erros são logados mas não bloqueiam o
+ * webhook (200 sempre).
+ */
+async function handleEarningsLifecycle(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  event: string,
+  paymentStatus: string,
+  internalPaymentId: string
+): Promise<void> {
+  // Busca appointment vinculado ao payment (se houver)
+  const { data: appt } = await supabase
+    .from("appointments")
+    .select("id, doctor_id, kind, customer_id, customers(full_name)")
+    .eq("payment_id", internalPaymentId)
+    .maybeSingle();
+
+  // Sem appointment → payment de plano genérico, sem earning de
+  // consulta direta. Sair silenciosamente.
+  if (!appt) return;
+
+  const isReceived =
+    event === "PAYMENT_RECEIVED" ||
+    event === "PAYMENT_CONFIRMED" ||
+    event === "PAYMENT_RECEIVED_IN_CASH" ||
+    paymentStatus === "RECEIVED" ||
+    paymentStatus === "CONFIRMED" ||
+    paymentStatus === "RECEIVED_IN_CASH";
+
+  const isReversed =
+    event === "PAYMENT_REFUNDED" ||
+    event === "PAYMENT_REFUND_IN_PROGRESS" ||
+    event === "PAYMENT_CHARGEBACK_REQUESTED" ||
+    event === "PAYMENT_CHARGEBACK_DISPUTE" ||
+    paymentStatus === "REFUNDED" ||
+    paymentStatus === "CHARGEBACK_REQUESTED";
+
+  if (isReceived) {
+    const customerName =
+      (appt as { customers?: { full_name?: string } }).customers?.full_name ?? "paciente";
+    const result = await createConsultationEarning(supabase, {
+      paymentId: internalPaymentId,
+      doctorId: appt.doctor_id as string,
+      appointmentId: appt.id as string,
+      appointmentKind: (appt.kind as "scheduled" | "on_demand" | undefined) ?? "scheduled",
+      description: `Consulta · ${customerName}`,
+    });
+    if (!result.ok) {
+      console.error("[asaas-webhook] earning falhou:", result.error);
+    } else if (result.created) {
+      console.log("[asaas-webhook] earning criado:", result.earningId);
+    }
+    return;
+  }
+
+  if (isReversed) {
+    const reason =
+      event === "PAYMENT_CHARGEBACK_REQUESTED" || event === "PAYMENT_CHARGEBACK_DISPUTE"
+        ? "Chargeback"
+        : "Estorno";
+    const result = await createClawback(supabase, {
+      paymentId: internalPaymentId,
+      doctorId: appt.doctor_id as string,
+      reason,
+    });
+    if (!result.ok) {
+      console.error("[asaas-webhook] clawback falhou:", result.error);
+    } else if (result.clawbacks > 0) {
+      console.log("[asaas-webhook] clawbacks criados:", result.clawbacks);
+    }
+  }
 }

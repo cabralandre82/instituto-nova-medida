@@ -6,6 +6,126 @@
 
 ---
 
+## 2026-04-19 · Sprint 4.1 (2/3) — Auth + painel admin completo · IA
+
+**Por quê:** Sprint 4.1 (1/3) entregou o schema. Agora a operação
+ganha cara: o operador entra no sistema, cadastra médicas, define
+regras de remuneração, recebe os payouts gerados pelo cron mensal,
+aprova manualmente, executa o PIX e marca como pago. Workflow
+financeiro fechado ponta a ponta.
+
+**Decisões registradas (DECISIONS.md):**
+
+- **D-025** — Magic link only (Supabase Auth) para operador e médicas.
+  Sem senha. Roles em `app_metadata.role` (`admin` / `doctor`).
+  Hard-gate em middleware + `requireAdmin()` / `requireDoctor()`.
+  Anti-enumeração no endpoint de login (sempre 200, nunca revela
+  existência de e-mail).
+
+**Migration aplicada (006 — `20260419050000_payouts_admin_fields.sql`):**
+
+- `doctor_payouts` ganhou `pix_sent_at`, `confirmed_at`, `pix_proof_url`,
+  `pix_transaction_id` (separa "PIX enviado" de "Confirmado pela
+  médica" — ambos timestamps importantes pra auditoria).
+- `doctor_payment_methods` ganhou `is_default`, `account_holder_name`,
+  `account_holder_cpf_or_cnpj` (alinhados com o painel admin).
+- `availability_type` enum aceita também `'scheduled'` / `'on_call'`
+  além de `'agendada'` / `'plantao'` — tira friction do front em EN.
+- `doctor_earnings.description` agora nullable (webhook nem sempre tem
+  descrição humana imediata).
+
+**Auth (`src/lib/auth.ts`, `src/lib/supabase-server.ts`, `src/middleware.ts`):**
+
+- `getSupabaseServer()` (Server Components) e `getSupabaseRouteHandler()`
+  (Route Handlers que mutam cookies) sobre `@supabase/ssr` 0.10.2.
+- `requireAuth()`, `requireAdmin()`, `requireDoctor()` — server-only,
+  redirects automáticos.
+- Middleware faz refresh de token em toda request + bloqueia rotas
+  `/admin/*` e `/medico/*` sem sessão.
+- APIs: `/api/auth/magic-link` (POST, anti-enumeração + rate limit
+  5 / 15 min por IP), `/api/auth/callback` (GET, troca code por
+  cookie de sessão), `/api/auth/signout` (POST, encerra sessão).
+- Usuário admin inicial criado: **cabralandre@yahoo.com.br** com
+  `app_metadata.role = 'admin'`, `email_confirmed_at` setado.
+
+**Painel admin (`src/app/admin/(shell)/...`):**
+
+- **/admin/login** — magic link form com mensagens de erro contextuais
+  e estado "link enviado" pós-submit.
+- **/admin** — dashboard com 4 cards (médicas ativas, repasses para
+  revisar, receita do mês, saldo a pagar) + alertas dinâmicos.
+- **/admin/doctors** — lista com status (invited/active/suspended/etc),
+  CRM, contato. CTA "Nova médica".
+- **/admin/doctors/new** — formulário com validação client (CRM/UF/CNPJ
+  com máscaras), cria usuário Supabase Auth (`role=doctor`) +
+  registro `doctors` + regra de compensação default (D-024) +
+  dispara magic link de boas-vindas.
+- **/admin/doctors/[id]** — 4 abas:
+  - Perfil & status (mudança de status registra timestamp);
+  - Compensação (regra ativa + form pra criar nova versão com
+    justificativa obrigatória; histórico completo abaixo);
+  - PIX (tipo + chave + titular + CPF/CNPJ; upsert idempotente);
+  - Agenda (slots semanais agendada/plantão; add/remove inline).
+- **/admin/payouts** — agrupa por status (draft / approved / pix_sent /
+  confirmed / failed / cancelled) com valor total e médica.
+- **/admin/payouts/[id]** — detalhe com lista de earnings consolidados,
+  histórico de timestamps, dados PIX da médica em painel lateral, e
+  ações contextuais por status.
+
+**APIs admin (`src/app/api/admin/...`):**
+
+- `POST /doctors` — cria médica + usuário Auth + regra default + invite.
+- `PATCH /doctors/[id]` — atualiza perfil (campos editáveis); muda
+  status com timestamp correspondente.
+- `POST /doctors/[id]/compensation` — fecha regra atual e cria nova
+  com `effective_from = now()`. Justificativa obrigatória.
+- `POST /doctors/[id]/payment-method` — upsert do PIX default,
+  desativa outros métodos antes de inserir novo.
+- `POST/DELETE /doctors/[id]/availability` — adiciona/remove slots.
+- `POST /payouts/[id]/(approve|pay|confirm|cancel)` — máquina de
+  estados validada via `src/lib/payouts.ts` (`canTransition`).
+  - `approve`: draft → approved, registra `approved_by` + timestamp.
+  - `pay`: approved → pix_sent, registra timestamp + opcional
+    `pix_transaction_id`.
+  - `confirm`: pix_sent → confirmed, marca todos earnings vinculados
+    como `paid`, opcionalmente anexa URL de comprovante.
+  - `cancel`: draft/approved/pix_sent → cancelled, desvincula
+    earnings (voltam pra `available` e entram no próximo lote).
+
+**Webhook Asaas estendido (`src/app/api/asaas/webhook/route.ts` +
+`src/lib/earnings.ts`):**
+
+- `PAYMENT_RECEIVED` / `PAYMENT_CONFIRMED` / `PAYMENT_RECEIVED_IN_CASH`
+  → busca `appointment` vinculado → cria `doctor_earnings` tipo
+  `consultation` (e `on_demand_bonus` se `kind='on_demand'`) com
+  snapshot da regra de compensação ativa. Dispara
+  `recalculate_earnings_availability()` pra preencher `available_at`.
+- `PAYMENT_REFUNDED` / `PAYMENT_REFUND_IN_PROGRESS` /
+  `PAYMENT_CHARGEBACK_*` → cria earning negativo
+  (`refund_clawback`) apontando pro pai via `parent_earning_id`.
+  Cancela earning original se ainda `pending`/`available`. Se já
+  estava `in_payout`, loga warning para revisão admin.
+- Idempotente em ambos: não duplica earning/clawback se já existir
+  pro mesmo `payment_id`.
+
+**Quality:**
+
+- Build limpo (`npm run build`): 0 erros TS, 0 warnings ESLint.
+- 21 rotas total no app (3 públicas estáticas, 18 dinâmicas).
+- Middleware: 80.3 kB (refresh + gate).
+- Smoke test local: `/admin` → 307 → `/admin/login?next=/admin`,
+  `/admin/login` → 200 com título correto, `/api/auth/magic-link`
+  → 200 idempotente.
+
+**Próximos passos (Sprint 4.1 — 3/3):**
+
+- Painel `/medico/*` (similar ao admin: dashboard, agenda, ganhos).
+- Storage privado pra comprovantes PIX e NF-e.
+- Submeter os 7 templates WhatsApp à Meta (cabe ao operador).
+- Adicionar env vars Daily no Vercel (precisa VERCEL_TOKEN).
+
+---
+
 ## 2026-04-19 · Sprint 4.1 (1/3) — Fundação multi-médico · IA
 
 **Por quê:** Sprint 3 fechou o pipeline comercial (paciente paga). Agora
