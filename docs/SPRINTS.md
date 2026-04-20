@@ -526,14 +526,22 @@ automatizado (estorno já foi em D-034; NF-e upload flow fica aqui).
       + update fulfillment → pending_payment + snapshot shipping).
       Trata `23505` como idempotência. 50 testes novos (241
       totais). Migração aplicada.
-- [ ] **D-044 onda 2.C.2 · UI do aceite + integração Asaas.**
-      Endpoint `POST /api/paciente/fulfillments/[id]/accept` +
-      página `/paciente/oferta/[appointment_id]` com resumo da
-      prescrição, plano, termo completo, form de endereço com
-      ViaCEP, checkbox legal e submit. Após aceite: chama
-      `ensurePaymentForFulfillment` (idempotente) pra criar cobrança
-      Asaas e redirecionar pro checkout hospedado. Card "oferta
-      pendente" em `/paciente`.
+- [x] **D-044 onda 2.C.2 · UI do aceite + integração Asaas.**
+      (2026-04-20) Nova lib `src/lib/fulfillment-payment.ts` com
+      `ensurePaymentForFulfillment` idempotente (reusa payment_id
+      existente se Asaas status for PENDING/AWAITING_RISK_ANALYSIS/
+      CONFIRMED; senão cria; garante asaas_customer_id; vincula ff).
+      Endpoint `POST /api/paciente/fulfillments/[id]/accept`
+      encadeia `acceptFulfillment` + `ensurePaymentForFulfillment`
+      capturando IP e user-agent. Página server
+      `/paciente/oferta/[appointment_id]` com gating por status,
+      resumo da consulta, link Memed, termo renderizado server-side
+      (texto exato hashable), form client `OfferForm` com endereço
+      pré-preenchido + ViaCEP + checkbox legal + botão "Aceito e ir
+      para pagamento". `listPendingOffers` em `patient-treatment`
+      + card de oferta pendente em `/paciente` (sage = accept
+      pendente; cream = pagamento pendente). 9 testes novos (250
+      totais). `next build` verde.
 - [ ] **D-044 onda 2.D · Webhook Asaas promove `paid`.** Extensão
       do handler existente pra mover fulfillment
       `pending_payment` → `paid`; WhatsApp "pagamento ok".

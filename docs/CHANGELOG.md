@@ -6,6 +6,85 @@
 
 ---
 
+## 2026-04-20 · Aceite do paciente · endpoint + UI + Asaas (D-044 · onda 2.C.2) · IA
+
+**Por quê:** a 2.C.1 deixou o backend do aceite pronto (hash, termo,
+endereço, transação). Faltava expor ao paciente: uma tela humana pra
+revisar a indicação, ler o termo, informar endereço e prosseguir pro
+pagamento — tudo numa única ação idempotente. Esta entrega fecha o
+caminho paciente → aceite → Asaas.
+
+**Entregáveis:**
+
+- **`src/lib/fulfillment-payment.ts`:** `ensurePaymentForFulfillment`
+  idempotente. Carrega fulfillment + customer + plan; reusa
+  `payment_id` existente se o status Asaas ainda é aproveitável
+  (PENDING/AWAITING_RISK_ANALYSIS/CONFIRMED); senão cria. Garante
+  `asaas_customer_id` (cria Asaas customer se faltar ou se o env
+  mudou), insere row local em `payments`, cria cobrança Asaas com
+  `billingType=UNDEFINED` (paciente escolhe PIX/boleto/cartão na
+  invoice hospedada), vincula `fulfillments.payment_id`, retorna
+  `invoice_url`. Só aceita fulfillment em `pending_payment` — antes
+  disso, erro `invalid_state` (exige aceite primeiro).
+- **`src/lib/fulfillment-payment.test.ts`:** 9 testes — idempotência
+  (reuso PENDING), recriação quando status não-reusável, validações
+  (not_found, status ≠ pending_payment, plano inativo), happy path
+  com/sem asaas_customer_id existente, falhas do Asaas (customer e
+  payment, este marcando row local como DELETED).
+- **`POST /api/paciente/fulfillments/[id]/accept`:** transport que
+  encadeia `acceptFulfillment` + `ensurePaymentForFulfillment`.
+  Captura IP (`x-forwarded-for` / `x-real-ip`) e user-agent pro
+  registro legal. Valida `address` e `acceptance_text`. Retorna
+  `{ ok, invoiceUrl, paymentId, acceptanceId, amountCents, alreadyAccepted }`.
+  Se aceite passa mas pagamento falha, devolve 502 mantendo
+  `acceptanceId` pra retry só do pagamento.
+- **`src/app/paciente/(shell)/oferta/[appointment_id]/page.tsx`:**
+  server component. Carrega appointment + fulfillment + plan +
+  customer + doctor, valida ownership explícito
+  (`customer_id === customerId`), gating por status
+  (`pending_acceptance` mostra form; `pending_payment` mostra card
+  "falta pagar" com invoice existente; `paid+` redireciona pra
+  `/paciente`; `cancelled`/sem Memed mostram EmptyState). Renderiza
+  termo via `renderAcceptanceTerms` com os dados reais do
+  paciente/médica/plano/prescrição. Passa `acceptanceText` pronto
+  pro client — zero re-renderização no browser (garante que o hash
+  bate).
+- **`src/app/paciente/(shell)/oferta/[appointment_id]/OfferForm.tsx`:**
+  client component. Termo em `<article>` com scroll próprio + versão
+  visível. Endereço pré-preenchido a partir de `customers.address_*`
+  (paciente só confirma). CEP com máscara e ViaCEP auto-complete
+  (foca no número depois da busca). Checkbox legal explícita ("Li
+  integralmente o termo, compreendi seus efeitos jurídicos…").
+  Botão "Aceito e ir para pagamento" só libera com checkbox marcado;
+  no sucesso, redirect direto pra invoice URL. Mostra
+  `addressErrors` por campo vindos do backend.
+- **`src/lib/patient-treatment.ts` estendida:** `listPendingOffers`
+  busca fulfillments em `pending_acceptance` + `pending_payment` do
+  paciente com join em plan/doctor/payment. Tipo `PendingOffer`.
+- **`src/app/paciente/(shell)/page.tsx` atualizada:** card "Nova
+  indicação médica" (tom sage, CTA pra `/paciente/oferta/…`) pra
+  `pending_acceptance`; card "Pagamento pendente" (tom cream, CTA
+  direto pra `invoice_url`) pra `pending_payment`. Renderizados no
+  topo, acima dos banners de renewal, com prioridade visual máxima.
+
+**Status:**
+
+- `npx tsc --noEmit` ✅
+- `npx next lint --dir src` ✅
+- `npx vitest run` ✅ — 250 testes (16 arquivos). +9 em
+  `fulfillment-payment.test.ts`.
+- `npx next build` ✅ — rotas `/paciente/oferta/[appointment_id]`
+  (3.18 kB) e `/api/paciente/fulfillments/[id]/accept` compilam.
+
+**Próximo:**
+
+- Onda 2.D: webhook Asaas promove fulfillment `pending_payment → paid`
+  e dispara WhatsApp de pagamento confirmado.
+- Onda 2.E: painel admin de fulfillment com transições
+  (pharmacy_requested → shipped → delivered).
+
+---
+
 ## 2026-04-20 · Endereço + termo jurídico do aceite (D-044 · onda 2.C.1 · backend) · IA
 
 **Por quê:** a onda 2.B deixa a médica declarando "prescrevi o plano

@@ -5,6 +5,91 @@
 
 ---
 
+## D-044 · UI do aceite + integração Asaas (onda 2.C.2) · 2026-04-20
+
+**Contexto:** 2.C.1 deixou o backend do aceite pronto. Faltava
+expor ao paciente uma tela humana pra revisar a indicação, aceitar
+e seguir pro pagamento. O vínculo com Asaas precisava ser
+idempotente (paciente pode clicar 2x, ou retry pós falha de rede).
+
+**Decisões-chave desta onda:**
+
+- **Acoplamento fraco entre aceite e pagamento.** O endpoint
+  `/api/paciente/fulfillments/[id]/accept` chama `acceptFulfillment`
+  **e depois** `ensurePaymentForFulfillment` — são funções
+  separadas. Se a 2ª falhar (Asaas offline), o aceite permanece
+  gravado e o front pode retentar só o pagamento. O endpoint
+  devolve `acceptanceId` mesmo quando o pagamento falha, justamente
+  pra sinalizar isso ao front.
+
+- **`ensurePaymentForFulfillment` idempotente em 2 camadas.**
+  (1) se `fulfillments.payment_id` já aponta pra um `payments` com
+  status ainda aproveitável (PENDING/AWAITING_RISK_ANALYSIS/
+  CONFIRMED) + `invoice_url`, devolve o mesmo invoice URL — zero
+  chamada extra ao Asaas. (2) se o payment anterior foi deletado/
+  refunded, criamos nova cobrança sem apagar a antiga (histórico
+  preservado). Só aceita ff em `pending_payment` — exige aceite
+  primeiro, evitando criação de cobrança sem consentimento.
+
+- **billingType = UNDEFINED.** O Asaas permite o paciente escolher
+  a forma de pagamento (PIX/boleto/cartão) na própria invoice
+  hospedada. Mais amigável do que fixar uma forma no backend, e o
+  preço cobrado é o de PIX/à vista (`price_pix_cents`). Se quisermos
+  diferenciar no futuro (ex: cartão cobra o preço cheio com juros
+  embutidos em 3x), basta trocar o amount ou criar dois payments.
+
+- **Texto do termo renderizado server-side, passado ao client
+  como string pronta.** A função `renderAcceptanceTerms` só roda
+  no servidor. O client recebe `acceptanceText` já substituído e
+  envia no POST — é exatamente esse texto que entra no hash. Evita
+  qualquer possibilidade de re-renderização no browser gerar um
+  hash diferente do que foi lido (o hash DEVE bater exatamente com
+  o que a paciente viu).
+
+- **Endereço pré-preenchido de `customers.address_*`.** Se a
+  paciente tem endereço cached (do checkout antigo, cadastro,
+  aceite anterior), o form vem populado e ela só confirma.
+  ViaCEP auto-complete cobre a primeira vez. `customerToAddressInput`
+  exige apenas zipcode + logradouro pra pré-preencher — se o
+  cached estiver incompleto, mostra form em branco com
+  `recipient_name = customer.name`.
+
+- **Captura de IP + user-agent no aceite.** Header
+  `x-forwarded-for` (primeiro IP da lista) ou `x-real-ip` quando
+  não houver. Tudo passa pro `plan_acceptances` via
+  `acceptFulfillment` — reforça a prova legal do ato.
+
+- **Card de oferta pendente no topo do dashboard do paciente,
+  acima dos banners de renewal.** Um paciente com tratamento
+  ativo + nova indicação numa consulta recente vê primeiro a
+  nova oferta (decisão comercial: urgência de aceite > aviso de
+  renovação). Tons diferenciam: sage = aceite pendente (ação
+  positiva), cream = pagamento pendente (alerta suave).
+
+- **Links de pending_payment apontam direto pra invoice_url.**
+  Quando o paciente já aceitou mas não pagou, não tem motivo pra
+  passar de novo pela tela de oferta — o CTA do card do dashboard
+  abre a invoice Asaas em nova aba. `/paciente/oferta/[id]` em
+  `pending_payment` mostra apenas o card "falta pagar" como
+  fallback (acesso direto pela URL).
+
+**Trade-offs conhecidos:**
+
+- Se `linkRes` (update fulfillments.payment_id) falhar depois de
+  o payment Asaas ter sido criado com sucesso, a próxima chamada
+  vai criar OUTRO payment Asaas (já que payment_id segue null).
+  Mitigação: próxima onda 2.D vai usar `externalReference` do
+  payment no webhook pra localizar o fulfillment mesmo sem o
+  `payment_id` vinculado, e amarrar retroativamente.
+
+- O client aplica máscara de CEP e lista hardcoded de UFs; a
+  validação "verdadeira" está no backend (`patient-address.ts`).
+  Aceitamos a redundância: UX melhor no client + garantia no server.
+
+**Referência:** `docs/CHANGELOG.md` 2026-04-20 (onda 2.C.2).
+
+---
+
 ## D-044 · Endereço + termo jurídico do aceite (onda 2.C.1) · 2026-04-20
 
 **Contexto:** a paciente aceita o plano no `/paciente/oferta/[id]`

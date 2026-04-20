@@ -293,6 +293,83 @@ export type PatientProfile = {
   phone: string;
 };
 
+// ────────────────────────────────────────────────────────────────────
+// Ofertas pendentes (D-044 · 2.C.2)
+// ────────────────────────────────────────────────────────────────────
+// Um fulfillment em `pending_acceptance` = médica prescreveu em uma
+// consulta e o paciente ainda não aceitou. `pending_payment` = já
+// aceitou e falta pagar. Ambos devem gerar card de ação na área do
+// paciente.
+
+export type PendingOffer = {
+  fulfillmentId: string;
+  appointmentId: string;
+  status: "pending_acceptance" | "pending_payment";
+  planName: string;
+  planMedication: string | null;
+  pricePixCents: number;
+  doctorName: string;
+  createdAt: string;
+  invoiceUrl: string | null;
+};
+
+export async function listPendingOffers(
+  supabase: SupabaseClient,
+  customerId: string,
+): Promise<PendingOffer[]> {
+  const { data, error } = await supabase
+    .from("fulfillments")
+    .select(
+      `id, status, appointment_id, created_at,
+       plan:plans!inner(id, name, medication, price_pix_cents),
+       doctor:doctors!inner(id, full_name, display_name),
+       payment:payments(id, status, invoice_url)`
+    )
+    .eq("customer_id", customerId)
+    .in("status", ["pending_acceptance", "pending_payment"])
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`listPendingOffers: ${error.message}`);
+  }
+  if (!data) return [];
+
+  return (data as unknown[]).map((raw) => {
+    const r = raw as Record<string, unknown>;
+    const plan = pickSingle(
+      r.plan as
+        | { name: string; medication: string | null; price_pix_cents: number }
+        | Array<{ name: string; medication: string | null; price_pix_cents: number }>
+        | null
+    );
+    const doctor = pickSingle(
+      r.doctor as
+        | { full_name: string; display_name: string | null }
+        | Array<{ full_name: string; display_name: string | null }>
+        | null
+    );
+    const payment = pickSingle(
+      r.payment as
+        | { id: string; status: string; invoice_url: string | null }
+        | Array<{ id: string; status: string; invoice_url: string | null }>
+        | null
+    );
+
+    return {
+      fulfillmentId: r.id as string,
+      appointmentId: r.appointment_id as string,
+      status: r.status as PendingOffer["status"],
+      planName: plan?.name ?? "Plano indicado",
+      planMedication: plan?.medication ?? null,
+      pricePixCents: plan?.price_pix_cents ?? 0,
+      doctorName: doctor?.display_name ?? doctor?.full_name ?? "Médica",
+      createdAt: r.created_at as string,
+      invoiceUrl:
+        payment && payment.status !== "DELETED" ? payment.invoice_url : null,
+    };
+  });
+}
+
 export async function getPatientProfile(
   supabase: SupabaseClient,
   customerId: string,

@@ -17,6 +17,8 @@ import {
   getUpcomingAppointment,
   labelForAppointmentStatus,
   listPastAppointments,
+  listPendingOffers,
+  type PendingOffer,
 } from "@/lib/patient-treatment";
 import { signPatientToken } from "@/lib/patient-tokens";
 
@@ -52,10 +54,11 @@ export default async function PatientDashboard() {
   const supabase = getSupabaseAdmin();
 
   const now = new Date();
-  const [upcoming, renewal, history] = await Promise.all([
+  const [upcoming, renewal, history, pendingOffers] = await Promise.all([
     getUpcomingAppointment(supabase, customerId, now),
     getRenewalInfo(supabase, customerId, now),
     listPastAppointments(supabase, customerId, 3),
+    listPendingOffers(supabase, customerId),
   ]);
 
   const active = renewal.active;
@@ -77,6 +80,14 @@ export default async function PatientDashboard() {
           })}
         </p>
       </header>
+
+      {pendingOffers.length > 0 && (
+        <section className="mb-8 space-y-3">
+          {pendingOffers.map((offer) => (
+            <PendingOfferCard key={offer.fulfillmentId} offer={offer} />
+          ))}
+        </section>
+      )}
 
       {renewal.status === "expired" && (
         <div className="mb-6 rounded-2xl border border-terracotta-300 bg-terracotta-50 p-4 sm:p-5 flex flex-wrap items-center justify-between gap-3">
@@ -401,6 +412,71 @@ function InfoCell({
       <p className="text-[0.75rem] uppercase tracking-wide text-ink-500">{label}</p>
       <p className="mt-1 text-ink-800 font-medium">{value}</p>
       {hint && <p className="mt-0.5 text-xs text-ink-500">{hint}</p>}
+    </div>
+  );
+}
+
+function PendingOfferCard({ offer }: { offer: PendingOffer }) {
+  const isAwaitingPayment = offer.status === "pending_payment";
+  const tone = isAwaitingPayment
+    ? "border-cream-300 bg-cream-100"
+    : "border-sage-200 bg-sage-50";
+  const eyebrow = isAwaitingPayment
+    ? "Pagamento pendente"
+    : "Nova indicação médica";
+  const ctaLabel = isAwaitingPayment
+    ? "Ir para pagamento →"
+    : "Revisar e aceitar →";
+  const ctaHref =
+    isAwaitingPayment && offer.invoiceUrl
+      ? offer.invoiceUrl
+      : `/paciente/oferta/${offer.appointmentId}`;
+  const isExternal = isAwaitingPayment && !!offer.invoiceUrl;
+
+  return (
+    <div
+      className={`rounded-2xl border p-5 sm:p-6 flex flex-wrap items-start justify-between gap-4 ${tone}`}
+    >
+      <div className="min-w-0 flex-1">
+        <p className="text-[0.78rem] uppercase tracking-[0.18em] text-sage-700 font-medium mb-1.5">
+          {eyebrow}
+        </p>
+        <h3 className="font-serif text-[1.3rem] text-ink-800 leading-tight">
+          {offer.planName}
+        </h3>
+        {offer.planMedication && (
+          <p className="mt-0.5 text-sm text-ink-500">{offer.planMedication}</p>
+        )}
+        <p className="mt-2 text-sm text-ink-600">
+          Indicado por {offer.doctorName} · {brl(offer.pricePixCents)} à vista
+        </p>
+        {isAwaitingPayment ? (
+          <p className="mt-1 text-xs text-ink-500">
+            Você já aceitou o plano. Finalize o pagamento pra liberar o envio.
+          </p>
+        ) : (
+          <p className="mt-1 text-xs text-ink-500">
+            Abra a indicação pra revisar a prescrição, aceitar e prosseguir.
+          </p>
+        )}
+      </div>
+      {isExternal ? (
+        <a
+          href={ctaHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center rounded-xl bg-ink-900 hover:bg-ink-800 text-white text-sm font-semibold px-5 py-2.5 transition-colors shadow-sm whitespace-nowrap"
+        >
+          {ctaLabel}
+        </a>
+      ) : (
+        <Link
+          href={ctaHref}
+          className="inline-flex items-center rounded-xl bg-ink-900 hover:bg-ink-800 text-white text-sm font-semibold px-5 py-2.5 transition-colors shadow-sm whitespace-nowrap"
+        >
+          {ctaLabel}
+        </Link>
+      )}
     </div>
   );
 }
