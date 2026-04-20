@@ -552,9 +552,21 @@ automatizado (estorno já foi em D-034; NF-e upload flow fica aqui).
       ao webhook Asaas em paralelo a earnings — promove `paid` e
       dispara `sendText` WhatsApp best-effort. 15 testes novos
       (265 totais). `next build` verde.
-- [ ] **D-044 onda 2.E · Painel admin de fulfillment.** Lista de
-      pendentes com botões das transições (pharmacy_requested →
-      shipped → delivered) + notificações WhatsApp em cada etapa.
+- [x] **D-044 onda 2.E · Painel admin de fulfillment.**
+      (2026-04-20) Rotas novas `/admin/fulfillments` (lista
+      operacional com 4 grupos: pagos, na farmácia, despachados,
+      pendentes) e `/admin/fulfillments/[id]` (detalhe + timeline).
+      `POST /api/admin/fulfillments/[id]/transition` endpoint único
+      chama a lib pura nova `src/lib/fulfillment-transitions.ts`,
+      idempotente, com guard de race no UPDATE e regras de ator
+      (admin / patient / system). Composers WhatsApp em
+      `src/lib/fulfillment-messages.ts` disparados best-effort a
+      cada transição. Modal de envio à farmácia mostra só
+      prescrição + nome + CPF (sem endereço) — reforça
+      compromisso legal do termo de aceite. Endereço de entrega
+      aparece na UI a partir de `pharmacy_requested`. Item
+      "Fulfillments" no admin nav. 23 testes novos (288 totais).
+      `next build` verde.
 - [ ] **D-044 onda 2.F · /paciente: card "meu tratamento".** Mostra
       status do fulfillment + CTA "confirmar recebimento".
 - [ ] **D-044 onda 2.G · Desligar fluxo antigo "paga antes".**

@@ -6,6 +6,133 @@
 
 ---
 
+## 2026-04-20 · Painel admin de fulfillments + transições operacionais (D-044 · onda 2.E) · IA
+
+**Por quê:** as ondas 2.A–2.D criaram o fluxo paciente→webhook: aceite,
+pagamento, promoção automática pra `paid`. Agora o fulfillment precisa
+avançar no mundo real — alguém do Instituto tem que enviar a receita
+pra farmácia, receber a caixa, despachar pro paciente. Esta onda
+entrega o painel admin onde esse trabalho acontece, com botões
+específicos por estado, modal que respeita o compromisso legal
+(farmácia não vê endereço) e notificação WhatsApp best-effort a cada
+transição.
+
+**Entregáveis:**
+
+- **`src/lib/fulfillment-transitions.ts`:** `transitionFulfillment`
+  idempotente, reaproveita `canTransition` da lib existente.
+  Regras de ator (defense-in-depth): admin pode tudo exceto
+  `paid` (só webhook); paciente só pode `shipped → delivered`;
+  system livre (futuros crons). UPDATE tem guard
+  (`.eq('status', currentStatus)`) pra race-safety — se dois
+  admins apertarem simultâneo, o segundo recebe
+  `invalid_transition` limpo ao invés de corromper estado.
+  Valida `tracking_note` (≥3 chars) em `shipped` e
+  `cancelled_reason` em `cancelled`. Grava
+  `updated_by_user_id` + timestamp específico da etapa.
+- **`src/lib/fulfillment-messages.ts`:** composers puros
+  (`composePharmacyRequestedMessage`, `composeShippedMessage`,
+  `composeDeliveredMessage`, `composeCancelledMessage`). Tom
+  editorial alinhado com 2.D, sem emoji, primeiro nome,
+  uma ação clara por mensagem. Garantia LGPD: nenhuma mensagem
+  expõe CPF, CEP ou logradouro — WhatsApp é canal público.
+- **Testes:** 23 novos (15 de transições + 8 de mensagens),
+  cobrindo happy path, idempotência, guard de race, validações,
+  sequência completa `paid → delivered`, e checagem regex
+  contra vazamento de CPF/CEP/endereço nas mensagens.
+- **`POST /api/admin/fulfillments/[id]/transition`:** único
+  endpoint de transição operacional. `requireAdmin`, body
+  `{ to, tracking_note?, cancelled_reason? }`. Chama a lib,
+  depois carrega contexto da view `fulfillments_operational` e
+  dispara WhatsApp best-effort com o composer apropriado.
+  Falha WA loga e segue — transição não regride.
+  Códigos HTTP mapeados: 404 `not_found`, 409
+  `invalid_transition`, 400 `invalid_payload`, 403
+  `forbidden_actor`, 500 `db_error`.
+- **`/admin/fulfillments`:** lista operacional com 4 seções:
+  pagos (ação: enviar à farmácia), na farmácia (ação:
+  despachar), despachados (ação: forçar entrega; paciente
+  costuma confirmar em 2.F), e pendentes (só visibilidade —
+  aceite/pagamento ainda em curso). Lê direto da view
+  `fulfillments_operational` (2.C.1), ordenada por
+  `created_at desc`, cap 200/grupo.
+- **`/admin/fulfillments/[id]`:** detalhe com cabeçalho
+  (status + valor + ciclo), ações disponíveis (client
+  component `FulfillmentActions`), painéis de paciente,
+  prescrição (link Memed), cobrança (Asaas status + invoice),
+  endereço de entrega **gated** por status (só aparece a partir
+  de `pharmacy_requested`), e timeline completa. Compromisso
+  legal explicitado em copy no painel de endereço ("não é
+  compartilhado com a farmácia").
+- **`_FulfillmentActions.tsx` (client):** modais específicos
+  por transição. Modal "enviar à farmácia" mostra só
+  nome + CPF + link da prescrição (**SEM endereço**).
+  Modal "marcar despachado" mostra endereço completo e
+  exige tracking. Modal "cancelar" exige motivo. Modal
+  "entrega forçada" é simples confirmação. Todos usam
+  `router.refresh()` pra reler o server component.
+- **Nav admin:** item "Fulfillments" adicionado em primeiro
+  lugar após "Visão geral" — é a operação mais frequente
+  daqui em diante.
+
+**Decisões-chave:**
+
+- **Compromisso legal visível na UI:** o termo de aceite do
+  paciente (2.C.2) declara que a farmácia não recebe endereço.
+  O painel admin reforça isso duas vezes: (a) modal de envio
+  à farmácia não mostra endereço mesmo que o admin esteja
+  curioso; (b) painel de endereço exibe um disclaimer
+  lembrando que é uso só do Instituto.
+- **Idempotência em três camadas:** lib (alreadyAtTarget),
+  UPDATE guard (race entre admins) e endpoint (duplo clique
+  vira 200 com flag). A UI ainda desabilita botões durante
+  submit, mas não é a defesa crítica.
+- **WhatsApp best-effort:** falha de WA loga e segue. A
+  transição no banco é a fonte de verdade; operador pode
+  re-enviar manualmente se precisar.
+- **`forbidden_actor` vs `invalid_transition`:** separei pra
+  deixar claro quando a regra é ator (paciente não pode
+  despachar; admin não pode aprovar pagamento) vs quando é
+  estado (paid → shipped sem passar por pharmacy_requested).
+  Facilita debug e auditoria.
+- **Endereço gated na UI do admin:** antes de
+  `pharmacy_requested` o endereço já existe em
+  `fulfillments.shipping_*` (gravado no aceite em 2.C.2),
+  mas não há razão pro admin vê-lo. Só aparece quando a
+  etapa operacional precisa dele.
+- **Sem tabela de audit log separada:** os timestamps
+  específicos + `updated_by_user_id` já dão trilha de
+  auditoria. Podemos evoluir pra tabela de eventos se
+  surgir demanda de compliance (veremos no mercado real).
+
+**Arquivos modificados/criados:**
+
+- `src/lib/fulfillment-transitions.ts` (+240 linhas, novo)
+- `src/lib/fulfillment-transitions.test.ts` (+280 linhas, novo)
+- `src/lib/fulfillment-messages.ts` (+100 linhas, novo)
+- `src/lib/fulfillment-messages.test.ts` (+90 linhas, novo)
+- `src/app/api/admin/fulfillments/[id]/transition/route.ts` (+220 linhas, novo)
+- `src/app/admin/(shell)/fulfillments/page.tsx` (+230 linhas, novo)
+- `src/app/admin/(shell)/fulfillments/[id]/page.tsx` (+360 linhas, novo)
+- `src/app/admin/(shell)/fulfillments/[id]/_FulfillmentActions.tsx` (+330 linhas, novo)
+- `src/app/admin/(shell)/_components/AdminNav.tsx` (+1 linha, item Fulfillments)
+- `docs/CHANGELOG.md`, `docs/DECISIONS.md`, `docs/SPRINTS.md`
+
+**Métricas:**
+
+- 288 testes passam (23 novos).
+- `npx tsc --noEmit` limpo.
+- `npx next lint` limpo.
+- `npx next build` OK; rotas novas: `/admin/fulfillments`,
+  `/admin/fulfillments/[id]`,
+  `/api/admin/fulfillments/[id]/transition`.
+
+**Status:** Entregue em produção. Pendente: 2.F (card no
+`/paciente` com status + CTA confirmar recebimento) e 2.G
+(desligar CTAs públicos do fluxo antigo `/checkout`).
+
+---
+
 ## 2026-04-20 · Webhook Asaas promove fulfillment + WhatsApp (D-044 · onda 2.D) · IA
 
 **Por quê:** onda 2.C.2 criou a cobrança Asaas. Faltava fechar o

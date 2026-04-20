@@ -5,6 +5,107 @@
 
 ---
 
+## D-044 · Painel admin de fulfillments (onda 2.E) · 2026-04-20
+
+**Contexto:** com o paciente-aceite → pagamento → webhook promove
+`paid` funcionando (ondas 2.A–2.D), o fulfillment fica parado em
+`paid` esperando ação humana. Alguém do Instituto precisa enviar
+a prescrição pra farmácia, receber a caixa, despachar pro paciente.
+Não havia UI pra isso.
+
+**Decisões:**
+
+1. **Endpoint único de transição.**
+   `POST /api/admin/fulfillments/[id]/transition` aceita
+   `{ to, tracking_note?, cancelled_reason? }` e roteia pra
+   lib pura `transitionFulfillment`. Alternativa seria um
+   endpoint por transição (`/mark-shipped`, `/request-pharmacy`),
+   mais RESTful porém com mais código repetido. Escolhi o endpoint
+   único porque a lógica de validação/idempotência é a mesma —
+   rota só muda o `to`.
+
+2. **Idempotência em três camadas.**
+   - Lib devolve `alreadyAtTarget=true` quando status atual = alvo.
+   - UPDATE tem `.eq('status', currentStatus)` como guard (race
+     entre dois admins clicando ao mesmo tempo, ou entre admin e
+     paciente confirmando).
+   - Endpoint traduz `alreadyAtTarget` em 200 com
+     `notificationSent=false` (não reenvia WhatsApp).
+   Isso protege contra duplo clique + concorrência sem precisar
+   de lock pesado.
+
+3. **Ator gated no servidor.**
+   Regras em `transitionFulfillment`:
+   - `patient` só pode `shipped → delivered`. Bloqueia um paciente
+     mal-intencionado que tente fingir despacho.
+   - `admin` não pode promover pra `paid`. Isso é exclusivo do
+     webhook Asaas — admin tentando "atalhar" sem pagamento real
+     corromperia auditoria financeira.
+   - `system` é livre (reservado pra cron que, no futuro, pode
+     auto-fechar `shipped → delivered` depois de N dias sem
+     confirmação do paciente).
+
+4. **Compromisso legal reforçado na UI.**
+   O termo de aceite (2.C.2) declara que a farmácia não recebe
+   o endereço do paciente. O modal "enviar receita à farmácia"
+   mostra nome + CPF + link da prescrição e **nada mais** —
+   mesmo que o admin veja o endereço em outras telas, não
+   encontra nesse modal. Quando a farmácia entrega a caixa
+   ao Instituto e o admin abre o modal "marcar como despachado",
+   o endereço aparece junto com o campo de rastreio. Reforça
+   o compromisso via UI, não apenas via copy.
+
+5. **Endereço gated por status.**
+   Na página de detalhe, o bloco "Endereço de entrega" só
+   aparece a partir de `pharmacy_requested` (ou cancelado).
+   Antes disso não há motivo operacional pra admin ver o
+   endereço — princípio de necessidade de conhecer.
+
+6. **WhatsApp como best-effort.**
+   Cada transição dispara WA com composer específico. Falha
+   de WA loga e segue — a transição no banco é a fonte de
+   verdade. Alternativa seria tentar N vezes ou gravar em
+   fila de retry, mas pro volume atual (dezenas/dia) é
+   overengineering.
+
+7. **Composers puros separados da lib de transição.**
+   `fulfillment-messages.ts` contém só funções puras
+   (`composePharmacyRequestedMessage` etc). Facilita testar
+   LGPD (regex contra CPF/CEP/endereço nas mensagens) e
+   iterar texto sem tocar na lib de estado.
+
+8. **Sem tabela de audit log separada.**
+   Os timestamps específicos (`pharmacy_requested_at`,
+   `shipped_at`, `delivered_at`, `cancelled_at`) +
+   `updated_by_user_id` + `tracking_note` + `cancelled_reason`
+   já reconstituem o histórico. Se surgir demanda de compliance
+   (quem editou o endereço? Por quê?), criamos
+   `fulfillment_events` depois.
+
+**Consequências:**
+
+- Admin tem UI coerente pro fulfillment de ponta a ponta;
+  transições não podem sair de ordem nem pular etapas.
+- Idempotência forte: duplo clique ou aba esquecida aberta
+  não duplica WhatsApp nem corrompe estado.
+- Paciente recebe notificação em cada passo operacional
+  com rastreio quando aplicável.
+- Compromisso legal (farmácia não vê endereço) está reforçado
+  estruturalmente, não apenas por política.
+
+**Aberto/pendente:**
+
+- Onda 2.F: card no `/paciente` mostrando status atual +
+  CTA "confirmar recebimento" (paciente dispara
+  `shipped → delivered` pela rota de paciente que ainda
+  precisamos criar).
+- Onda 2.G: desligar CTAs públicos do fluxo antigo
+  `/checkout` agora que o novo caminho está completo.
+
+**Referência:** `docs/CHANGELOG.md` 2026-04-20 (onda 2.E).
+
+---
+
 ## D-044 · Webhook Asaas promove fulfillment (onda 2.D) · 2026-04-20
 
 **Contexto:** o webhook Asaas já processa `PAYMENT_RECEIVED` pra
