@@ -13,12 +13,9 @@ export default function sitemap(): MetadataRoute.Sitemap {
       changeFrequency: "weekly",
       priority: 1,
     },
-    {
-      url: `${BASE_URL}/planos`,
-      lastModified,
-      changeFrequency: "weekly",
-      priority: 0.9,
-    },
+    // /planos deixou de ser porta de entrada — agora é destino privado
+    // pós-consulta, usado no link de pagamento enviado após a médica
+    // prescrever. Não listamos no sitemap nem indexamos.
     {
       url: `${BASE_URL}/sobre`,
       lastModified,

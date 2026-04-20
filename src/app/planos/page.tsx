@@ -5,11 +5,12 @@ import { Footer } from "@/components/Footer";
 import { getSupabaseAnon } from "@/lib/supabase";
 
 export const metadata: Metadata = {
-  title: "Planos de tratamento — escolha o seu ritmo",
+  title: "Planos de tratamento · Instituto Nova Medida",
   description:
-    "Planos de tratamento para emagrecimento clínico com avaliação médica, prescrição (quando indicada) e acompanhamento contínuo. PIX, boleto ou cartão em até 3x sem juros.",
-  alternates: { canonical: "/planos" },
-  robots: { index: true, follow: true },
+    "Planos de tratamento para acompanhamento clínico com a equipe do Instituto Nova Medida.",
+  // /planos não é mais porta de entrada pública: paciente só chega aqui
+  // via link enviado pela equipe após a médica prescrever o tratamento.
+  robots: { index: false, follow: false },
 };
 
 export const revalidate = 60;

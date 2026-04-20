@@ -2,7 +2,6 @@
 
 import { motion } from "framer-motion";
 import Image from "next/image";
-import Link from "next/link";
 
 export function Hero({ onCta }: { onCta: () => void }) {
   return (
@@ -87,27 +86,27 @@ export function Hero({ onCta }: { onCta: () => void }) {
                 />
               </svg>
             </button>
-            <Link
-              href="/planos"
+            <a
+              href="#como-funciona"
               className="group inline-flex items-center justify-center gap-2 rounded-full border border-ink-200 hover:border-ink-300 hover:bg-cream-50 text-ink-700 text-[0.94rem] font-medium px-6 py-[0.95rem] transition-colors"
             >
-              Ver planos de tratamento
+              Como funciona
               <svg
                 width="14"
                 height="14"
                 viewBox="0 0 14 14"
                 fill="none"
-                className="transition-transform group-hover:translate-x-0.5"
+                className="transition-transform group-hover:translate-y-0.5"
               >
                 <path
-                  d="M3 7H11M11 7L7 3M11 7L7 11"
+                  d="M7 3V11M7 11L3 7M7 11L11 7"
                   stroke="currentColor"
                   strokeWidth="1.5"
                   strokeLinecap="round"
                   strokeLinejoin="round"
                 />
               </svg>
-            </Link>
+            </a>
           </motion.div>
 
           <motion.p

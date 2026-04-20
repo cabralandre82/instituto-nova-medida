@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import Link from "next/link";
 
 const SHARE_TEXT =
   "Vi isso aqui e achei a sua cara — parece que finalmente esse tipo de tratamento ficou mais viável.";
@@ -117,31 +116,16 @@ export function Success({
 
           <div className="mt-5 rounded-2xl border border-sage-200 bg-sage-50/60 p-5">
             <p className="text-[0.82rem] uppercase tracking-wider text-sage-700 font-medium">
-              Quer adiantar?
+              O que vem agora
             </p>
             <p className="mt-2 font-serif-display text-[1.15rem] text-ink-800 leading-tight">
-              Já dá pra ver os planos disponíveis enquanto a médica analisa.
+              Avaliação médica primeiro. Sem cobrança antes.
             </p>
             <p className="mt-2 text-[0.88rem] text-ink-500 leading-relaxed">
-              Sem cobrança automática. Você só confirma depois da avaliação,
-              se fizer sentido.
+              Você só paga se, depois da conversa com a médica, houver
+              indicação clínica e você decidir seguir com o tratamento.
+              O valor é apresentado junto com a prescrição.
             </p>
-            <Link
-              href="/planos"
-              className="group mt-4 inline-flex items-center justify-center gap-2 rounded-full bg-sage-700 hover:bg-sage-800 text-cream-50 text-[0.92rem] font-medium px-5 py-3 transition-colors"
-            >
-              Ver planos de tratamento
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                <path
-                  d="M3 7H11M11 7L7 3M11 7L7 11"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className="transition-transform group-hover:translate-x-0.5"
-                />
-              </svg>
-            </Link>
           </div>
 
           <div className="mt-5 rounded-2xl border border-cream-300 bg-cream-100/40 p-5">
