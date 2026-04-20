@@ -124,18 +124,18 @@ mensalmente com workflow auditável.
 
 **Dividida em 2 entregas** porque o escopo é grande e interdependente:
 
-### Sprint 4.1 · Fundação multi-médico + agenda + sala + financeiro base
+### ✅ Sprint 4.1 · Fundação multi-médico + agenda + sala + financeiro base
 
 Foco: subir um fluxo end-to-end "paciente paga → agenda → médica
 atende → recebe earning → admin paga via PIX no fim do mês". Sem fila
 on-demand ainda, sem Memed ainda — esses entram na 4.2.
 
-**Status (2026-04-20):** 99% entregue. Bloqueio D-029 (webhook Daily
-falha no registro por bug HTTP/2 do superagent deles) **mitigado** em
-D-035: cron `/api/internal/cron/daily-reconcile` rodando a cada 5 min
-fecha o ciclo dos appointments via polling da Daily REST API. Webhook
-continuará no código — quando Daily consertar ou migrarmos pra
-Cloudflare, passa a rodar em paralelo como caminho primário.
+**Status (2026-04-20):** ✅ **100% entregue.** Bloqueio D-029 (webhook
+Daily falha no registro por bug HTTP/2 do superagent deles)
+**mitigado** em D-035: cron `/api/internal/cron/daily-reconcile` rodando
+a cada 5 min fecha o ciclo dos appointments via polling da Daily REST
+API. Webhook continuará no código — quando Daily consertar ou migrarmos
+pra Cloudflare, passa a rodar em paralelo como caminho primário.
 D-036 (governança da médica) entregue: eventos de confiabilidade
 granulares + auto-pause em 3 eventos/30d + painel admin completo.
 D-037 (conciliação financeira) entregue: 6 checks on-demand em
@@ -144,6 +144,10 @@ e payouts, com severidade e hint de ação.
 D-038 (testes unitários) entregue: Vitest + 29 testes cobrindo
 reliability, refunds e reconciliation. Helper `src/test/mocks/supabase.ts`
 para mockar DB via fila de respostas por tabela. Runtime ~500ms.
+D-039 (prova de fogo E2E) entregue: `src/lib/system-health.ts` com 9
+checks paralelos, `/admin/health` dashboard server-rendered,
+`GET /api/internal/e2e/smoke` endpoint protegido (200/503 pra
+UptimeRobot) e `docs/RUNBOOK-E2E.md` com 7 cenários de prova de fogo.
 
 **Entregáveis:**
 
@@ -293,6 +297,23 @@ para mockar DB via fila de respostas por tabela. Runtime ~500ms.
       `npm test` / `npm run test:watch`. Fora do escopo desta leva
       (mantido pra D-039): no-show-policy, appointment-lifecycle,
       slot-reservation, HMAC tokens, E2E com Playwright.
+- [x] **Prova de fogo E2E (D-039)** — cobertura ativa de
+      "tudo está funcionando agora?". `src/lib/system-health.ts` com
+      9 checks paralelos + timeout individual + tolerância a falha
+      (database, asaas_env, asaas_webhook, daily_env, daily_signal,
+      whatsapp_env, whatsapp_webhook, reconciliation, reliability).
+      `/admin/health` dashboard server-rendered com status agregado
+      no topo + 9 cards por subsistema + toggle ping externo.
+      `GET /api/internal/e2e/smoke` endpoint JSON protegido por
+      `CRON_SECRET`, retorna 503 em erro pra UptimeRobot ler só o
+      status code (seguro pra bater a cada minuto; zero side effect).
+      `docs/RUNBOOK-E2E.md` com 7 cenários passo-a-passo (paciente
+      feliz, no-show médica, sala expirada, refund manual, refund via
+      Asaas API, payout mensal, conciliação limpa, auto-pause) + SQL
+      de troubleshooting + cleanup template. AdminNav ganha link
+      "Saúde". Decisão deliberada: não automatizar E2E via Playwright
+      agora (falta staging); humano roda o runbook antes de releases
+      grandes ou mensalmente.
 - [ ] **Auth:** roles `doctor` e `admin` no Supabase, middleware
       protegendo `/medico/*` e `/admin/*`
 - [ ] **API routes:**

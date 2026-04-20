@@ -12,6 +12,7 @@ const NAV = [
   { href: "/admin/refunds", label: "Estornos" },
   { href: "/admin/notifications", label: "Notificações" },
   { href: "/admin/financeiro", label: "Financeiro" },
+  { href: "/admin/health", label: "Saúde" },
 ];
 
 export function AdminNav() {

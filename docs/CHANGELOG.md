@@ -6,6 +6,80 @@
 
 ---
 
+## 2026-04-20 · Prova de fogo E2E — runbook + health endpoint + dashboard (D-039) · IA
+
+**Por quê:** até aqui, validar que "tudo continua funcionando" era
+tácito: admin abria `/admin/*` e conferia. Com a pilha atual (3 crons,
+3 webhook sinks, no-show policy, auto-pause, conciliação financeira),
+essa verificação informal deixou de ser confiável. D-029 mostrou que
+integração externa pode falhar silenciosa por semanas; precisávamos de
+detecção ativa.
+
+**Entregáveis:**
+
+- **`src/lib/system-health.ts`** (novo): `runHealthCheck({ pingExternal })`
+  roda 9 checks paralelos com timeout individual (5s default), tolerância
+  a falha por check (um travando não derruba os outros), e agregado
+  final ok/warning/error/unknown. Cobertura:
+  - `database` — count em `doctors`
+  - `asaas_env` — validação env vars; ping opcional (GET /customers?limit=1)
+  - `asaas_webhook` — freshness de `asaas_events.received_at`
+  - `daily_env` — validação env vars; ping opcional (GET /rooms?limit=1)
+  - `daily_signal` — max(webhook Daily, cron reconcile) — aceita
+    qualquer dos dois caminhos como sinal vivo
+  - `whatsapp_env` — validação env vars (sem ping pra não gastar
+    rate limit Meta Graph)
+  - `whatsapp_webhook` — freshness de `whatsapp_events.received_at`
+  - `reconciliation` — reuso de `getReconciliationCounts()` (D-037)
+  - `reliability` — reuso de `listDoctorReliabilityOverview()` (D-036)
+
+- **`GET /api/internal/e2e/smoke`** (novo): endpoint JSON protegido por
+  `CRON_SECRET` (padrão igual aos crons existentes). Retorna `HealthReport`
+  completo. HTTP 503 quando `overall: "error"` pra facilitar monitoria
+  externa (UptimeRobot, Better Uptime) que só olha status code. Query
+  `?ping=1` força ping HTTP real em Asaas/Daily. Zero side effect —
+  seguro pra bater a cada minuto.
+
+- **`/admin/health`** (novo): dashboard server-rendered mostra status
+  agregado no topo + 9 cards por subsistema com dot ok/warn/error,
+  summary humano, detalhes estruturados (IDs, timestamps, contagens) e
+  tempo de execução por check. Toggle "Rodar com ping" força
+  `pingExternal: true`. Rodapé explica integração com UptimeRobot.
+
+- **`docs/RUNBOOK-E2E.md`** (novo): roteiro de prova de fogo com 7
+  cenários (paciente feliz, no-show médica, sala expirada sem ninguém,
+  refund manual, refund via Asaas API, payout mensal completo,
+  conciliação limpa, auto-pause de médica). Cada cenário tem
+  pré-requisitos, passos numerados, checklist de validação (com SQL
+  quando aplicável) e cleanup. Inclui troubleshooting pros 2 tipos de
+  discrepância financeira mais comuns + query template de limpeza de
+  dados de teste.
+
+- **AdminNav**: novo link "Saúde" apontando pra `/admin/health`.
+
+**Decisões deliberadas:**
+
+- NÃO automatizar os 7 cenários via Playwright agora: não temos
+  staging separado; Playwright em produção cria dados reais em cada
+  run. Reavaliar na Sprint 6/7 quando volume justificar staging.
+- NÃO persistir histórico de health checks em tabela: event tables
+  existentes (`asaas_events`, `daily_events`, `whatsapp_events`) +
+  `appointments.reconciled_at` já dão rastreabilidade histórica pros
+  sinais que importam.
+- NÃO usar APM pago (Datadog, Sentry APM): overkill pra operação
+  atual. UptimeRobot grátis batendo no smoke endpoint resolve 80%.
+
+**Validação:**
+
+- `npm test` → 29/29 passando (nada nos testes regride; `system-health`
+  sem cobertura própria — depende de DB e integrações externas, melhor
+  validado pelo próprio runbook)
+- `tsc --noEmit` → limpo
+- `npm run build` → limpo
+- Sprint 4.1: **100% entregue** ✅
+
+---
+
 ## 2026-04-20 · Testes automatizados unitários com Vitest (D-038) · IA
 
 **Por quê:** antes desta entrega o projeto rodava em `tsc --noEmit` +

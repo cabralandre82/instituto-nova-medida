@@ -5,6 +5,133 @@
 
 ---
 
+## D-039 · Prova de fogo E2E (runbook + health endpoint + dashboard) · 2026-04-20
+
+**Contexto:** antes desta entrega, validar que "tudo está funcionando
+em produção" era um exercício tácito: o admin abria `/admin/*`,
+conferia se nada explodia, e seguia. Com a pilha atual (Asaas + Daily
++ WhatsApp + 3 crons + 3 webhook sinks + política de no-show + auto-pause
+de médicas + conciliação financeira), essa verificação informal deixou
+de ser confiável — tem coisa demais acontecendo em background pra
+saber olhando.
+
+Três gatilhos concretos pra formalizar agora:
+
+1. **D-029 (bug Daily webhook)** ensinou que integração externa pode
+   falhar silenciosamente por semanas até alguém notar que appointments
+   deixaram de fechar. A mitigação foi cron fallback (D-035), mas a
+   lição é: preciso saber **no momento** se o sinal de finalização tá
+   fluindo, independente de qual caminho.
+
+2. **D-032 (política de no-show assimétrica)** + **D-036 (auto-pause)**
+   criam efeitos colaterais em cascata. Um bug em qualquer etapa pode
+   deixar dinheiro mal distribuído (médica sem clawback) ou médica
+   pausada sem motivo. Conciliação (D-037) pega a metade financeira,
+   mas precisa ser rodada; e reliability precisa ser monitorada em
+   conjunto.
+
+3. **Sprint 5 em diante vai mexer em fluxos ainda mais sensíveis**
+   (pagamento recorrente, prescrição Memed, fila on-demand). Sem uma
+   cobertura base de "como eu sei que tudo tá ok agora?", cada feature
+   nova vai ser deploy-and-pray.
+
+**Alternativas consideradas:**
+
+- **Playwright E2E rodando em CI contra staging.** Rejeitado pra essa
+  volta: não temos staging separado (custo Supabase/Vercel duplicado
+  + replicação de Asaas sandbox + dados seed) e Playwright contra
+  produção é perigoso (cria dados reais em cada run, polui métricas).
+  Adiado pra Sprint 6 quando/se fizer staging separado. Custo maior
+  que benefício imediato.
+
+- **Testes de integração com Supabase local (docker + seed).**
+  Rejeitado: sobe em ~30s por ciclo, adiciona complexidade de setup
+  em CI, e cobre só a camada DB — integrações externas (Asaas, Daily,
+  WhatsApp) precisariam de mocks de qualquer jeito. Com 9 checks
+  paralelos em ~500ms via `runHealthCheck`, o sinal equivalente tá
+  presente sem a infra.
+
+- **Monitoria via observabilidade profissional (Datadog, Sentry APM,
+  Better Stack).** Rejeitado pra essa versão: custo mensal + setup
+  + instrumentação. Pra operação atual (1 médica, 0 consultas/dia
+  ainda), overkill. UptimeRobot grátis batendo no smoke endpoint
+  resolve 80% com esforço mínimo. Se o volume justificar, migração
+  fácil (o próprio endpoint já retorna JSON estruturado).
+
+- **Tabela de log de cron runs (`cron_runs`) + histórico de health
+  checks.** Rejeitado pra MVP: gera volume de dados em rampa + UI
+  extra. Os 3 event tables existentes (`asaas_events`, `daily_events`,
+  `whatsapp_events`) + `reconciled_at` em appointments já fornecem
+  rastreio histórico pros checks atuais.
+
+- **Smoke test que CRIA dados sintéticos (customer teste, payment,
+  appointment) a cada execução.** Rejeitado: efeitos colaterais
+  (polui DB, dispara webhook real) + complexidade de cleanup.
+  Runbook manual (`docs/RUNBOOK-E2E.md`) cobre o caso "tenho que
+  exercitar o fluxo completo" sem código que muta em produção.
+
+**Decisão:** três componentes read-only:
+
+1. **`src/lib/system-health.ts`** — 9 checks paralelos com timeout
+   individual e tolerância a falha por check:
+   - `database` · count em `doctors` (DB reachable)
+   - `asaas_env` · validação de env vars + ping opcional (GET
+     `/customers?limit=1`)
+   - `asaas_webhook` · freshness do último `asaas_events.received_at`
+   - `daily_env` · validação de env vars + ping opcional (GET
+     `/rooms?limit=1`)
+   - `daily_signal` · max(`daily_events.received_at`,
+     `appointments.reconciled_at`) — aceita webhook OU cron como sinal
+   - `whatsapp_env` · validação de env vars (sem ping por default
+     pra não gastar rate limit do Meta Graph)
+   - `whatsapp_webhook` · freshness do último `whatsapp_events`
+   - `reconciliation` · reutiliza `getReconciliationCounts()` (D-037)
+   - `reliability` · reutiliza `listDoctorReliabilityOverview()` (D-036)
+
+2. **`/admin/health`** · página server-rendered que chama
+   `runHealthCheck()` no request. Mostra status agregado no topo +
+   9 cards por subsistema com status (ok/warning/error/unknown),
+   summary humano, detalhes estruturados e tempo de execução por
+   check. `?ping=1` força ping externo (HTTP real em Asaas/Daily).
+
+3. **`GET /api/internal/e2e/smoke`** · endpoint JSON protegido por
+   `CRON_SECRET` (mesmo padrão dos crons). Retorna `HealthReport`
+   completo; HTTP 503 quando `overall: "error"` pra facilitar
+   UptimeRobot / Better Uptime lerem só o status code. Zero side
+   effect — seguro pra rodar a cada minuto.
+
+4. **`docs/RUNBOOK-E2E.md`** · roteiro passo-a-passo dos 7 cenários
+   críticos (paciente feliz, no-show médica, sala expirada, refund
+   manual/asaas, payout mensal, conciliação limpa, auto-pause). Cada
+   cenário tem pré-requisitos, passos numerados, checklist de
+   validação (com queries SQL quando aplicável) e limpeza. Inclui
+   instruções de troubleshooting e query de cleanup de dados de teste.
+
+**Consequências:**
+
+- **Detecção de regressão passa de "o admin reclamou" pra "o
+  endpoint respondeu 503"** — UptimeRobot grátis batendo a cada 5 min
+  no smoke é suficiente pra alertar antes do usuário final perceber.
+- **Runbook serve como documentação viva** — um novo desenvolvedor
+  (ou Claude futuro) lê o RUNBOOK e entende o fluxo completo sem ter
+  que reconstituir da leitura de código.
+- **Decisão deliberada de NÃO automatizar os 7 cenários** — a
+  economia de reusar infra humana (André tem os números de
+  WhatsApp, a conta Asaas sandbox, acesso ao painel Daily) supera o
+  ganho de CI automatizado enquanto o volume for baixo. Reavaliar na
+  Sprint 6/7 quando tiver 2-3 médicas e 10+ consultas/dia.
+- **Sprint 4.1 fecha em 100%** — todos os pedaços de "fundação
+  multi-médico + agenda + sala + financeiro base" têm cobertura de
+  validação agora.
+- **Próximo passo natural (Sprint 5+):** Playwright E2E contra
+  staging, mas só depois de ter staging. Staging vira prioridade
+  quando o primeiro bug em produção causar dano real; até lá, o
+  runbook + smoke cobrem o risco.
+
+**Status:** ✅ Implementado.
+
+---
+
 ## D-038 · Testes automatizados unitários com Vitest (mínimo viável) · 2026-04-20
 
 **Contexto:** até aqui o projeto não tinha nenhum teste automatizado. A
