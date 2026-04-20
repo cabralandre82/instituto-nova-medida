@@ -567,8 +567,17 @@ automatizado (estorno já foi em D-034; NF-e upload flow fica aqui).
       aparece na UI a partir de `pharmacy_requested`. Item
       "Fulfillments" no admin nav. 23 testes novos (288 totais).
       `next build` verde.
-- [ ] **D-044 onda 2.F · /paciente: card "meu tratamento".** Mostra
-      status do fulfillment + CTA "confirmar recebimento".
+- [x] **D-044 onda 2.F · /paciente: card "meu tratamento".**
+      (2026-04-20) Nova `listActiveFulfillments` em
+      `patient-treatment` retorna `paid | pharmacy_requested |
+      shipped`. Client component `ActiveFulfillmentCard` com
+      timeline de 4 passos, rastreio na etapa shipped e CTA
+      "Já recebi o medicamento" só em shipped. `POST
+      /api/paciente/fulfillments/[id]/confirm-delivery` com
+      ownership check explícito (403 em mismatch, não 404) chama
+      `transitionFulfillment` com `actor: 'patient'`. WhatsApp
+      best-effort de entrega. 8 testes novos (296 totais).
+      `next build` verde.
 - [ ] **D-044 onda 2.G · Desligar fluxo antigo "paga antes".**
       Remover qualquer CTA público que leve a `/checkout` sem
       consulta prévia; manter endpoints como back-office.

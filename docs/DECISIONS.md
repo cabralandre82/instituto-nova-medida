@@ -5,6 +5,99 @@
 
 ---
 
+## D-044 · Paciente confirma recebimento (onda 2.F) · 2026-04-20
+
+**Contexto:** as ondas 2.A–2.E criaram toda a infraestrutura
+operacional: paciente aceita → paga → admin envia à farmácia →
+admin despacha. Faltava o paciente ter visibilidade do processo
+e poder fechar o ciclo confirmando que a caixa chegou.
+
+**Decisões:**
+
+1. **Ownership check explícito no endpoint, antes da lib.**
+   `requirePatient` só confirma que o usuário é paciente, não
+   que ele é dono daquele fulfillment. `transitionFulfillment`
+   valida ator (paciente só pode `delivered`), não dono. O
+   endpoint acrescenta a camada: `SELECT customer_id FROM
+   fulfillments WHERE id = :id` e compara com `customerId`
+   da sessão. Sem isso, paciente A poderia clicar em
+   "confirmar recebimento" do fulfillment de paciente B.
+   Defesa em profundidade, sem depender de RLS (que no MVP
+   não está ativo em `fulfillments`).
+
+2. **403 em mismatch, não 404.**
+   Retornar 404 quando o fulfillment existe mas não é do
+   paciente daria oracle de IDs: o paciente poderia testar
+   IDs até encontrar um que devolve 403 e saber que é o
+   fulfillment de outro cliente. 403 comum pra "não
+   encontrado" e "não seu" trata os dois casos
+   simetricamente do ponto de vista de leak de informação
+   (inexistente retorna 404 porque não há nada a proteger).
+
+3. **`delivered` sai da visão de "ativo".**
+   A função `listActiveFulfillments` só retorna os 3 status
+   operacionais em andamento (`paid`, `pharmacy_requested`,
+   `shipped`). Assim que o paciente confirma, o card
+   desaparece do dashboard — o tratamento em si (ciclo de
+   N dias) continua representado pelo `TreatmentCard`
+   (D-043). Evita duplicar informação e reduz ruído.
+
+4. **CTA só em `shipped`.**
+   Nas etapas `paid` e `pharmacy_requested` o paciente
+   recebe apenas hints textuais ("a gente vai acionar a
+   farmácia nas próximas horas úteis" / "a manipulação
+   costuma levar 3 a 5 dias úteis"). Sem botão pra não
+   induzir confirmação prematura. Reduz ansiedade e
+   impossibilita que o paciente marque `delivered` antes
+   de realmente ter recebido.
+
+5. **Timeline de 4 steps fixos, não os 7 da máquina de
+   estados.** O paciente não precisa saber que existe
+   `pending_acceptance`/`pending_payment` (isso vira card
+   "oferta pendente", categoria diferente) nem `cancelled`
+   (raro; se acontecer, aparece em histórico). Simplifica
+   a visualização.
+
+6. **Sem testar endpoint diretamente.**
+   O ownership check é uma comparação direta; a lib
+   `transitionFulfillment` tem 15 testes cobrindo inclusive
+   `forbidden_actor` pra paciente tentando transições não-
+   delivered. Testar o endpoint via mock de `requirePatient`
+   daria pouco valor e muito atrito. Se surgir bug real,
+   criamos o teste na hora.
+
+7. **Idempotência preservada nos 3 níveis.**
+   - Lib devolve `alreadyAtTarget=true` se já está `delivered`.
+   - UPDATE guard previne race com admin que eventualmente
+     forçou delivered em paralelo.
+   - Endpoint retorna 200 silencioso sem enviar WhatsApp
+     duplicado.
+   Paciente pode clicar 3 vezes no botão sem efeito colateral.
+
+**Consequências:**
+
+- Paciente tem visibilidade total da operação sem precisar
+  falar com equipe.
+- Taxa esperada de confirmações espontâneas (hipótese): >70%,
+  reduz carga operacional do admin (que hoje teria que
+  perguntar no WhatsApp).
+- Mensagem de WhatsApp de delivered (composer da 2.E)
+  dispara automaticamente no próprio clique, reforçando
+  o fechamento do ciclo.
+
+**Aberto/pendente:**
+
+- Cron futuro pra auto-delivered depois de N dias sem
+  confirmação do paciente (hook de `actor: 'system'` já
+  existe na lib). Não implementei agora porque precisa
+  primeiro medir a taxa real de confirmação espontânea.
+- Onda 2.G (próxima): desligar CTAs públicos do fluxo
+  antigo `/checkout`.
+
+**Referência:** `docs/CHANGELOG.md` 2026-04-20 (onda 2.F).
+
+---
+
 ## D-044 · Painel admin de fulfillments (onda 2.E) · 2026-04-20
 
 **Contexto:** com o paciente-aceite → pagamento → webhook promove

@@ -16,11 +16,13 @@ import {
   getRenewalInfo,
   getUpcomingAppointment,
   labelForAppointmentStatus,
+  listActiveFulfillments,
   listPastAppointments,
   listPendingOffers,
   type PendingOffer,
 } from "@/lib/patient-treatment";
 import { signPatientToken } from "@/lib/patient-tokens";
+import { ActiveFulfillmentCard } from "./_ActiveFulfillmentCard";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -54,11 +56,18 @@ export default async function PatientDashboard() {
   const supabase = getSupabaseAdmin();
 
   const now = new Date();
-  const [upcoming, renewal, history, pendingOffers] = await Promise.all([
+  const [
+    upcoming,
+    renewal,
+    history,
+    pendingOffers,
+    activeFulfillments,
+  ] = await Promise.all([
     getUpcomingAppointment(supabase, customerId, now),
     getRenewalInfo(supabase, customerId, now),
     listPastAppointments(supabase, customerId, 3),
     listPendingOffers(supabase, customerId),
+    listActiveFulfillments(supabase, customerId),
   ]);
 
   const active = renewal.active;
@@ -85,6 +94,17 @@ export default async function PatientDashboard() {
         <section className="mb-8 space-y-3">
           {pendingOffers.map((offer) => (
             <PendingOfferCard key={offer.fulfillmentId} offer={offer} />
+          ))}
+        </section>
+      )}
+
+      {activeFulfillments.length > 0 && (
+        <section className="mb-8 space-y-3">
+          <h2 className="font-serif text-[1.25rem] text-ink-800 mb-3">
+            Meu tratamento em andamento
+          </h2>
+          {activeFulfillments.map((f) => (
+            <ActiveFulfillmentCard key={f.fulfillmentId} fulfillment={f} />
           ))}
         </section>
       )}

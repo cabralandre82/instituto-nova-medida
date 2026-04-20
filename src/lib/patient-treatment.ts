@@ -370,6 +370,92 @@ export async function listPendingOffers(
   });
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Fulfillments ativos (D-044 · 2.F)
+// ────────────────────────────────────────────────────────────────────
+// "Ativo" aqui = já pago e em processo operacional — o paciente
+// precisa saber onde está a caixa dele:
+//   - `paid`               → Instituto vai acionar farmácia
+//   - `pharmacy_requested` → prescrição foi pra farmácia; aguardando manipulação
+//   - `shipped`            → a caminho; aqui aparece o CTA "confirmar recebimento"
+//
+// `delivered` e `cancelled` NÃO voltam aqui — saem da visão de ação e
+// viram histórico (TreatmentCard cobre o ciclo pós-entrega).
+//
+// Importante: lista é ordenada por `created_at desc` e cap 10 — na
+// prática o paciente só tem 1 ou 2 em paralelo.
+
+export type ActiveFulfillmentStatus = "paid" | "pharmacy_requested" | "shipped";
+
+export type ActiveFulfillment = {
+  fulfillmentId: string;
+  appointmentId: string;
+  status: ActiveFulfillmentStatus;
+  planName: string;
+  planMedication: string | null;
+  doctorName: string;
+  paidAt: string | null;
+  pharmacyRequestedAt: string | null;
+  shippedAt: string | null;
+  trackingNote: string | null;
+  shippingCity: string | null;
+  shippingState: string | null;
+};
+
+export async function listActiveFulfillments(
+  supabase: SupabaseClient,
+  customerId: string,
+): Promise<ActiveFulfillment[]> {
+  const { data, error } = await supabase
+    .from("fulfillments")
+    .select(
+      `id, status, appointment_id, paid_at, pharmacy_requested_at, shipped_at,
+       tracking_note, shipping_city, shipping_state,
+       plan:plans!inner(name, medication),
+       doctor:doctors!inner(full_name, display_name)`
+    )
+    .eq("customer_id", customerId)
+    .in("status", ["paid", "pharmacy_requested", "shipped"])
+    .order("created_at", { ascending: false })
+    .limit(10);
+
+  if (error) {
+    throw new Error(`listActiveFulfillments: ${error.message}`);
+  }
+  if (!data) return [];
+
+  return (data as unknown[]).map((raw) => {
+    const r = raw as Record<string, unknown>;
+    const plan = pickSingle(
+      r.plan as
+        | { name: string; medication: string | null }
+        | Array<{ name: string; medication: string | null }>
+        | null
+    );
+    const doctor = pickSingle(
+      r.doctor as
+        | { full_name: string; display_name: string | null }
+        | Array<{ full_name: string; display_name: string | null }>
+        | null
+    );
+
+    return {
+      fulfillmentId: r.id as string,
+      appointmentId: r.appointment_id as string,
+      status: r.status as ActiveFulfillmentStatus,
+      planName: plan?.name ?? "Plano",
+      planMedication: plan?.medication ?? null,
+      doctorName: doctor?.display_name ?? doctor?.full_name ?? "Médica",
+      paidAt: (r.paid_at as string | null) ?? null,
+      pharmacyRequestedAt: (r.pharmacy_requested_at as string | null) ?? null,
+      shippedAt: (r.shipped_at as string | null) ?? null,
+      trackingNote: (r.tracking_note as string | null) ?? null,
+      shippingCity: (r.shipping_city as string | null) ?? null,
+      shippingState: (r.shipping_state as string | null) ?? null,
+    };
+  });
+}
+
 export async function getPatientProfile(
   supabase: SupabaseClient,
   customerId: string,

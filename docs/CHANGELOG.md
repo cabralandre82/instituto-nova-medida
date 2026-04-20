@@ -6,6 +6,109 @@
 
 ---
 
+## 2026-04-20 · Área do paciente: card "Meu tratamento" + confirmar recebimento (D-044 · onda 2.F) · IA
+
+**Por quê:** depois do pagamento (2.D), o fulfillment fica `paid`,
+caminha pra `pharmacy_requested` e `shipped` via admin (2.E), mas o
+paciente não tinha como acompanhar onde estava a caixa nem como
+confirmar recebimento — precisava esperar alguém do Instituto perguntar
+no WhatsApp. Esta entrega fecha o loop: o dashboard `/paciente` mostra
+em tempo real a etapa atual, timeline compacta, rastreio e CTA
+"já recebi o medicamento" quando aplicável.
+
+**Entregáveis:**
+
+- **`listActiveFulfillments(customerId)`** em `src/lib/patient-treatment.ts`:
+  retorna fulfillments em `paid | pharmacy_requested | shipped`
+  (somente — `delivered` e `cancelled` saem da visão de ação).
+  Ordena desc por `created_at`, cap 10. Traz plano, médica,
+  timestamps das etapas e tracking_note.
+- **`POST /api/paciente/fulfillments/[id]/confirm-delivery`**:
+  endpoint do paciente. `requirePatient` + **ownership check
+  explícito** (cruza `fulfillment.customer_id` com `customerId` da
+  sessão) antes de chamar `transitionFulfillment` com
+  `actor: 'patient'`. 403 em mismatch (não 404, pra não virar oracle
+  de IDs). WhatsApp best-effort pro próprio paciente com
+  `composeDeliveredMessage` fechando o ciclo.
+- **`ActiveFulfillmentCard`** (client component): timeline visual de
+  4 passos (pago → na farmácia → a caminho → recebido) com dots
+  destacando a etapa atual. Mostra rastreio e data de despacho
+  quando `shipped`, hint específica por etapa quando não-shipped.
+  Botão "Já recebi o medicamento" só aparece em `shipped`,
+  desabilita durante submit, reage a erros. `router.refresh()`
+  após sucesso.
+- **Dashboard do paciente atualizado:** nova seção "Meu tratamento
+  em andamento" logo abaixo das ofertas pendentes. Título só
+  aparece quando há fulfillments ativos, zero empty state
+  dedicado — card some quando não há o que mostrar.
+- **Testes unitários** (8 novos, 296 totais): `listActiveFulfillments`
+  cobre happy path 3-status, filtro por `customer_id`, garantia
+  de **não** incluir delivered/cancelled/pending_*, fallback de
+  nome da médica, normalização de relação array vs single, erro
+  do supabase, ordenação e limit.
+
+**Decisões-chave:**
+
+- **Ownership check explícito no endpoint, não apenas na lib.**
+  A lib `transitionFulfillment` valida ator ("patient só pode
+  delivered"), mas não valida dono — porque ela também serve pra
+  admin e system. O endpoint do paciente adiciona a camada de
+  dono: `SELECT customer_id WHERE id = :ffId` e compara com o
+  `customerId` da sessão. Sem isso, qualquer paciente autenticado
+  poderia marcar entregas alheias. Defesa em profundidade.
+- **403 em vez de 404 no mismatch.** Evita enumeração de IDs — um
+  paciente malicioso não consegue descobrir quais IDs existem.
+- **Status `delivered` some da lista de ativos.** Após confirmar,
+  o card desaparece do dashboard. O `TreatmentCard` (D-043) continua
+  mostrando o ciclo do tratamento; o card de fulfillment é
+  especificamente pra etapa logística. Isso evita duplicar
+  informação e mantém o dashboard enxuto.
+- **CTA só em `shipped`, com copy curto.** Em `paid` e
+  `pharmacy_requested` o paciente recebe hints explicativos sem
+  botão — nada pra ele fazer ainda. Reduz ansiedade e evita
+  pressão pra confirmar algo que não chegou.
+- **Timeline de 4 steps, não a máquina de estados inteira.**
+  A visão do paciente agrupa `pending_acceptance` e
+  `pending_payment` noutras seções (ofertas pendentes), e
+  `cancelled` aparece em histórico no futuro. Aqui só os 4
+  estados do "caminho feliz" pra evitar confundir.
+- **WhatsApp best-effort.** Falha de WA loga e segue; a
+  transição no banco é a fonte de verdade. Paciente pode
+  clicar mil vezes — idempotência das 3 camadas (lib, UPDATE
+  guard, alreadyAtTarget) protege.
+- **Sem testar endpoint diretamente.** O ownership check é
+  uma comparação de 3 linhas; a transição já é exaustivamente
+  testada (23 testes na 2.E). Adicionar testes de endpoint
+  daria pouco valor e acoplamento extra com mocks de
+  `requirePatient`. Se surgir bug real, criamos teste na
+  ocasião.
+
+**Arquivos modificados/criados:**
+
+- `src/lib/patient-treatment.ts` (+90 linhas, nova função
+  `listActiveFulfillments` + tipos)
+- `src/lib/patient-treatment-fulfillments.test.ts` (+140 linhas, novo)
+- `src/app/api/paciente/fulfillments/[id]/confirm-delivery/route.ts`
+  (+160 linhas, novo)
+- `src/app/paciente/(shell)/_ActiveFulfillmentCard.tsx`
+  (+210 linhas, novo)
+- `src/app/paciente/(shell)/page.tsx` (+16 linhas, integração)
+- `docs/CHANGELOG.md`, `docs/DECISIONS.md`, `docs/SPRINTS.md`
+
+**Métricas:**
+
+- 296 testes passam (8 novos).
+- `npx tsc --noEmit` limpo.
+- `npx next lint` limpo.
+- `npx next build` OK; rota nova:
+  `/api/paciente/fulfillments/[id]/confirm-delivery`.
+  `/paciente` cresceu 2.02 kB pelo client component.
+
+**Status:** Entregue em produção. Só falta a 2.G (desligar CTAs
+públicos do fluxo antigo `/checkout`) pra D-044 estar completo.
+
+---
+
 ## 2026-04-20 · Painel admin de fulfillments + transições operacionais (D-044 · onda 2.E) · IA
 
 **Por quê:** as ondas 2.A–2.D criaram o fluxo paciente→webhook: aceite,
