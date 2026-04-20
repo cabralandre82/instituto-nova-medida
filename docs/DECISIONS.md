@@ -5,6 +5,161 @@
 
 ---
 
+## D-044 · Inversão do fluxo financeiro — consulta grátis, aceite formal e fulfillment (onda 2.A) · 2026-04-20
+
+**Contexto:** até D-043, o pipeline comercial assumia que o paciente
+**pagava antes** da consulta: `/planos` → `/checkout/[slug]` →
+pagamento confirmado → appointment gerado → médica atendia. Esse
+desenho tem 3 problemas estruturais:
+
+1. **Desalinhado com a realidade clínica.** A médica não tem como
+   prescrever sem avaliar o paciente. Forçar pagamento antes cria
+   fricção desnecessária ("tô pagando por quê? ainda nem sei se
+   sirvo pra isso") e induz à promessa implícita de "você vai ser
+   tratado" antes de qualquer avaliação.
+2. **Exposição de preços na porta de entrada.** Home e modal de
+   captura exibiam valores altos sem contexto médico. Usuário foi
+   categórico: "isso vai assustar os pacientes, é horrível".
+3. **Fulfillment invisível.** Mesmo no fluxo antigo, depois do
+   pagamento o sistema simplesmente "dava o plano como entregue" —
+   ignorava todo o ciclo real (manipulação em farmácia externa,
+   envio, rastreio, confirmação de recebimento). A equipe fazia
+   tudo em planilha paralela.
+
+**Fluxo correto (combinado com o usuário nesta sessão):**
+
+```
+Landing/Quiz → Lead
+  → Consulta gratuita (médica avalia sem cobrar)
+    → Desfecho A: sem indicação clínica (prescription_status='declined', sem cobrança)
+    → Desfecho B: médica prescreve plano (Memed) + seleciona plan_id
+         → /paciente/oferta/[appointment_id]: prescrição + plano + aceite formal
+           → Paciente aceita (plan_acceptance imutável) → checkout Asaas
+             → PAYMENT_RECEIVED → fulfillment: paid
+               → operador: "enviei à farmácia" → pharmacy_requested
+                 → operador: "despachei ao paciente" → shipped (+ tracking_note)
+                   → paciente/operador: "recebi" → delivered
+```
+
+**Respostas do negócio que ancoram o design:**
+
+- Consulta inicial é **gratuita**. Médica só recebe comissão se o
+  plano for prescrito, aceito e pago. Sem isso, nenhum earning
+  é gerado — a regra financeira existente já suporta (earning
+  vem de payment confirmado; sem payment, sem earning).
+- Plano é **pacote fechado** de 1 ciclo (default 90 dias). Não
+  é assinatura recorrente. 1 fulfillment por ciclo. Renovação =
+  nova consulta → novo fulfillment.
+- Aceite é **formal e explícito**: texto completo mostrado ao
+  paciente + checkbox + submit. Distinto de "aceite implícito por
+  pagar". Decisão pró-conformidade (LGPD/CFM).
+
+**Alternativas consideradas e rejeitadas:**
+
+1. **Manter pagamento antes da consulta, com reembolso integral
+   se não houver prescrição.** Simpler codebase, mas fricção
+   enorme no funil (paciente dá CPF/cartão sem saber se vai ser
+   atendido), e refund é operacionalmente caro via Asaas.
+2. **Pagamento no ato da consulta (médica cobra dentro da chamada).**
+   Viola LGPD (médica não deve processar pagamento na frente do
+   paciente) e quebra a separação entre ato clínico e comercial.
+3. **Aceite implícito via próprio pagamento.** Funciona legalmente,
+   mas enfraquece a prova em caso de contestação ("paguei sem saber
+   que era isso"). Aceite formal explícito é barato de implementar
+   e forte como evidência.
+
+**Decisões arquiteturais desta onda (2.A · só schema):**
+
+- **Novo enum `fulfillment_status`** com 7 estados:
+  `pending_acceptance` → `pending_payment` → `paid` →
+  `pharmacy_requested` → `shipped` → `delivered`. `cancelled` é
+  atingível de qualquer estado pré-`delivered`. Terminais:
+  `delivered` e `cancelled`.
+
+- **Tabela `fulfillments`** 1:1 com appointment via
+  `unique(appointment_id)`. Se o paciente não aceitar ou não pagar,
+  o fulfillment fica preso na primeira etapa e não é "reciclável" —
+  para iniciar um novo ciclo, nova consulta. Reflete a realidade
+  clínica: prescrição tem validade, não pode viver "congelada" por
+  meses.
+
+- **Tabela `plan_acceptances`** separada de `fulfillments` e
+  **imutável**. Trigger `prevent_plan_acceptance_changes` bloqueia
+  UPDATE e DELETE — o registro de aceite é prova legal, não pode
+  ser editado nem pelo admin. Guarda snapshot do texto exato +
+  hash determinístico do conjunto (texto + plan_slug +
+  prescription_url + appointment_id), pra detectar adulteração.
+
+- **`appointments` ganhou 3 colunas:** `prescribed_plan_id`,
+  `prescription_status` (`none`|`prescribed`|`declined`) e
+  `finalized_at`. O default de `prescription_status` é `none` e
+  as linhas antigas ficam todas nesse estado — compatível com o
+  histórico. Consulta só passa a gerar fulfillment quando a médica
+  seta `prescription_status='prescribed'` e escolhe um plano.
+
+- **Máquina de estados encapsulada em `src/lib/fulfillments.ts`**
+  (puro TS, zero I/O). Funções `canTransition`,
+  `nextAllowedStatuses`, `timestampsForTransition` e
+  `computeAcceptanceHash`. Testes cobrem cada transição válida,
+  cada pulo bloqueado, retrocesso, auto-transição, estados
+  terminais e normalização do hash (NFC Unicode, whitespace,
+  case do slug). Cobertura: 24 casos.
+
+- **Hash de aceite** é SHA-256 do JSON canonicalizado com chaves
+  ordenadas alfabeticamente, texto normalizado NFC + colapso de
+  espaços, slug em lowercase. Determinístico e resistente a
+  variações superficiais. Auditor re-calcula e compara com o
+  `acceptance_hash` gravado — diferença = alguém editou algo.
+
+- **RLS** segue o padrão do resto do projeto: admin ALL + médica
+  SELECT só do que é dela via `current_doctor_id()`. Paciente
+  lê via backend `service_role` com filtro code-level por
+  `customer_id` (mesma decisão consciente do D-043).
+
+- **`uuid_generate_v4()` → `gen_random_uuid()`** pra novas tabelas
+  (pgcrypto, built-in em Postgres moderno). Alinha com migrations
+  recentes que já usavam.
+
+**Escopo expressamente fora desta onda:**
+
+- Nenhuma UI nova. A onda 2.A é **puramente schema + domínio**.
+- Nenhuma mudança em `/checkout` ou `/agendar` — eles continuam
+  funcionando no fluxo antigo até a onda 2.G desligar.
+- Nenhuma notificação WhatsApp nova — chegam nas ondas 2.B/2.D/2.E
+  junto com as UIs de cada etapa.
+
+**Próximas ondas (mapeadas mas não implementadas):**
+
+- **2.B · Painel da médica — finalizar consulta.** Tela
+  `/medico/consultas/[id]/finalizar` com anamnese + hipótese +
+  conduta + Memed + seletor de plano. Ao finalizar: atualiza
+  appointment e cria `fulfillment(pending_acceptance)`.
+- **2.C · Paciente — oferta + aceite.** Tela `/paciente/oferta/[id]`
+  com prescrição + plano + checkbox + submit. Cria
+  `plan_acceptance` e redireciona pro checkout autenticado.
+- **2.D · Webhook Asaas promove pra `paid`.** Extensão do handler
+  já existente.
+- **2.E · Painel admin — gestão de fulfillment.** Lista de
+  pendentes + botões de transição + auditoria.
+- **2.F · Paciente — status do tratamento.** Card em `/paciente`
+  mostrando onde está o fulfillment + CTA "recebi".
+- **2.G · Desligar CTAs do fluxo antigo.** Remover pontos públicos
+  que ainda levam a `/checkout` sem consulta prévia.
+
+**Arquivos tocados nesta onda:**
+
+- `supabase/migrations/20260424000000_fulfillments_and_plan_acceptance.sql`
+- `src/lib/fulfillments.ts` (novo)
+- `src/lib/fulfillments.test.ts` (novo · 24 testes)
+- `docs/DECISIONS.md` (este bloco)
+- `docs/CHANGELOG.md` (entrada D-044)
+- `docs/SPRINTS.md` (Sprint 5, Frente 5 — nova)
+
+**Estado:** migração aplicada em produção; 165 testes passando
+(24 novos). Nenhuma UI exposta ainda — próxima onda é 2.B.
+
+---
+
 ## D-043 · Área logada do paciente ("meu tratamento") · 2026-04-20
 
 **Contexto:** até aqui, o paciente existia como **linha em

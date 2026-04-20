@@ -6,6 +6,106 @@
 
 ---
 
+## 2026-04-20 · Inversão do fluxo: fulfillment + aceite formal (D-044 · onda 2.A) · IA
+
+**Por quê:** o fluxo antigo obrigava o paciente a pagar **antes** de
+ser avaliado pela médica — desalinhado com a realidade clínica
+(prescrição exige avaliação), criava fricção no funil e deixava
+preços altos na home sem contexto médico ("horrível", nas palavras
+do usuário). Além disso, mesmo depois do pagamento, o ciclo real
+(manipulação em farmácia externa → envio → recebimento) vivia em
+planilha paralela, sem rastro no sistema.
+
+**Correção combinada:** consulta inicial passa a ser **gratuita**.
+Se a médica prescrever, o paciente vê a receita na área logada,
+faz **aceite formal** (texto + checkbox + submit), paga, e só
+então roda o fulfillment — com estados explícitos até a entrega.
+
+**Entregáveis (onda 2.A · só schema + domínio):**
+
+- **Migration `20260424000000_fulfillments_and_plan_acceptance.sql`** (aplicada em produção):
+  - Enum `fulfillment_status` com 7 estados
+    (`pending_acceptance` → `pending_payment` → `paid` →
+    `pharmacy_requested` → `shipped` → `delivered`, mais
+    `cancelled` como sumidouro). `delivered` e `cancelled` são
+    terminais.
+  - Tabela `fulfillments` 1:1 com appointment via
+    `unique(appointment_id)`, com timestamps por transição,
+    `tracking_note` (texto livre do operador) e
+    `updated_by_user_id` (auditoria).
+  - Tabela `plan_acceptances` com texto exato + hash SHA-256 do
+    conjunto canonicalizado. Trigger
+    `prevent_plan_acceptance_changes` bloqueia UPDATE e DELETE —
+    aceite é prova legal imutável.
+  - `appointments` ganhou 3 colunas: `prescribed_plan_id`,
+    `prescription_status` (`none`/`prescribed`/`declined`),
+    `finalized_at`.
+  - RLS: admin ALL + médica SELECT do que é dela.
+    `current_doctor_id()` / `jwt_role()` já existiam.
+  - Índices: parcial `idx_ff_open` pra listar fulfillments em
+    aberto sem varrer terminais.
+
+- **`src/lib/fulfillments.ts`** (novo · puro, sem I/O):
+  - Tipos `FulfillmentRow`, `PlanAcceptanceRow`, `FulfillmentStatus`.
+  - `canTransition(from, to)` — fonte da verdade da máquina de estados.
+  - `nextAllowedStatuses(from)` — pra UI renderizar só os botões válidos.
+  - `isTerminalStatus`, `fulfillmentStatusLabel` (pt-BR).
+  - `timestampsForTransition(to, at)` — evita operador esquecer de
+    preencher o timestamp correspondente.
+  - `computeAcceptanceHash({ acceptanceText, planSlug, prescriptionUrl, appointmentId })`
+    — SHA-256 do JSON canonicalizado (chaves ordenadas, NFC
+    Unicode, whitespace colapsado, slug em lowercase).
+
+- **`src/lib/fulfillments.test.ts`** (novo · 24 testes):
+  - Caminho feliz completo.
+  - Cancel a partir de cada etapa pré-`delivered`.
+  - Bloqueio de pulo, retrocesso, auto-transição e "reviver" terminais.
+  - Determinismo do hash + sensibilidade a texto/plano/prescrição/appointment.
+  - Resiliência do hash a whitespace, case do slug e Unicode NFC/decomposto.
+
+**Fora do escopo da onda 2.A (chegam nas próximas):**
+
+- UI da médica finalizar consulta (2.B)
+- Tela de aceite do paciente (2.C)
+- Extensão do webhook Asaas (2.D)
+- Painel admin de fulfillment (2.E)
+- Card "meu tratamento" no /paciente (2.F)
+- Remover CTAs do fluxo antigo (2.G)
+
+**Status:** 165 testes passando (24 novos). TypeScript e ESLint
+verdes. Migração aplicada no Supabase remoto sem erros. Nenhuma
+UI exposta — onda seguinte é 2.B (painel da médica finalizar
+consulta com seletor de plano).
+
+---
+
+## 2026-04-20 · Retirada de `/planos` da home pública · IA
+
+**Por quê:** o usuário apontou que os preços altos do `/planos`
+exibidos na home (sem explicação médica) assustam o visitante. O
+fluxo correto é o paciente chegar ao preço **depois** da consulta,
+com a indicação da médica já em mãos.
+
+**Entregáveis:**
+
+- `src/components/Header.tsx`: link "Planos" removido da nav.
+- `src/components/Hero.tsx`: CTA secundário trocado pra
+  "Como funciona" (âncora pra `#como-funciona`).
+- `src/components/Cost.tsx`: link "Ver planos de tratamento" e
+  dependência `Link` removidos; copy ajustada pra
+  "avaliação gratuita + só paga se a médica indicar".
+- `src/components/Success.tsx`: bloco "Já dá pra ver os planos"
+  substituído por "O que vem agora" (consulta antes, cobrança
+  só se houver prescrição).
+- `src/app/planos/page.tsx`: `robots: noindex, nofollow`; página
+  segue acessível por URL direta (operacional envia no WhatsApp).
+- `src/app/sitemap.ts`: `/planos` fora do sitemap.
+
+**Status:** commit `d62f65b` no `main`. 165 testes passando,
+TypeScript e ESLint verdes.
+
+---
+
 ## 2026-04-20 · Área logada do paciente "meu tratamento" (D-043) · IA
 
 **Por quê:** depois do checkout, o paciente sumia do app. Qualquer

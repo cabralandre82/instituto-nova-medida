@@ -487,6 +487,41 @@ automatizado (estorno já foi em D-034; NF-e upload flow fica aqui).
 - [ ] E2E Playwright contra staging (se criarmos staging)
 - [ ] Relatório financeiro consolidado por médica (export CSV mês)
 
+**Frente 5 — Inversão do fluxo comercial (D-044) — consulta grátis, aceite formal, fulfillment:**
+
+- [x] **Retirada de `/planos` da home pública** (2026-04-20): links
+      públicos removidos de Header/Hero/Cost/Success,
+      `robots: noindex,nofollow`, fora do sitemap. URL continua
+      acessível pro operacional enviar via WhatsApp.
+- [x] **D-044 onda 2.A · Schema + domínio de fulfillment e aceite formal**
+      (2026-04-20): enum `fulfillment_status` (7 estados),
+      tabelas `fulfillments` (1:1 com appointment) e
+      `plan_acceptances` (imutável via trigger),
+      3 colunas novas em `appointments`
+      (`prescribed_plan_id`, `prescription_status`, `finalized_at`),
+      RLS admin-ALL + médica-self, `src/lib/fulfillments.ts`
+      com máquina de estados pura + hash SHA-256 canonicalizado
+      do aceite. 24 testes novos (165 totais). Migração aplicada.
+- [ ] **D-044 onda 2.B · Painel da médica — finalizar consulta.**
+      `/medico/consultas/[id]/finalizar` com anamnese, hipótese,
+      conduta, Memed e seletor de plano. Cria
+      `fulfillment(pending_acceptance)` ao finalizar.
+- [ ] **D-044 onda 2.C · Oferta + aceite formal do paciente.**
+      `/paciente/oferta/[appointment_id]` com prescrição + plano +
+      texto legal + checkbox + submit imutável. Redireciona pra
+      checkout Asaas autenticado vinculado ao appointment.
+- [ ] **D-044 onda 2.D · Webhook Asaas promove `paid`.** Extensão
+      do handler existente pra mover fulfillment
+      `pending_payment` → `paid`; WhatsApp "pagamento ok".
+- [ ] **D-044 onda 2.E · Painel admin de fulfillment.** Lista de
+      pendentes com botões das transições (pharmacy_requested →
+      shipped → delivered) + notificações WhatsApp em cada etapa.
+- [ ] **D-044 onda 2.F · /paciente: card "meu tratamento".** Mostra
+      status do fulfillment + CTA "confirmar recebimento".
+- [ ] **D-044 onda 2.G · Desligar fluxo antigo "paga antes".**
+      Remover qualquer CTA público que leve a `/checkout` sem
+      consulta prévia; manter endpoints como back-office.
+
 ---
 
 ## ⚪ Sprint 6 · Admin + Indicação + Analytics + Split de comissão
