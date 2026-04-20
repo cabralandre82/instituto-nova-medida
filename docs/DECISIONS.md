@@ -5,6 +5,85 @@
 
 ---
 
+## D-045 · Busca global + ficha do paciente (onda 3.B) · 2026-04-20
+
+**Contexto:** com todas as telas já construídas, o operador solo
+ainda tinha uma dor central: **encontrar uma pessoa específica** e
+**ver tudo sobre ela numa só tela**. Sem busca, abrir
+`/admin/fulfillments` → procurar visualmente → se não achar, abrir
+`/admin/refunds`, depois `/admin/doctors` (pra ver consultas dela).
+Ficha do paciente não existia — cada tela tinha seu fragmento.
+
+**Decisões:**
+
+1. **Barra de busca global no header.** Acesso universal a partir
+   de qualquer página `/admin/*`. Atalho `⌘K`/`Ctrl+K` foca, Esc
+   fecha, Enter seleciona, setas navegam. Estilo padrão de
+   autocomplete de SaaS moderno — o cliente já conhece o padrão.
+
+2. **Classificação do input antes da query.** `classifyQuery` detecta
+   email/CPF/phone/name. Alternativa (super-query OR) seria lenta e
+   menos precisa. Trade-off aceito: adicionar email → @ explícito,
+   adicionar CPF → 11 dígitos ou máscara, adicionar phone → máscara
+   OU mais de 11 dígitos (DDI). Documentamos.
+
+3. **11 dígitos ambíguos resolvem-se pro CPF.** Celular brasileiro
+   com DDD (11 dígitos) e CPF (11 dígitos) são indistinguíveis sem
+   contexto. CPF tem unique constraint → busca exata é
+   determinística e barata. Pra buscar celular, operador deixa a
+   máscara (`(11) 99...`) ou prefixa DDI (`5511...`).
+
+4. **Autocomplete mascarar CPF; ficha mostrar inteiro.**
+   Autocomplete é consumo rápido, vários hits na tela, em header
+   possivelmente exposto a câmera/screenshare. Mascarar (`123.***.***-00`)
+   previne vazamento trivial. A ficha exige clique explícito e é
+   gateada por `requireAdmin` — nesse contexto mostrar CPF inteiro
+   é operacionalmente necessário (copiar pra Asaas, emitir NF).
+
+5. **pg_trgm como otimização, não requisito.** Trigram indexes em
+   `name`, `email`, `phone` aceleram ilike dramaticamente. Mas a
+   migration é idempotente e a lib continua funcionando sem os
+   índices (seq scan). Feature não quebra se o índice não existir.
+
+6. **Ficha como agregador, não source of truth.** A ficha reutiliza
+   a view `fulfillments_operational` já existente e puxa
+   appointments/payments/acceptances direto das tabelas originais.
+   Nenhum dado novo persistido; a ficha é projeção somente-leitura.
+   Isso mantém os links pra ações específicas (`/admin/fulfillments/[id]`)
+   como fonte da verdade pra manipulação.
+
+7. **Timeline 100% pura.** `buildPatientTimeline` recebe um
+   `PatientProfile` e devolve uma lista de `TimelineEvent`.
+   Nenhuma query, nenhum side-effect. Testável exaustivamente sem
+   mock. Reutilizável em export de PDF, email pro paciente sobre
+   seu próprio histórico (LGPD direito de acesso), etc.
+
+8. **Estats em cima, detalhes embaixo.** O operador bate o olho e
+   vê: quanto esse paciente já pagou, quantas consultas, qual plano
+   atual, quantos fulfillments. Depois, se precisa de detalhe,
+   desce pra timeline e pras tabelas. Segue o mesmo princípio da
+   inbox (3.A): hierarquia visual guia a atenção.
+
+**Consequências:**
+
+- **`AdminNav` ganha "Pacientes"** como segundo item (logo após
+  "Visão geral"). Reflete que essa é a entidade de negócio mais
+  acessada.
+- **`layout.tsx` reorganizado** pra caber a barra de busca entre
+  logo e user-info. O nav lateral continua igual.
+- **Busca será expandida em waves futuras** — autocomplete tem
+  espaço pra incluir tipos diferentes (consultas, fulfillments,
+  payments) quando o volume justificar. Hoje é só paciente.
+- **Ficha será ponto de entrada pra ações LGPD.** 3.G vai adicionar
+  botões "Exportar dados" e "Apagar dados" na ficha.
+- **Ficha será ponto de entrada pra edição.** 3.E vai permitir
+  edição de endereço direto aqui (quando `pending_acceptance`).
+- **Performance.** 5 queries em paralelo + limits de 50 por
+  coleção mantêm TTFB razoável mesmo com histórico longo. Se
+  crescer demais, paginação é trivial.
+
+---
+
 ## D-045 · Inbox do operador solo como home do /admin (onda 3.A) · 2026-04-20
 
 **Contexto:** o cliente opera a plataforma **sozinho**. Com todo o

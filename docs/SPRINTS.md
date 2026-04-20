@@ -617,11 +617,28 @@ avisar um paciente. O objetivo dessa frente é transformar o
       (reliability, conciliação) em posições secundárias.
       Paleta casa (terracotta pra overdue, cream pra due_soon).
       23 testes novos (319 totais). Build/typecheck/lint verdes.
-- [ ] **3.B · Busca global + ficha do paciente.** Barra de busca
-      no topo do admin (nome/WA/email/cpf) + `/admin/pacientes/[id]`
-      com ficha consolidada (consultas, fulfillments, pagamentos,
-      refunds, timeline). Abrir pessoa específica em 2 segundos
-      quando chega um WA.
+- [x] **D-045 onda 3.B · Busca global + ficha do paciente.**
+      (2026-04-20) Lib pura `src/lib/patient-search.ts` com
+      `classifyQuery` (email/CPF/phone/name) + `searchCustomers`
+      idempotente e tipada. Migration `20260425000000_
+      customers_search_indexes.sql` habilita `pg_trgm` e cria
+      3 índices GIN trigram em customers.name/email/phone.
+      Nova lib pura `src/lib/patient-profile.ts` com
+      `loadPatientProfile` (5 fontes em paralelo — customer,
+      appointments, fulfillments_operational, payments,
+      plan_acceptances), `buildPatientTimeline` (pura, 14 kinds
+      de evento cronológicos) e `summarizePatient` (stats
+      líquidos). Endpoint `GET /api/admin/pacientes/search`
+      gateado por requireAdmin, CPF mascarado em autocomplete.
+      `PatientSearchBar` no header do shell admin com debounce
+      180ms, ⌘K/Ctrl+K shortcut, setas+Enter, Esc fecha,
+      dropdown com hits tipados. `/admin/pacientes` com lista
+      + filtro server-side (últimos 30 sem query; limit 50 com
+      query). `/admin/pacientes/[id]` com header + 4 stats
+      cards + dados cadastrais + endereço + timeline com dots
+      coloridos por kind + tabelas de fulfillments/consultas/
+      pagamentos/aceites. AdminNav ganha "Pacientes" (2º item).
+      38 testes novos (357 totais). Build/typecheck/lint verdes.
 - [ ] **3.C · Crons operacionais.** `shipped → delivered`
       automático após 14d; nudge de reconsulta pro paciente em
       fim-de-ciclo; lead nurturing (MSG 2-10 roteiro original).

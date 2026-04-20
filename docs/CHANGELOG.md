@@ -6,6 +6,112 @@
 
 ---
 
+## 2026-04-20 · Busca global + ficha do paciente em /admin (D-045 · onda 3.B) · IA
+
+**Por quê:** operar sozinho envolve muitos "me manda o link da
+Fulana", "a Maria tá esperando o envio?", "quanto a Ana já pagou?".
+Sem busca global, o operador abre 3 telas pra achar uma pessoa. Sem
+ficha consolidada, cruza `/admin/fulfillments` + `/admin/refunds` +
+SQL manual pra montar o contexto. 3.B corta isso: uma barra `⌘K` pra
+encontrar qualquer paciente, uma ficha `/admin/pacientes/[id]` que
+responde tudo em um scroll.
+
+**Entregáveis:**
+
+- **Nova lib pura `src/lib/patient-search.ts`.** `classifyQuery(q)`
+  detecta se o operador digitou email, CPF, telefone ou nome.
+  Regras: `@` → email; `123.456.789-00` ou 11 dígitos puros sem
+  hint de máscara → CPF; 7+ dígitos (ou 4+ se tem espaço/parênteses
+  = máscara de telefone) → phone; senão nome. `searchCustomers`
+  executa a query apropriada e devolve hits enxutos. Hints de
+  máscara (`(21) 9...`) tornam phone mais flexível mesmo com
+  poucos caracteres. Input vazio retorna `[]` sem bater no banco.
+- **Migration `customers_search_indexes.sql`.** Habilita `pg_trgm`
+  e cria 3 índices GIN trigram em `customers.name`, `.email`,
+  `.phone`. `ilike '%q%'` vira rápido mesmo com milhares de
+  pacientes. A lib funciona sem os índices (seq scan), mas com eles
+  fica O(log n).
+- **Nova lib pura `src/lib/patient-profile.ts`.** `loadPatientProfile`
+  busca em paralelo 5 fontes (customer + appointments + view
+  `fulfillments_operational` + payments + plan_acceptances) e
+  monta objeto `PatientProfile` unificado. `buildPatientTimeline`
+  é 100% pura: transforma o profile numa lista de `TimelineEvent`
+  ordenada cronologicamente (mais recente primeiro). 14 tipos de
+  evento mapeados (appointment_scheduled, appointment_finalized,
+  no_show_policy_applied, refund_processed, fulfillment_*
+  [created/accepted/paid/pharmacy_requested/shipped/delivered/
+  cancelled], payment_*, acceptance_signed). `summarizePatient`
+  devolve stats agregadas (total pago líquido, estornado, consultas,
+  plano ativo).
+- **Endpoint `GET /api/admin/pacientes/search`.** Gateado por
+  `requireAdmin`, consome a lib de busca, mascara CPF no retorno
+  (autocomplete nunca mostra CPF inteiro). Limit clamped em
+  `[1, 20]`.
+- **Componente `PatientSearchBar`** no header do shell admin.
+  Debounce 180ms, atalho `⌘K`/`Ctrl+K` pra focar, setas +
+  Enter navegam hits, Esc fecha. Dropdown mostra nome, email,
+  telefone e CPF mascarado. Ícone de lupa na esquerda, dica `⌘K`
+  visível em telas grandes.
+- **Página `/admin/pacientes`** (lista + busca server-side).
+  Sem query: últimos 30 cadastrados ordenados por `created_at`
+  desc. Com query: delega pra `searchCustomers` (limit 50).
+  Tabela com nome, contato, CPF mascarado, data de cadastro,
+  cada linha linka pra ficha.
+- **Página `/admin/pacientes/[id]`** (ficha completa). Header
+  com nome + contato + CPF formatado + status de acesso logado
+  (✓ acesso liberado / sem acesso logado). 4 cards de stats
+  (total pago líquido, consultas, plano ativo, fulfillments com
+  contagem por status). 2 painéis de dados (cadastrais + endereço
+  de entrega cadastrado ou aviso "será pedido no aceite"). Timeline
+  cronológica com dots coloridos por tipo de evento. Tabelas
+  detalhadas de fulfillments (linkando pra `/admin/fulfillments/[id]`),
+  consultas, pagamentos e aceites assinados (com hash prefixado
+  + versão do termo).
+- **`AdminNav`** ganha item "Pacientes" na segunda posição
+  (logo após "Visão geral"). `layout.tsx` reorganizado pra abrir
+  espaço pra barra de busca entre logo e user-info.
+- **38 testes novos** (357 totais). Cobertura inclui:
+  `classifyQuery` (7 cenários — vazio, email, CPF bare/mascarado,
+  phone mascarado/DDI, name, 11 dígitos ambíguos), `normalizeQuery`,
+  `digitsOnly`, `escapeIlike`/`escapeOrValue`, 9 testes de
+  `searchCustomers` (input vazio sem hit de banco, CPF com máscara
+  = or exato, email/nome com ilike, phone com raw + digits
+  separados, limit clamp, propagação de erro, mapeamento de
+  createdAt), 6 testes de `loadPatientProfile` (null em
+  not-found, shape completo, médica display/full_name, erros
+  propagados), 5 testes de `buildPatientTimeline` (vazio, ciclos
+  completos, cancelamento, ordenação cross-source, acceptance
+  description), 3 testes de `summarizePatient`.
+- **Build/typecheck/lint verdes.**
+
+**Decisões-chave:**
+
+- **Busca classificada antes de executada.** Em vez de fazer uma
+  super-query que tenta tudo, `classifyQuery` decide a estratégia
+  certa. Query específica é sempre mais rápida e mais precisa.
+- **11 dígitos puros = CPF, não celular.** Ambíguo sim, mas CPF
+  tem unique constraint e busca exata é determinística. Operador
+  que quer celular com 11 dígitos deixa a máscara ou prefixa DDI
+  `55`. Regra documentada no código.
+- **CPF mascarado em autocomplete, inteiro em ficha.** Autocomplete
+  é consumo rápido; ficha é consulta explícita autenticada.
+  Mascarar em ambos seria paranoia; só em ficha seria vazamento
+  em lugar inesperado.
+- **Timeline é pura.** A função `buildPatientTimeline` só conhece
+  `PatientProfile` — nenhuma query, nenhum timezone. Isso permite
+  testar exaustivamente sem mock e reusar em outras telas
+  (ex: export pra PDF futuro).
+- **View `fulfillments_operational` reaproveitada.** A mesma view
+  criada em 2.C.2 já consolida fulfillment + plano + médica +
+  appointment + payment. Profile filtra por `customer_id`; é o
+  mesmo shape do `/admin/fulfillments`.
+- **Trigram como otimização, não requisito.** A migration é
+  idempotente (`create extension if not exists`), mas se um
+  ambiente hostil bloqueasse, o código continua funcional com
+  seq scan. O comportamento da feature não muda.
+
+---
+
 ## 2026-04-20 · Inbox do operador solo em /admin (D-045 · onda 3.A) · IA
 
 **Por quê:** com a plataforma inteira (funil, financeiro, fulfillment,
