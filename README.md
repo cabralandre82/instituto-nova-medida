@@ -84,10 +84,15 @@ vinculado à compra via `localStorage`.
   `DAILY_WEBHOOK_SECRET` trocado pra base64 válido, handler Pages
   Router `/api/daily-webhook` criado como fallback. **Registro do
   webhook no Daily bloqueado por bug HTTP/2 do superagent — D-029**.
+  ✅ **Cron de expiração de `pending_payment`** (D-030): migration
+  010 com `expire_abandoned_reservations()` + pg_cron agendado
+  `*/1 min` no Supabase; rota `/api/internal/cron/expire-reservations`
+  protegida por `CRON_SECRET` agendada no `vercel.json` também
+  `*/1 min` (redundância defense-in-depth). Reservas abandonadas
+  caem pra `cancelled_by_admin` com `cancelled_reason='pending_payment_expired'`.
 
-**Restante da Sprint 4.1 (3/3):** cron de expiração de
-`pending_payment`, helpers WhatsApp pros 7 templates, política de
-estorno automático em no-show.
+**Restante da Sprint 4.1 (3/3):** helpers WhatsApp pros 7 templates,
+política de estorno automático em no-show.
 
 Veja [`docs/SPRINTS.md`](./docs/SPRINTS.md) para o roadmap completo.
 
@@ -173,6 +178,8 @@ instituto-nova-medida/
 │   │       ├── auth/                         # magic-link / callback / signout
 │   │       ├── agendar/reserve/route.ts      # cria customer + reserva slot + cobra
 │   │       ├── daily/webhook/route.ts        # meeting.* → status do appointment (App Router)
+│   │       ├── internal/cron/
+│   │       │   └── expire-reservations/route.ts  # Vercel Cron (*/1 min) + pg_cron
 │   │       ├── admin/                        # APIs do painel admin
 │   │       │   ├── doctors/[id]/(compensation|payment-method|availability)
 │   │       │   └── payouts/[id]/(approve|pay|confirm|cancel|proof)

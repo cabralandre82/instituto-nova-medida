@@ -163,7 +163,10 @@ Cloudflare com `institutonovamedida.com.br`.
         paid_at, approved_by, approved_at, receipt_url, notes)
   - [ ] `doctor_billing_documents` (payout_id, type, document_url,
         document_number, issued_at, validated_*)
-- [ ] **pg_cron jobs:**
+- [x] **Cron de expiração de reservas (D-030)** — pg_cron
+      `*/1 min` + Vercel Cron `*/1 min` → libera slots em
+      `pending_payment` expirados (TTL 15 min). Migration 010.
+- [ ] **pg_cron jobs (faltantes):**
   - [ ] `recalculate_earnings_availability()` — diário 00:00, passa
         `pending` → `available` conforme política D+7/D+3/D+30
   - [ ] `generate_monthly_payouts()` — dia 1 às 06:00, agrega

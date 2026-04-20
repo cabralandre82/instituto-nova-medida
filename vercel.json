@@ -10,8 +10,17 @@
     },
     "src/app/api/debug/wa-env/route.ts": {
       "maxDuration": 10
+    },
+    "src/app/api/internal/cron/expire-reservations/route.ts": {
+      "maxDuration": 30
     }
   },
+  "crons": [
+    {
+      "path": "/api/internal/cron/expire-reservations",
+      "schedule": "* * * * *"
+    }
+  ],
   "headers": [
     {
       "source": "/api/daily/webhook",

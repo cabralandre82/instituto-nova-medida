@@ -6,6 +6,95 @@
 
 ---
 
+## 2026-04-20 · Cron de expiração de `pending_payment` · IA
+
+**Por quê:** último loose end do fluxo de reserva atomic (D-027). Sem
+sweep global, reservas abandonadas ficavam órfãs — bloqueando a agenda
+da médica sem gerar receita. Decisão documentada em D-030.
+
+**Entregáveis:**
+
+- **Migration 010** (`20260420000000_expire_pending_payment.sql`):
+  - Função `public.expire_abandoned_reservations()` — SECURITY
+    DEFINER, retorna uma linha por slot liberado (pra caller tomar
+    side-effects depois), idempotente.
+  - Index parcial `ix_appointments_pending_expiry` pra acelerar o
+    sweep quando a tabela crescer.
+  - DO block condicional que agenda job `pg_cron` chamado
+    `inm_expire_abandoned_reservations` a cada 1 minuto SE a extensão
+    estiver habilitada no projeto. No Instituto o Supabase já tem
+    `pg_cron` — agendado com sucesso. Idempotente (unschedule do
+    jobname antes de recriar).
+- **API `/api/internal/cron/expire-reservations`** (GET e POST):
+  - Autenticação via `Authorization: Bearer ${CRON_SECRET}` (padrão
+    Vercel Cron) OU `x-cron-secret: ${CRON_SECRET}` (debug manual).
+  - Sem `CRON_SECRET` (dev): aceita qualquer caller, facilita smoke
+    test local.
+  - Chama `supabase.rpc('expire_abandoned_reservations')`, loga
+    quando `expired_count > 0`, retorna JSON estruturado
+    (`{ ok, expired_count, expired: [...], ran_at }`).
+- **`vercel.json`**:
+  - Nova seção `crons` agendando a rota a cada 1 minuto.
+  - `functions.maxDuration = 30s` pro cron (sweep + side-effects
+    futuros).
+- **`CRON_SECRET`** gerado (40 chars base64 sem `=+/`) e adicionado
+  nas 3 envs do Vercel via REST API.
+
+**Arquitetura do sweep (defense in depth):**
+
+```
+           ┌─────────────────────────────────────────┐
+           │ pg_cron → expire_abandoned_reservations │  (*/1 min, dentro do Postgres)
+           │           (silencioso, sem side-fx)     │
+           └─────────────────────────────────────────┘
+                              +
+           ┌─────────────────────────────────────────┐
+           │ Vercel Cron → /api/internal/cron/...    │  (*/1 min, HTTP)
+           │           (logável, futuros side-fx:    │
+           │            Asaas cancel, WA, métricas)  │
+           └─────────────────────────────────────────┘
+```
+
+Ambos chamam a MESMA função SQL. Idempotente = safe rodar dois em
+paralelo. Segunda chamada na mesma janela volta 0 linhas.
+
+**Validação pós-deploy:**
+
+- `curl` local na RPC: retorna `[]` (nenhum slot expirado no
+  momento) — sanidade OK.
+- pg_cron agendado confirmado pela notice durante `supabase db push`:
+  `[migration 010] pg_cron job agendado: inm_expire_abandoned_reservations (*/1 min)`.
+
+**Docs atualizados:**
+
+- `docs/DECISIONS.md` → D-030 (contexto, decisão, 2-layer redundância,
+  side-effects futuros).
+- `docs/SECRETS.md` → `CRON_SECRET` entra no inventário.
+- `docs/SPRINTS.md` → checkbox "pg_cron jobs + cron expiração" marcado.
+- `README.md` → árvore de arquivos + status Sprint 4.1.
+
+---
+
+## 2026-04-20 · Docs: ops Vercel + D-029 nos documentos · IA
+
+Atualização de documentação refletindo o setup ops do dia e o
+bloqueio D-029:
+
+- `docs/SECRETS.md`: `.env.local` template ganhou
+  `PATIENT_TOKEN_SECRET`, `NEXT_PUBLIC_BASE_URL`, `META_CLIENT_TOKEN`,
+  `WHATSAPP_PHONE_DISPLAY`. Nova seção "Estado atual no Vercel"
+  (snapshot 21 envs) e "Gotchas" (4 aprendizados: CLI preview, base64
+  hmac Daily, timestamp ms, HTTP/2 superagent).
+- `docs/ARCHITECTURE.md`: tabela de integrações marca Daily webhook
+  como bloqueado (D-029); subseção nova "Webhooks que recebemos"
+  explicando os dois handlers (App Router + Pages Router).
+- `README.md`: status Sprint 4.1 com ✅ ops e ❌ registro webhook;
+  `src/pages/api/daily-webhook.ts` entra na árvore.
+- `docs/SPRINTS.md`: nota de bloqueio na Sprint 4.1 e no passo 5 da
+  Definição de Pronto.
+
+---
+
 ## 2026-04-20 · Configuração Vercel + Daily.co (ops) · IA
 
 **Por quê:** o operador delegou o setup das envs e do registro de

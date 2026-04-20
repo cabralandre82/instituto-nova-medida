@@ -5,6 +5,85 @@
 
 ---
 
+## D-030 · Expiração de reservas `pending_payment` via sweep duplo (pg_cron + Vercel Cron) · 2026-04-20
+
+**Contexto:** a migration 008 (D-027) introduziu o estado
+`pending_payment` em `appointments` com TTL curto
+(`pending_payment_expires_at`, default 15 min). Isso permite ao
+paciente reservar um slot enquanto o checkout está aberto sem
+que outro paciente roube o mesmo horário. Problema: se o paciente
+abandona o checkout e NINGUÉM tenta reservar o mesmo slot nos 15
+minutos seguintes, a reserva fica órfã — ocupa agenda, bloqueia
+outras reservas, e não gera receita. A função
+`book_pending_appointment_slot()` tem um "fast path" local (limpa
+expiradas no mesmo slot antes de inserir), mas é insuficiente: só
+dispara sob demanda.
+
+**Decisão:** executar um **sweep global periódico** que libera
+TODAS as reservas expiradas de uma vez. Implementado com
+**redundância em duas camadas**:
+
+1. **pg_cron dentro do Supabase** (*/1 min): chama
+   `public.expire_abandoned_reservations()` direto no Postgres.
+   Migration 010 agenda condicionalmente — se `pg_cron` não
+   estiver habilitado, loga NOTICE e segue.
+2. **Vercel Cron** (*/1 min): chama `GET /api/internal/cron/expire-reservations`
+   autenticado via `Authorization: Bearer ${CRON_SECRET}`, que por
+   sua vez dispara a mesma RPC. Redundância barata (função
+   idempotente — segunda chamada na mesma janela retorna 0 linhas),
+   E abre espaço pra side-effects fora do Postgres: cancelar a
+   cobrança no Asaas, disparar WhatsApp "sua reserva expirou",
+   logar estruturado no dashboard Vercel.
+
+**Por que dois crons e não um?**
+
+- Supabase free/self-hosted pode não ter `pg_cron`. Ter o HTTP
+  garante que a feature nunca fica parada.
+- Vercel Cron pode falhar em deploys quebrados, cold starts, ou
+  downtime da Vercel. Ter o pg_cron garante que a agenda limpa
+  mesmo se o app estiver down.
+- Os dois juntos custam ~0 (idempotência nativa) e aumentam
+  robustez operacional.
+
+**Estado final do slot após expiração:**
+
+```
+appointments.status           = 'cancelled_by_admin'
+appointments.cancelled_at     = <now>
+appointments.cancelled_reason = 'pending_payment_expired'
+```
+
+O `status = 'cancelled_by_admin'` é semanticamente ruim (não foi
+o admin humano que cancelou), mas aproveitamos o enum já existente
+pra não precisar ampliar — o `cancelled_reason` textual distingue
+casos automáticos de manuais. Reavaliaremos em Sprint 5 se
+precisarmos filtrar métricas por "expirado vs cancelado manualmente";
+nesse momento adicionamos `cancelled_by_system` ao enum.
+
+**Side-effects futuros (Sprint 4.2+, preparados mas não ligados):**
+
+- Cancelar `payments` no Asaas via API (`DELETE /payments/{id}`):
+  hoje o payment local permanece `PENDING` e vira `OVERDUE` sozinho.
+- Enviar WhatsApp "sua reserva de [horário] com Dra. X expirou.
+  Quer reagendar?" com link pra `/agendar/[plano]` — melhora
+  recuperação.
+- Métrica `abandon_rate` (reservas expiradas / reservas criadas)
+  no admin.
+
+**Decorrências:**
+
+- `CRON_SECRET` adicionado ao Vercel (production/preview/development)
+  em 2026-04-20, 40 chars random base64.
+- `vercel.json` ganhou seção `crons` (antes só tinha `functions` e
+  `headers`).
+- `/api/internal/cron/expire-reservations` aceita GET e POST,
+  valida `Bearer <CRON_SECRET>` (oficial Vercel) e
+  `x-cron-secret: <CRON_SECRET>` (debug manual), e no dev
+  (`CRON_SECRET` ausente) aceita qualquer caller pra facilitar
+  smoke test local.
+
+---
+
 ## D-029 · Webhook do Daily via Pages Router + incompatibilidade HTTP/2 · 2026-04-20
 
 **Contexto:** ao tentar registrar o webhook `/api/daily/webhook` via
