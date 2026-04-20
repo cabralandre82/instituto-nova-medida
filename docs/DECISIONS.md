@@ -5,6 +5,92 @@
 
 ---
 
+## D-038 · Testes automatizados unitários com Vitest (mínimo viável) · 2026-04-20
+
+**Contexto:** até aqui o projeto não tinha nenhum teste automatizado. A
+cobertura era `npm run build` + `tsc --noEmit` + testes manuais E2E
+antes de cada merge pra `main`. Isso funcionou enquanto o código era
+pequeno e cada feature era conhecida na cabeça, mas agora temos:
+
+- Política assimétrica de no-show (D-032) com ramos de cobrança/refund
+  que envolvem dinheiro real.
+- Regras de confiabilidade da médica (D-036) com auto-pause baseado em
+  threshold — precisa ser idempotente e não disparar em médica já
+  pausada manualmente.
+- Conciliação financeira (D-037) com 6 checks independentes sobre 3
+  tabelas.
+- Refund via Asaas API atrás de feature flag (D-034) — flag default-off
+  é salva-vidas em caso de bug, então não pode vazar pra on sem
+  intenção.
+- Dedupe idempotente em múltiplos webhooks (Asaas, Daily, WhatsApp
+  template status).
+
+Com essa quantidade de lógica crítica, a ausência de testes começa a
+pesar. Risco concreto: alguém fazer refactor em `no-show-policy.ts` pra
+adicionar um caso novo e quebrar silenciosamente o caso de
+`expired_no_one_joined` (cuja ramificação é fácil de esquecer).
+
+**Alternativas consideradas:**
+
+- **Jest.** Rejeitado por inércia de configuração com Next 14 + ESM +
+  `moduleResolution: "bundler"` + alias `@/*`. Jest funciona mas exige
+  `ts-jest` + `moduleNameMapper` + transform setup. Vitest roda
+  nativamente em ESM e respeita `tsconfig.paths` via seu próprio
+  resolver.
+- **Playwright E2E desde já.** Adiado pra D-039. Testes E2E precisam de
+  ambiente de staging com DB limpo + Asaas sandbox + dados seed. Sprint
+  5 planejada separada. ROI menor agora porque quebras atuais são de
+  lógica interna, não de fluxo ponta-a-ponta.
+- **Testes de integração com Supabase local (via `supabase start`).**
+  Rejeitado por ora: o setup sobe Postgres + PostgREST + Studio no
+  Docker e leva ~30s por teste de DB. Acelera iteração só quando o
+  projeto tem 100+ testes. Hoje com <30, mocks em memória são mais
+  rápidos e menos frágeis.
+- **Pular testes e investir o tempo em features.** Rejeitado: o custo
+  de não ter testes já tá alto o suficiente. Um bug silencioso na
+  política de no-show ou no auto-pause é jornada toda pra reconstituir
+  depois.
+
+**Decisão:** Vitest + mock de Supabase em memória, focando em 3 suites
+cobrindo os pontos mais críticos:
+
+1. `src/lib/reliability.test.ts` — auto-pause no threshold hard,
+   idempotência em pause/unpause (não sobrescrever pause manual com
+   metadados de auto-pause), dedupe 23505 em `recordReliabilityEvent`.
+2. `src/lib/refunds.test.ts` — feature flag `REFUNDS_VIA_ASAAS` é
+   literal-`"true"` only (case-sensitive, `"1"`/`"TRUE"` não contam), e
+   `markRefundProcessed` é idempotente por `refund_processed_at`.
+3. `src/lib/reconciliation.test.ts` — `KIND_LABELS` cobre exaustivamente
+   `DiscrepancyKind` (teste quebra se alguém adicionar kind novo sem
+   label), 4 críticos + 2 warnings por design, `runReconciliation` não
+   quebra com DB vazio nem com erros de query em checks individuais.
+
+**Helper `src/test/mocks/supabase.ts`:** em vez de simular um query
+builder completo (propenso a bugs no próprio mock), cada teste enfileira
+explicitamente as respostas que cada `.from('tabela')` deve devolver, em
+ordem. O builder aceita toda a chain fluente (`.select().eq().is()...`)
+e resolve via `thenable` ou terminais (`.single()` / `.maybeSingle()`).
+Pequeno, transparente, fácil de auditar.
+
+**Consequências:**
+
+- Regressão em lógica crítica vira erro de CI em vez de bug em produção.
+- 29 testes passando em ~500ms — contrato de velocidade preservado
+  (rodar `npm test` precisa caber no muscle memory; nunca vai ter
+  incentivo pra pular).
+- Nova convenção: mudou `src/lib/*.ts` crítico → adiciona/atualiza teste
+  correspondente. Sem cerimônia extra.
+- Próximos passos (D-039+): E2E com Playwright; cobertura pra
+  `no-show-policy.ts`, `appointment-lifecycle.ts`, `slot-reservation.ts`
+  (os três mais complexos que ficaram de fora dessa primeira leva por
+  envolverem mais mocks).
+- `REFUNDS_VIA_ASAAS` agora tem trava de teste: se alguém mudar o
+  parser pra aceitar `"1"` ou `"TRUE"` sem intenção, o teste quebra.
+
+**Status:** ✅ Implementado.
+
+---
+
 ## D-037 · Conciliação financeira read-only (on-demand) · 2026-04-20
 
 **Contexto:** D-022 (controle financeiro interno) instituiu três

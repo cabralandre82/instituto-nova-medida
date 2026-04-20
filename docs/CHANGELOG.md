@@ -6,6 +6,72 @@
 
 ---
 
+## 2026-04-20 · Testes automatizados unitários com Vitest (D-038) · IA
+
+**Por quê:** antes desta entrega o projeto rodava em `tsc --noEmit` +
+`next build` + testes manuais. Isso escalou enquanto a lógica de negócio
+era pequena; mas com D-032 (política de no-show), D-036 (confiabilidade
++ auto-pause), D-037 (conciliação financeira) e D-034 (refund via Asaas
+com feature flag), ficou claro que regressão silenciosa nesses arquivos
+tem dano financeiro/operacional concreto. 29 testes automatizados
+cobrem os pontos de maior risco em ~500ms.
+
+**Entregáveis:**
+
+- **Vitest 4.x** instalado + `vitest.config.ts` com alias `@/*` e
+  scripts `npm test` / `npm run test:watch`.
+
+- **`src/test/mocks/supabase.ts`** (novo): helper que cria um mock do
+  Supabase client via fila por tabela. O teste enfileira explicitamente
+  as respostas que cada `.from('tabela')` deve consumir, o builder
+  aceita toda a chain fluente e resolve via `thenable` ou terminais
+  (`.single()` / `.maybeSingle()`). Transparente, sem simulação de DB.
+
+- **`src/lib/reliability.test.ts`** (novo, 12 testes):
+  - `recordReliabilityEvent` happy path + dedupe 23505 (unique parcial
+    em `appointment_id`) + propagação de erro não-23505 como `db_error`.
+  - `evaluateAndMaybeAutoPause` não pausa abaixo do hard block, pausa
+    quando atinge, é noop se médica já pausada.
+  - `pauseDoctor` persiste metadados corretos + é idempotente (não
+    sobrescreve pause manual com metadados de auto-pause).
+  - `unpauseDoctor` limpa campos + é idempotente.
+  - Constantes `RELIABILITY_*` batem com o doc (soft=2, hard=3, 30d).
+
+- **`src/lib/refunds.test.ts`** (novo, 10 testes):
+  - `isAsaasRefundsEnabled` é literal-`"true"`-only (case-sensitive,
+    `"1"`/`"TRUE"`/vazio não habilitam — proteção contra flag vazando
+    pra on sem intenção).
+  - `markRefundProcessed` marca corretamente + é idempotente (retorna
+    `alreadyProcessed=true` sem re-update) + falha cedo com
+    `refund_not_required` quando flag é false + normaliza `externalRef`
+    e `notes` (trim + vazio → null).
+  - Verifica que o UPDATE tem a segunda trava `.is('refund_processed_at',
+    null)` pra proteger race condition.
+
+- **`src/lib/reconciliation.test.ts`** (novo, 7 testes):
+  - `KIND_LABELS` cobre exaustivamente `DiscrepancyKind` (teste quebra
+    se alguém adicionar um kind novo sem label).
+  - Confere que são exatamente 4 críticos + 2 warnings por design D-037.
+  - `runReconciliation` devolve report vazio coerente com DB limpo.
+  - `runReconciliation` é tolerante a erro em check individual (não
+    propaga exceção).
+  - `getReconciliationCounts` devolve só os dois contadores, sem vazar
+    detalhes (proteção de contrato pro dashboard).
+
+**Números:**
+
+- 29 testes, 3 arquivos, ~500ms de runtime.
+- `npm test` → todos verdes.
+- `tsc --noEmit` → limpo.
+- `npm run build` → limpo.
+
+**Fora do escopo (próximo passo D-039):** E2E com Playwright em
+staging; cobertura de `no-show-policy.ts` / `appointment-lifecycle.ts`
+/ `slot-reservation.ts` (os três mais complexos, ficaram pra segunda
+leva por envolverem fluxos multi-tabela mais elaborados).
+
+---
+
 ## 2026-04-20 · Conciliação financeira read-only (D-037) · IA
 
 **Por quê:** payments/earnings/payouts têm ciclos de vida

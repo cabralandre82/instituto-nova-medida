@@ -252,9 +252,11 @@ instituto-nova-medida/
 
 ```bash
 npm install
-npm run dev      # http://localhost:3000
-npm run build    # build de produção
-npm start        # rodar o build
+npm run dev          # http://localhost:3000
+npm run build        # build de produção
+npm start            # rodar o build
+npm test             # testes unitários (Vitest)
+npm run test:watch   # testes em watch mode
 ```
 
 ## Deploy

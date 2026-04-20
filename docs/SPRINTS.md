@@ -130,7 +130,7 @@ Foco: subir um fluxo end-to-end "paciente paga → agenda → médica
 atende → recebe earning → admin paga via PIX no fim do mês". Sem fila
 on-demand ainda, sem Memed ainda — esses entram na 4.2.
 
-**Status (2026-04-20):** 98% entregue. Bloqueio D-029 (webhook Daily
+**Status (2026-04-20):** 99% entregue. Bloqueio D-029 (webhook Daily
 falha no registro por bug HTTP/2 do superagent deles) **mitigado** em
 D-035: cron `/api/internal/cron/daily-reconcile` rodando a cada 5 min
 fecha o ciclo dos appointments via polling da Daily REST API. Webhook
@@ -141,6 +141,9 @@ granulares + auto-pause em 3 eventos/30d + painel admin completo.
 D-037 (conciliação financeira) entregue: 6 checks on-demand em
 /admin/financeiro detectando divergências entre payments, earnings
 e payouts, com severidade e hint de ação.
+D-038 (testes unitários) entregue: Vitest + 29 testes cobrindo
+reliability, refunds e reconciliation. Helper `src/test/mocks/supabase.ts`
+para mockar DB via fila de respostas por tabela. Runtime ~500ms.
 
 **Entregáveis:**
 
@@ -278,6 +281,18 @@ e payouts, com severidade e hint de ação.
       alertas novos (N críticas, N warnings) em "Próximos passos".
       Zero mutations — admin corrige manual via SQL (hint sugere).
       Recomendação operacional: rodar toda sexta antes de fechar mês.
+- [x] **Testes automatizados unitários (D-038)** — primeira suíte
+      automatizada do projeto. Vitest 4.x + mock helper
+      `src/test/mocks/supabase.ts` (fila de respostas por tabela, sem
+      simulação de DB). 29 testes em 3 arquivos, ~500ms runtime:
+      `reliability.test.ts` (12 testes, auto-pause + idempotência
+      pause/unpause + dedupe 23505), `refunds.test.ts` (10 testes,
+      feature flag literal-"true"-only + mark idempotente),
+      `reconciliation.test.ts` (7 testes, KIND_LABELS exaustivo +
+      report vazio coerente + resiliência a erro). Scripts
+      `npm test` / `npm run test:watch`. Fora do escopo desta leva
+      (mantido pra D-039): no-show-policy, appointment-lifecycle,
+      slot-reservation, HMAC tokens, E2E com Playwright.
 - [ ] **Auth:** roles `doctor` e `admin` no Supabase, middleware
       protegendo `/medico/*` e `/admin/*`
 - [ ] **API routes:**
