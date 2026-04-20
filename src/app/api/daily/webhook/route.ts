@@ -70,7 +70,18 @@ export async function POST(req: Request) {
     );
   }
 
-  const validation = await provider.validateWebhook(req);
+  let validation;
+  try {
+    validation = await provider.validateWebhook(req);
+  } catch (e) {
+    // loadDailyConfig() pode lançar se DAILY_API_KEY/DOMAIN não estão
+    // setadas — devolvemos 503 explicitamente em vez de crashar com 500.
+    console.error("[daily-webhook] config ausente:", e);
+    return NextResponse.json(
+      { ok: false, error: "video_provider_unconfigured" },
+      { status: 503 }
+    );
+  }
   if (!validation.ok) {
     console.warn("[daily-webhook] validação falhou:", validation.reason);
     return NextResponse.json(
