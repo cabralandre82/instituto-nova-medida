@@ -5,6 +5,124 @@
 
 ---
 
+## D-031 · WhatsApp como fila persistente (`appointment_notifications`) + worker HTTP · 2026-04-20
+
+**Contexto:** Sprint 4.1 previa enviar 5 mensagens WhatsApp pro paciente
+(confirmação + 4 lembretes temporais) e 2 pra médica. Opções
+consideradas:
+
+1. **Disparo direto no handler** (ex: dentro do webhook Asaas manda
+   a confirmação na hora). Simples, mas acopla o fluxo crítico do
+   pagamento à disponibilidade da Meta Graph API — se o Meta estiver
+   com problema, o webhook falha e o Asaas re-tenta, virando duplicata.
+2. **`setTimeout` in-memory** pros lembretes. Serverless mata isso
+   — a função termina assim que devolve resposta.
+3. **Fila persistente no DB + worker periódico.** Escrever uma linha
+   `pending` com `scheduled_for`, e rodar um worker a cada minuto
+   que varre pendentes vencidas. Escala, é observável, e separa
+   infraestrutura de pagamento de infraestrutura de mensageria.
+
+**Decisão:** 3 (fila persistente). Usa a tabela
+`public.appointment_notifications` (já criada na migration 004) como
+fila single-source-of-truth. Fluxo:
+
+```
+webhook Asaas (RECEIVED)
+  │
+  ├─► enqueueImmediate(appt, 'confirmacao')           ── insere pending, scheduled_for = now()
+  └─► scheduleRemindersForAppointment(appt)           ── insere 4 pendings com scheduled_for futuros
+                                                          (T-24h, T-1h, T-15min, T+10min)
+
+cron wa-reminders (*/1 min, Vercel Cron)
+  └─► processDuePending(limit=20)
+          ├─► SELECT status=pending AND scheduled_for <= now() LIMIT 20
+          ├─► dispatch(row) → helper tipado em wa-templates.ts
+          └─► UPDATE status = sent|failed|pending (conforme outcome)
+```
+
+**Peças novas:**
+
+- **Migration 011** (`20260420100000_...scheduler.sql`):
+  - `public.schedule_appointment_notifications(appointment_id)` —
+    insere 4 linhas, idempotente via índice unique parcial
+    `ux_an_appt_kind_alive (appointment_id, kind) WHERE status IN
+    (pending, sent, delivered, read)`. Pula kinds cujo horário já
+    passou (ex: agendamento pra daqui 30 min pula T-24h e T-1h).
+  - `public.enqueue_appointment_notification(appt, kind, template,
+    scheduled_for, payload)` — insere 1 linha. Idempotente (retorna
+    NULL se conflito).
+  - Índice `idx_an_due (scheduled_for) WHERE status='pending'`
+    acelera o worker.
+
+- **`src/lib/wa-templates.ts`**: 9 wrappers tipados (7 templates +
+  2 operacionais), 1 por template aprovado na Meta. Cada wrapper
+  respeita:
+  - Flag `WHATSAPP_TEMPLATES_APPROVED` (default `false`) → stub
+    `ok:false, message:templates_not_approved` enquanto templates
+    estão em review. Worker interpreta como "retry", mantém
+    `pending`.
+  - Flag `WHATSAPP_TEMPLATE_VERSION` → permite rotacionar pra v2
+    sem mexer em código se algum template for rejeitado.
+  - Formatação pt_BR consistente (`formatConsultaDateTime`,
+    `formatTime`, `firstName`).
+
+- **`src/lib/notifications.ts`**: enqueue helpers + worker
+  `processDuePending(limit)`. Worker:
+  - Hidrata cada notif com `appointments → customers (name, phone)`
+    e `doctors (display_name, full_name)` via select aninhado.
+  - Monta URL pública `/consulta/[id]` (HMAC feito dentro da API de
+    join, aqui é só o id mesmo; o link abre a página pública que
+    renderiza o banner com botão "Entrar").
+  - Despacha pro helper correto via `switch(kind)`.
+  - Retry seletivo: só mantém `pending` se o erro for
+    `templates_not_approved`. Qualquer outro erro marca `failed`
+    com mensagem — inspeção manual via admin (quando tiver UI).
+
+- **`/api/internal/cron/wa-reminders`**: handler HTTP mínimo.
+  Autenticação idêntica ao cron de expiração (D-030). Aceita
+  `?limit=100` pra backlog manual.
+
+- **`vercel.json`**: novo cron `* * * * *` apontando pra a rota;
+  `maxDuration=60s` (template com ~20 disparos + rede).
+
+**Integrações:**
+
+- Webhook Asaas (RECEIVED) — após ativar appointment + provisionar
+  sala Daily + criar earning, enfileira `confirmacao` + 4 lembretes.
+- Cron de expiração (D-030) — após liberar slot abandonado,
+  enfileira `reserva_expirada` (template reaproveita
+  `pagamento_pix_pendente` até criarmos um próprio).
+
+**Por que um template "faz duplo papel" (reserva_expirada →
+pagamento_pix_pendente)?** O doc só lista 7 templates pra Meta e
+a copy do PIX expirando se encaixa bem no caso de reserva abandonada
+("seu pagamento não caiu → finalize agora"). Quando tivermos tração
+podemos submeter um template dedicado. Registrado como débito
+técnico pra Sprint 5.
+
+**Flag `WHATSAPP_TEMPLATES_APPROVED` em produção:**
+
+- Hoje: NÃO setada → worker entra em loop inofensivo (processa a
+  cada minuto, retorna `retried` pra todas as linhas pending, não
+  gasta quota da Meta).
+- Quando a Meta aprovar os 7 templates (1-24h tipicamente): setar
+  `WHATSAPP_TEMPLATES_APPROVED=true` no Vercel (production +
+  preview + development) e fazer redeploy. Todas as linhas pendentes
+  vão ser tentadas imediatamente no próximo tick do cron.
+
+**Decorrências / futuros:**
+
+- Template dedicado `reserva_expirada` (nova copy, Sprint 5).
+- UI admin pra inspecionar `appointment_notifications`
+  (status=failed/pending + retry manual).
+- Métricas: taxa de entrega, lead time entre scheduled_for e sent_at,
+  taxa de no-show pós lembrete.
+- Redundância pg_cron (mesmo padrão de D-030) pode ser adicionada
+  quando tivermos volume > 500 notifs/dia pra proteger de
+  indisponibilidade do Vercel.
+
+---
+
 ## D-030 · Expiração de reservas `pending_payment` via sweep duplo (pg_cron + Vercel Cron) · 2026-04-20
 
 **Contexto:** a migration 008 (D-027) introduziu o estado

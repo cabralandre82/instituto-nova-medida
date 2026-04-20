@@ -13,11 +13,18 @@
     },
     "src/app/api/internal/cron/expire-reservations/route.ts": {
       "maxDuration": 30
+    },
+    "src/app/api/internal/cron/wa-reminders/route.ts": {
+      "maxDuration": 60
     }
   },
   "crons": [
     {
       "path": "/api/internal/cron/expire-reservations",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/internal/cron/wa-reminders",
       "schedule": "* * * * *"
     }
   ],

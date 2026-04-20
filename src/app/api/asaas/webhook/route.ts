@@ -4,6 +4,10 @@ import { isWebhookTokenValid, type AsaasWebhookEvent } from "@/lib/asaas";
 import { createConsultationEarning, createClawback } from "@/lib/earnings";
 import { activateAppointmentAfterPayment } from "@/lib/scheduling";
 import { provisionConsultationRoom } from "@/lib/video";
+import {
+  enqueueImmediate,
+  scheduleRemindersForAppointment,
+} from "@/lib/notifications";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -327,6 +331,25 @@ async function handleEarningsLifecycle(
       console.error("[asaas-webhook] earning falhou:", result.error);
     } else if (result.created) {
       console.log("[asaas-webhook] earning criado:", result.earningId);
+    }
+
+    // 4) Enfileira notificações WhatsApp (D-031).
+    //    - Confirmação imediata (disparo em ~1 min pelo cron wa-reminders).
+    //    - 4 lembretes temporais agendados pro futuro (T-24h, T-1h, T-15min, T+10min).
+    //    Todos idempotentes — webhook Asaas pode chegar em duplicata sem efeito colateral.
+    try {
+      const immediateId = await enqueueImmediate(appt.id as string, "confirmacao");
+      const reminders = await scheduleRemindersForAppointment(appt.id as string);
+      console.log(
+        "[asaas-webhook] notificações enfileiradas:",
+        JSON.stringify({
+          appointment_id: appt.id,
+          confirmacao_id: immediateId,
+          reminders: reminders.scheduled,
+        })
+      );
+    } catch (e) {
+      console.error("[asaas-webhook] enqueue notifications falhou:", e);
     }
     return;
   }

@@ -6,6 +6,112 @@
 
 ---
 
+## 2026-04-20 · WhatsApp · fila persistente + 7 helpers + worker (D-031) · IA
+
+**Por quê:** Sprint 4.1 precisa de 5 mensagens automáticas pra paciente
+(confirmação + 4 lembretes temporais) e 2 pra médica. Implementado com
+fila persistente em `appointment_notifications` + worker HTTP chamado
+pelo Vercel Cron.
+
+**Entregáveis:**
+
+- **Migration 011** (`20260420100000_appointment_notifications_scheduler.sql`):
+  - Índice unique parcial `ux_an_appt_kind_alive` — idempotência
+    (1 notif viva por appointment+kind).
+  - Índice `idx_an_due` — acelera o varredor.
+  - Função `schedule_appointment_notifications(appt)` — enfileira
+    os 4 lembretes temporais (T-24h/T-1h/T-15min/T+10min),
+    calcula `scheduled_for` a partir de `appointments.scheduled_at`,
+    pula kinds cujo horário já passou, retorna 1 linha por kind.
+  - Função `enqueue_appointment_notification(appt, kind, template,
+    scheduled_for, payload)` — insere 1 linha isolada.
+
+- **`src/lib/wa-templates.ts`** — 9 wrappers tipados (7 templates
+  externos + 2 operacionais equipe):
+  - `sendConfirmacaoAgendamento`, `sendLembrete24h`, `sendLembrete1h`,
+    `sendLinkSala`, `sendVezChegouOnDemand`, `sendPosConsultaResumo`,
+    `sendPagamentoPixPendente`.
+  - `sendMedicaRepassePago`, `sendMedicaDocumentoPendente`.
+  - Formatadores pt_BR consistentes (`formatConsultaDateTime`,
+    `formatRelativeTomorrow`, `formatTime`, `firstName`).
+  - Flag `WHATSAPP_TEMPLATES_APPROVED` (default false) → dry-run
+    enquanto Meta não aprova templates; worker trata como "retry".
+  - Flag `WHATSAPP_TEMPLATE_VERSION` pronta pra rotação pós-rejeição.
+  - Mapa `KIND_TO_TEMPLATE` pro worker.
+
+- **`src/lib/notifications.ts`** — enqueue + worker:
+  - `scheduleRemindersForAppointment(appt)` → wrapper RPC.
+  - `enqueueImmediate(appt, kind, opts)` → wrapper RPC.
+  - `processDuePending(limit=20)`:
+    * SELECT pending + scheduled_for <= now(), hidratado com
+      customer.phone e doctor.display_name.
+    * Despacha via switch(kind) pros helpers.
+    * Update `sent`/`failed`/mantém `pending` (retry seletivo).
+  - URL pública da consulta montada via `NEXT_PUBLIC_BASE_URL` +
+    `/consulta/[id]`.
+
+- **`/api/internal/cron/wa-reminders`** (GET + POST):
+  - Auth via `Bearer CRON_SECRET` ou `x-cron-secret` (mesmo padrão
+    do expire-reservations). Dev sem CRON_SECRET aceita qualquer
+    caller.
+  - Query param `?limit=N` (cap 200) pra drenar backlog manual.
+  - Chama `processDuePending(limit)` e retorna report
+    `{ processed, sent, failed, retried, details: [...], ran_at }`.
+
+- **`vercel.json`**:
+  - Novo cron `* * * * *` apontando pro wa-reminders.
+  - `functions.maxDuration=60s` pra caber 20 disparos + rede.
+
+**Integrações:**
+
+- Webhook Asaas (PAYMENT_RECEIVED): após ativar appointment + criar
+  sala Daily + gerar earning, chama `enqueueImmediate('confirmacao')`
+  + `scheduleRemindersForAppointment`. Idempotente — webhook duplo
+  não duplica notifs.
+- Cron expire-reservations (D-030): após liberar cada slot
+  abandonado, chama `enqueueImmediate('reserva_expirada')`. Template
+  temporariamente reusa `pagamento_pix_pendente` — dedicado
+  planejado pra Sprint 5.
+
+**Fluxo completo ponta-a-ponta:**
+
+```
+paciente paga no checkout
+  → Asaas envia PAYMENT_RECEIVED
+    → webhook ativa appt + cria earning + enfileira 5 notifs (1 imediata + 4 agendadas)
+  → cron wa-reminders (a cada 1 min) processa as vencidas
+    → se templates aprovados (WHATSAPP_TEMPLATES_APPROVED=true): dispara via Meta
+    → se não: marca retried, tenta de novo no próximo minuto
+  → paciente recebe confirmação em ~1 min
+    → depois recebe lembretes em T-24h, T-1h, T-15min (com link da sala)
+    → T+10min: pós-consulta com link da receita (quando conectar Memed)
+```
+
+**Validação:**
+
+- Build local: ✅ rotas `/api/internal/cron/expire-reservations` e
+  `/api/internal/cron/wa-reminders` aparecem no output.
+- Migration aplicada via `supabase db push`: ✅.
+- RPC `schedule_appointment_notifications` direto via REST do
+  Supabase: ✅.
+
+**Gotcha corrigido durante a impl:** JSDoc com `*/1 min` quebra o SWC
+(trata como fim de comentário). Substituído por "a cada 1 min".
+
+**Docs atualizados:**
+
+- `docs/DECISIONS.md` → D-031 com contexto, arquitetura da fila,
+  flag strategy, roadmap (template dedicado, UI admin, métricas,
+  redundância pg_cron).
+- `docs/SPRINTS.md` → checkbox "Lib `src/lib/whatsapp.ts` extendida"
+  marcado + nota da flag de ativação.
+- `docs/SECRETS.md` → `WHATSAPP_TEMPLATES_APPROVED` e
+  `WHATSAPP_TEMPLATE_VERSION` no template.
+- `README.md` → árvore de arquivos com `wa-templates.ts`,
+  `notifications.ts`, cron wa-reminders.
+
+---
+
 ## 2026-04-20 · Cron de expiração de `pending_payment` · IA
 
 **Por quê:** último loose end do fluxo de reserva atomic (D-027). Sem

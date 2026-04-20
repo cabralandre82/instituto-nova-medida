@@ -60,6 +60,15 @@ WHATSAPP_PHONE_NUMBER_ID=
 WHATSAPP_ACCESS_TOKEN=
 WHATSAPP_WEBHOOK_VERIFY_TOKEN=      # nós escolhemos, configurar no painel da Meta
 WHATSAPP_PHONE_DISPLAY=             # só exibição (rodapé/landing), não usado em APIs
+# Gate pros 7 templates do Instituto (D-031). Default "false" →
+# wa-templates.ts retorna stub "templates_not_approved", worker
+# mantém notifs em pending pra re-tentar quando aprovar. Setar
+# "true" no Vercel DEPOIS que a Meta aprovar todos os templates.
+WHATSAPP_TEMPLATES_APPROVED=false
+# Rotação de versão quando um template for rejeitado e submetermos
+# v2. Default sem valor → usa nome base. Setar "2" troca todo o
+# fluxo pra v2.
+# WHATSAPP_TEMPLATE_VERSION=2
 
 # === Analytics ===
 NEXT_PUBLIC_META_PIXEL_ID=
@@ -127,7 +136,8 @@ Snapshot em **2026-04-20** após setup ops via CLI + REST API:
 | `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_BASE_URL` | 2026-04-20 | `BASE_URL` faltava |
 | `DAILY_API_KEY`, `DAILY_DOMAIN`, `DAILY_WEBHOOK_SECRET` | 2026-04-20 | Faltavam todas |
 | `PATIENT_TOKEN_SECRET` | 2026-04-20 | Faltava |
-| `CRON_SECRET` | 2026-04-20 | Vercel Cron (D-030) |
+| `CRON_SECRET` | 2026-04-20 | Vercel Cron (D-030 + D-031) |
+| `WHATSAPP_TEMPLATES_APPROVED` | 2026-04-20 | Gate dos templates (D-031); false até Meta aprovar |
 
 **Faltam ainda** (para sprints futuras): `MEMED_API_KEY`, `MEMED_API_SECRET`,
 `MEMED_ENV`, `RESEND_API_KEY`, `EMAIL_FROM`, `NEXT_PUBLIC_META_PIXEL_ID`,

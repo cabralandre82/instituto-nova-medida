@@ -90,9 +90,19 @@ vinculado à compra via `localStorage`.
   protegida por `CRON_SECRET` agendada no `vercel.json` também
   `*/1 min` (redundância defense-in-depth). Reservas abandonadas
   caem pra `cancelled_by_admin` com `cancelled_reason='pending_payment_expired'`.
+  ✅ **WhatsApp: fila persistente + 7 helpers + worker** (D-031):
+  migration 011 com `schedule_appointment_notifications()` +
+  `enqueue_appointment_notification()` sobre
+  `appointment_notifications`; 9 wrappers tipados em
+  `src/lib/wa-templates.ts`; worker `/api/internal/cron/wa-reminders`
+  processa a fila cada 1 min; webhook Asaas enfileira
+  confirmação + 4 lembretes (T-24h/T-1h/T-15min/T+10min) no
+  `RECEIVED`; cron de expiração enfileira "reserva expirada".
+  Gate `WHATSAPP_TEMPLATES_APPROVED=false` mantém fila em retry
+  até Meta aprovar templates.
 
-**Restante da Sprint 4.1 (3/3):** helpers WhatsApp pros 7 templates,
-política de estorno automático em no-show.
+**Restante da Sprint 4.1 (3/3):** submeter os 7 templates na Meta
+(1-24h), política de estorno automático em no-show.
 
 Veja [`docs/SPRINTS.md`](./docs/SPRINTS.md) para o roadmap completo.
 
@@ -179,7 +189,8 @@ instituto-nova-medida/
 │   │       ├── agendar/reserve/route.ts      # cria customer + reserva slot + cobra
 │   │       ├── daily/webhook/route.ts        # meeting.* → status do appointment (App Router)
 │   │       ├── internal/cron/
-│   │       │   └── expire-reservations/route.ts  # Vercel Cron (*/1 min) + pg_cron
+│   │       │   ├── expire-reservations/route.ts  # Vercel Cron (*/1 min) + pg_cron
+│   │       │   └── wa-reminders/route.ts         # Vercel Cron (*/1 min) → processDuePending
 │   │       ├── admin/                        # APIs do painel admin
 │   │       │   ├── doctors/[id]/(compensation|payment-method|availability)
 │   │       │   └── payouts/[id]/(approve|pay|confirm|cancel|proof)
@@ -200,10 +211,12 @@ instituto-nova-medida/
 │       ├── payout-proofs.ts          # bucket privado de comprovantes PIX
 │       ├── scheduling.ts             # slots disponíveis + reserva atomic
 │       ├── patient-tokens.ts         # HMAC do link /consulta/[id]
+│       ├── notifications.ts          # fila + worker wa-reminders
 │       ├── supabase.ts               # admin (service role) + anon
 │       ├── supabase-server.ts        # @supabase/ssr (server components)
 │       ├── video.ts                  # VideoProvider + DailyProvider
-│       ├── whatsapp.ts
+│       ├── wa-templates.ts           # 9 wrappers tipados (7 Meta + 2 internos)
+│       ├── whatsapp.ts               # sendTemplate + sendText (Graph API)
 │       └── utils.ts
 ├── supabase/migrations/              # SQL versionado
 │   ├── 20260419000000_initial_leads.sql

@@ -180,9 +180,18 @@ Cloudflare com `institutonovamedida.com.br`.
         `max_participants: 2`, `eject_at_room_exp: true`,
         `enable_recording: 'local'` (off por default, ligada por
         appointment quando `recording_consent=true`)
-- [ ] **Lib `src/lib/whatsapp.ts` extendida:**
-  - [ ] Helpers para os 5 templates de agendamento
-  - [ ] Helpers para os 2 templates financeiros
+- [x] **Lib `src/lib/whatsapp.ts` extendida + fila persistente (D-031):**
+  - [x] Helpers tipados para os 5 templates de agendamento (`wa-templates.ts`)
+  - [x] Helpers para os 2 templates financeiros (`medica_repasse_pago`,
+        `medica_documento_pendente`)
+  - [x] Worker HTTP `/api/internal/cron/wa-reminders` (Vercel Cron
+        `*/1 min`) drena `appointment_notifications`
+  - [x] Integrado ao webhook Asaas (confirmação + 4 lembretes
+        agendados no `RECEIVED`) e ao cron de expiração (reserva
+        expirada)
+  - [ ] Submeter os 7 templates na Meta WhatsApp Manager
+        (aprovação 1-24h). Ativar setando
+        `WHATSAPP_TEMPLATES_APPROVED=true` no Vercel.
 - [ ] **Auth:** roles `doctor` e `admin` no Supabase, middleware
       protegendo `/medico/*` e `/admin/*`
 - [ ] **API routes:**
