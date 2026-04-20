@@ -6,6 +6,71 @@
 
 ---
 
+## 2026-04-20 · Configuração Vercel + Daily.co (ops) · IA
+
+**Por quê:** o operador delegou o setup das envs e do registro de
+webhooks que eu conseguisse fazer sozinho com as credenciais que ele
+já tinha me passado.
+
+**Vercel — 7 envs adicionadas em production + preview + development (21 inserções):**
+
+- `DAILY_API_KEY` — chave do workspace `instituto-nova-medida` (validada
+  via `GET https://api.daily.co/v1/`, retorna `domain_id` correto).
+- `DAILY_DOMAIN=instituto-nova-medida`.
+- `DAILY_WEBHOOK_SECRET` — **32 bytes random em base64**. O
+  `POST /v1/webhooks` do Daily exige secret em base64 válido; o valor
+  anterior (`whsec_daily_inm_2026_...`) foi rejeitado pela API. Novo
+  secret gerado via `base64(os.urandom(32))`.
+- `PATIENT_TOKEN_SECRET` — HMAC secret pra tokens de consulta pública.
+- `NEXT_PUBLIC_BASE_URL=https://instituto-nova-medida.vercel.app`.
+- `META_CLIENT_TOKEN` — token do Meta pra Pixel (faltava no Vercel).
+- `WHATSAPP_PHONE_DISPLAY` — número público pro rodapé/links.
+
+Notas operacionais:
+
+- `vercel env add ... production preview development` da CLI só
+  insere em `production` e `development` — preview precisou ser
+  adicionado via REST API (`POST /v10/projects/{id}/env`).
+- CLI interativa rejeita empty stdin; REST API com `upsert=true`
+  funciona bem.
+
+**Daily.co — registro do webhook: BLOQUEADO (D-029).**
+
+- API key e domínio OK.
+- Endpoint `/api/daily/webhook` e `/api/daily-webhook` respondem 200
+  pra qualquer cliente (testado via curl, HTTP/1.1 e HTTP/2).
+- `POST https://api.daily.co/v1/webhooks` retorna consistentemente
+  `"non-200 status code returned from webhook endpoint, recvd
+  undefined"` — reproduzido inclusive com URLs sem conteúdo dinâmico
+  (raiz do site, Pages Router, deploy URL direto).
+- Confirmado que é **bug do superagent 3.8.3 do Daily com HTTP/2 do
+  Vercel**, não problema de envs/código.
+- Decisão detalhada + caminhos de contorno em `docs/DECISIONS.md` D-029.
+
+**Novo handler Pages Router `/api/daily-webhook`:**
+
+- `src/pages/api/daily-webhook.ts` — mesmo handler do App Router,
+  porém servido sem os headers `Vary: RSC, Next-Router-State-Tree,
+  Next-Router-Prefetch` que o App Router adiciona. Tentativa de
+  contornar o bug — não resolveu (bug é em nível HTTP, não header).
+- Ficou como segunda porta de entrada pra testes manuais e pra
+  quando a gente migrar atrás de Cloudflare. Zero custo adicional.
+- Adiciona CORS permissivo + suporte a `OPTIONS` preflight.
+
+**Correções colaterais no build:**
+
+- `AdminNav.tsx` e `DoctorNav.tsx`: `usePathname()` pode retornar
+  `null` (pre-hydration) — default pra string vazia antes de
+  comparar com `href`.
+
+**Asaas webhook — OK (checado):** 1 webhook ativo, 29 eventos
+assinados, apontando pra `/api/asaas/webhook`.
+
+**Migrations Supabase — todas aplicadas (checado):** `daily_events`,
+`doctor_payouts.pix_proof_url`, bucket `payouts-proofs` — tudo OK.
+
+---
+
 ## 2026-04-19 · Sprint 4.1 (3/3 cont.) — Webhook do Daily fecha o ciclo · IA
 
 **Por quê:** sem telemetria de meeting, o painel financeiro não sabe

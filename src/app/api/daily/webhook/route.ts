@@ -90,11 +90,32 @@ export async function POST(req: Request) {
     );
   }
 
+  // Verification ping sem assinatura (Daily envia SEM headers em algumas
+  // situações legadas) — respondemos 200 imediatamente, sem persistir.
+  if (validation.testPing) {
+    return NextResponse.json({ ok: true, pong: true });
+  }
+
   let body: unknown;
   try {
     body = JSON.parse(validation.rawBody);
   } catch {
     return NextResponse.json({ ok: false, error: "json_invalid" }, { status: 400 });
+  }
+
+  // Verification ping COM assinatura (POST /webhooks do Daily envia
+  // `{"test":"test"}` assinado pra validar nosso endpoint). Respondemos 200
+  // e não persistimos — ele não é um evento real de meeting.
+  const bodyType = (body as { type?: unknown })?.type;
+  const bodyTest = (body as { test?: unknown })?.test;
+  const isRealEvent = typeof bodyType === "string" && (
+    bodyType.startsWith("meeting.") ||
+    bodyType.startsWith("participant.") ||
+    bodyType.startsWith("recording.")
+  );
+  if (!isRealEvent || bodyTest === "test") {
+    console.log("[daily-webhook] verification ping recebido", { bodyType, bodyTest });
+    return NextResponse.json({ ok: true, pong: true });
   }
 
   const event = parseDailyEvent(body);

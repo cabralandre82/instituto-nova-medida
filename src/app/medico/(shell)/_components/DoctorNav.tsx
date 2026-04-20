@@ -13,7 +13,7 @@ const NAV = [
 ];
 
 export function DoctorNav() {
-  const pathname = usePathname();
+  const pathname = usePathname() ?? "";
 
   return (
     <nav className="flex lg:flex-col gap-1 overflow-x-auto -mx-5 px-5 sm:mx-0 sm:px-0">

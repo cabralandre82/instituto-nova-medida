@@ -97,7 +97,7 @@ export type DeleteRoomResult = {
 };
 
 export type WebhookValidation =
-  | { ok: true; rawBody: string }
+  | { ok: true; rawBody: string; testPing?: boolean }
   | { ok: false; reason: string };
 
 // ────────────────────────────────────────────────────────────────────────
@@ -354,15 +354,19 @@ class DailyProvider implements VideoProvider {
 
     // Caminho 1: HMAC oficial (timestamp + body)
     if (sigHeader && tsHeader && cfg.webhookSecret) {
-      const ts = Number(tsHeader);
-      if (!Number.isFinite(ts)) return { ok: false, reason: "timestamp inválido" };
+      const tsRaw = Number(tsHeader);
+      if (!Number.isFinite(tsRaw)) return { ok: false, reason: "timestamp inválido" };
+      // Daily manda timestamp em milissegundos (13 dígitos). Alguns providers
+      // futuros podem mandar em segundos (10 dígitos). Normalizamos pra segundos.
+      const tsSec = tsRaw > 1e11 ? Math.floor(tsRaw / 1000) : tsRaw;
       // Anti-replay: aceita janela de 5 min
-      if (Math.abs(Math.floor(Date.now() / 1000) - ts) > 5 * 60) {
+      if (Math.abs(Math.floor(Date.now() / 1000) - tsSec) > 5 * 60) {
         return { ok: false, reason: "timestamp fora da janela (replay?)" };
       }
       try {
-        // ESM-friendly require — runtime já é nodejs
         const cryptoMod = await import("node:crypto");
+        // Daily calcula HMAC sobre `${timestamp_raw}.${body}` — sem alterar
+        // a string do header (mesmo que seja em ms). Usamos o header como está.
         const h = cryptoMod.createHmac("sha256", cfg.webhookSecret);
         h.update(`${tsHeader}.${rawBody}`);
         const expected = h.digest("base64");
@@ -387,6 +391,25 @@ class DailyProvider implements VideoProvider {
     if (!cfg.webhookSecret) {
       console.warn("[daily] webhook sem DAILY_WEBHOOK_SECRET — aceitando em modo dev");
       return { ok: true, rawBody };
+    }
+
+    // Caminho 4: verification ping do Daily.
+    // Ao criar um webhook (POST /webhooks), o Daily envia um request de teste
+    // SEM headers de assinatura e espera 200 em poucos segundos. Se o body não
+    // tem o formato de um evento real (nenhum `type` de webhook reconhecido),
+    // aceitamos como ping — retornamos 200 mas marcamos `testPing` pra que o
+    // handler NÃO persista nada em `daily_events`.
+    try {
+      const parsed = JSON.parse(rawBody) as { type?: unknown };
+      const t = typeof parsed?.type === "string" ? parsed.type : "";
+      const isRealEvent = t.startsWith("meeting.") || t.startsWith("participant.") || t.startsWith("recording.");
+      if (!isRealEvent) {
+        console.warn("[daily] webhook sem assinatura — tratando como verification ping");
+        return { ok: true, rawBody, testPing: true };
+      }
+    } catch {
+      console.warn("[daily] webhook sem assinatura e body inválido — tratando como verification ping");
+      return { ok: true, rawBody, testPing: true };
     }
 
     return { ok: false, reason: "headers de autenticação ausentes" };

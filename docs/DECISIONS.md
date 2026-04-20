@@ -5,6 +5,93 @@
 
 ---
 
+## D-029 · Webhook do Daily via Pages Router + incompatibilidade HTTP/2 · 2026-04-20
+
+**Contexto:** ao tentar registrar o webhook `/api/daily/webhook` via
+`POST https://api.daily.co/v1/webhooks` usando a API key real do
+Instituto, o Daily retorna:
+
+```
+{"error":"invalid-request-error",
+ "info":"non-200 status code returned from webhook endpoint, recvd undefined"}
+```
+
+Diagnóstico completo:
+
+1. **O endpoint responde 200** pra qualquer cliente HTTP/1.1 ou HTTP/2
+   (curl, httpie, webhook.site como intermediário). Confirmado com
+   múltiplos deploys.
+2. **Outros provedores funcionam** contra o mesmo endpoint — o
+   webhook da Asaas (cadastrado na mesma URL pattern
+   `/api/asaas/webhook`) entrega eventos sem issue.
+3. **httpbin.org funciona no Daily** como URL de webhook — prova que
+   Daily consegue bater em endpoints externos.
+4. **Pesquisa:** o superagent usado pelo Daily na verificação
+   (`node-superagent/3.8.3`, de 2017) tem
+   [bug conhecido com HTTP/2 via ALPN](https://github.com/forwardemail/superagent/issues/1754).
+   Vercel serve todos os endpoints em HTTP/2 por default e não expõe
+   flag pra desabilitar. O "recvd undefined" é exatamente o sintoma
+   desse bug — superagent não consegue parsear o status code do
+   response HTTP/2.
+
+**Decisão:** ao invés de bloquear o projeto esperando Daily atualizar
+o superagent, **mantemos TODO o código do webhook pronto e deployed**
+e planejamos dois caminhos futuros (não-bloqueantes pra MVP):
+
+1. **Re-tentar quando subir o domínio `institutonovamedida.com.br`**
+   (Cloudflare-fronted). Cloudflare pode servir HTTP/1.1 pro origin
+   Daily e proxyar pra Vercel.
+2. **Polling como fallback**: uma Vercel Cron roda a cada 5min,
+   busca meetings ativos via `GET /v1/meetings?active=true` do Daily
+   e atualiza `appointments` correspondentes (started_at, ended_at,
+   no-show heurística).
+
+**Onde o código ficou:**
+
+- `src/app/api/daily/webhook/route.ts` — App Router handler
+  (HTTP/2, headers RSC). Funciona pra clientes modernos.
+- `src/pages/api/daily-webhook.ts` — Pages Router handler (mesmo
+  handler, sem Vary RSC). Tentativa de contornar o bug — falhou
+  também, confirmando que o problema é HTTP/2, não os headers.
+
+**Rationale:**
+
+- "Remover o código" seria desperdiçar o trabalho; quando o bug
+  do Daily for resolvido OU quando subirmos via Cloudflare, o
+  webhook volta a funcionar sem nenhuma mudança.
+- Pages Router handler fica como segunda porta de entrada para
+  clientes que tenham issues específicos com App Router (debug e
+  testes manuais continuam possíveis).
+
+**Envs já configuradas no Vercel (production + preview + development):**
+
+- `DAILY_API_KEY`, `DAILY_DOMAIN=instituto-nova-medida`,
+  `DAILY_WEBHOOK_SECRET` (base64, 32 bytes random).
+- O secret tem que ser base64 válido: a API do Daily rejeita hmac
+  em formato livre (`whsec_...`), só aceita strings base64-encoded.
+
+**Pendências (action items do operador quando o webhook voltar a
+registrar):**
+
+1. Cadastrar o webhook manualmente no dashboard do Daily (pode
+   contornar a verification em alguns casos) OU
+2. Aguardar suporte do Daily corrigir o superagent OU
+3. Implementar polling via cron (não depende do webhook).
+
+**Consequências imediatas:**
+
+- Status da consulta (`in_progress`, `completed`, `no_show_*`)
+  NÃO atualiza automaticamente no MVP.
+- `started_at`, `ended_at`, `duration_seconds` ficam `NULL`
+  até resolvermos.
+- O fluxo do paciente (agendar → pagar → entrar na sala) continua
+  100% funcional. Só a telemetria depois-do-fato que está parada.
+
+**Arquivos de referência:** este doc, `src/lib/video.ts`,
+`src/app/api/daily/webhook/route.ts`, `src/pages/api/daily-webhook.ts`.
+
+---
+
 ## D-028 · Webhook do Daily fecha o ciclo da consulta + detecta no-show · 2026-04-19
 
 **Contexto:** com o paciente entrando na sala (D-027), faltava

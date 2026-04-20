@@ -11,5 +11,21 @@
     "src/app/api/debug/wa-env/route.ts": {
       "maxDuration": 10
     }
-  }
+  },
+  "headers": [
+    {
+      "source": "/api/daily/webhook",
+      "headers": [
+        { "key": "Vary", "value": "Accept-Encoding" },
+        { "key": "Cache-Control", "value": "no-store" }
+      ]
+    },
+    {
+      "source": "/api/asaas/webhook",
+      "headers": [
+        { "key": "Vary", "value": "Accept-Encoding" },
+        { "key": "Cache-Control", "value": "no-store" }
+      ]
+    }
+  ]
 }
