@@ -5,6 +5,82 @@
 
 ---
 
+## D-044 · Webhook Asaas promove fulfillment (onda 2.D) · 2026-04-20
+
+**Contexto:** o webhook Asaas já processa `PAYMENT_RECEIVED` pra
+criar earnings de consulta e provisionar sala Daily. Faltava
+fechar o fluxo de fulfillment: quando o paciente paga o plano
+prescrito, o fulfillment tem que avançar automaticamente pra
+`paid` e o paciente tem que receber confirmação sem intervenção
+humana.
+
+**Decisões-chave desta onda:**
+
+- **Handlers paralelos, não aninhados.** `handleEarningsLifecycle`
+  e `handleFulfillmentLifecycle` rodam um depois do outro, ambos
+  em try/catch independentes. Motivo: um payment pode pertencer a
+  uma consulta (earning) OU a um plano prescrito (fulfillment) —
+  nunca os dois ao mesmo tempo hoje, mas tratar como canais
+  independentes evita regressão futura se isso mudar.
+
+- **Promoção idempotente com guard de status no UPDATE.** Além
+  do SELECT prévio, o UPDATE final usa
+  `.eq('id', ff.id).eq('status', 'pending_payment')`. Se dois
+  webhooks chegarem em paralelo (retry do Asaas), só um casa
+  linha; o segundo vê 0 linhas afetadas e devolve
+  `alreadyPaid=true` sem erro. Zero risco de duplicar ações
+  downstream (ex: mandar WA duas vezes) porque o segundo retorna
+  cedo com `wasPromoted=false`.
+
+- **Fallback de resolução quando `payment_id` não está vinculado.**
+  Há uma janela de race: `ensurePaymentForFulfillment` cria o
+  payment no Asaas, o Asaas responde super rápido, o webhook
+  chega antes do UPDATE `fulfillments.payment_id=...` terminar.
+  Nesse caso, o fallback busca um único `fulfillment
+  pending_payment` sem `payment_id` do mesmo customer e amarra
+  retroativamente. Se há >1 candidato (improvável mas possível
+  com múltiplos planos comprados simultaneamente), abortamos
+  com `ambiguous_fulfillment` — melhor bloquear e investigar
+  do que promover o errado.
+
+- **WhatsApp best-effort, dentro da janela de 24h.** A Meta
+  exige template aprovado só pra primeiro contato / fora de
+  janela. No fluxo real, o paciente acabou de:
+  (i) abrir `/paciente/oferta`, (ii) enviar POST de aceite,
+  (iii) ser redirecionado pra invoice Asaas, (iv) pagar. A janela
+  de 24h está MUITO aberta. Por isso usamos `sendText` (mais
+  flexível que template). Se cair, só loga — não regride o
+  fulfillment. Template dedicado (`pagamento_confirmado_plano`)
+  fica pra Sprint 5+, junto com os outros pendentes na Meta.
+
+- **Mensagem composta em função pura separada.** `composePaidWhatsAppMessage`
+  é testável sem mocks de WhatsApp e fácil de trocar por
+  template parametrizado depois. A linguagem é intencionalmente
+  clara: confirma o pagamento, explica que a clínica vai
+  manipular e enviar, promete aviso de rastreio na próxima etapa.
+
+- **Logs silenciosos pra casos esperados.** `payment_not_found`
+  e `fulfillment_not_found` viram `console.log` (não `error`)
+  porque são o estado normal quando o webhook processa um
+  payment de consulta (fluxo antigo) em vez de plano prescrito.
+  Ruído desnecessário no Vercel Logs atrapalha monitoramento
+  real.
+
+**Trade-offs conhecidos:**
+
+- O WhatsApp não é retryado se o `sendText` falhar. Aceito pro
+  MVP — a 2.F dará ao paciente visibilidade do status
+  diretamente em `/paciente` (card "meu tratamento") então ele
+  não fica no escuro mesmo se o WA perder.
+
+- O fallback ambiguous retorna erro mas não cria alerta
+  operacional. Por enquanto o log já basta (volume baixo); se
+  virar comum, vira issue pra criar fila de exceções.
+
+**Referência:** `docs/CHANGELOG.md` 2026-04-20 (onda 2.D).
+
+---
+
 ## D-044 · UI do aceite + integração Asaas (onda 2.C.2) · 2026-04-20
 
 **Contexto:** 2.C.1 deixou o backend do aceite pronto. Faltava

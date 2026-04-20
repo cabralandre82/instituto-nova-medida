@@ -542,9 +542,16 @@ automatizado (estorno já foi em D-034; NF-e upload flow fica aqui).
       + card de oferta pendente em `/paciente` (sage = accept
       pendente; cream = pagamento pendente). 9 testes novos (250
       totais). `next build` verde.
-- [ ] **D-044 onda 2.D · Webhook Asaas promove `paid`.** Extensão
-      do handler existente pra mover fulfillment
-      `pending_payment` → `paid`; WhatsApp "pagamento ok".
+- [x] **D-044 onda 2.D · Webhook Asaas promove `paid`.**
+      (2026-04-20) Nova lib `src/lib/fulfillment-promote.ts` com
+      `promoteFulfillmentAfterPayment` idempotente. Resolve
+      payment local via asaas_payment_id, localiza fulfillment
+      por payment_id (com fallback seguro a único pending_payment
+      do mesmo customer). UPDATE com guard de status protege
+      contra race. Handler `handleFulfillmentLifecycle` adicionado
+      ao webhook Asaas em paralelo a earnings — promove `paid` e
+      dispara `sendText` WhatsApp best-effort. 15 testes novos
+      (265 totais). `next build` verde.
 - [ ] **D-044 onda 2.E · Painel admin de fulfillment.** Lista de
       pendentes com botões das transições (pharmacy_requested →
       shipped → delivered) + notificações WhatsApp em cada etapa.

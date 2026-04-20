@@ -6,6 +6,76 @@
 
 ---
 
+## 2026-04-20 · Webhook Asaas promove fulfillment + WhatsApp (D-044 · onda 2.D) · IA
+
+**Por quê:** onda 2.C.2 criou a cobrança Asaas. Faltava fechar o
+loop: quando o paciente paga a invoice, o fulfillment tem que
+avançar sozinho pra `paid`, e o paciente tem que receber
+confirmação no WhatsApp — sem depender de ninguém apertar botão.
+Esta entrega extende o webhook Asaas existente pra rodar esse
+fluxo em paralelo com o de consultas (earnings).
+
+**Entregáveis:**
+
+- **`src/lib/fulfillment-promote.ts`:** `promoteFulfillmentAfterPayment`
+  idempotente. Resolve `paymentId` local a partir de `asaasPaymentId`
+  quando necessário. Localiza fulfillment por `payment_id` direto,
+  com fallback seguro: se não está vinculado (race entre webhook
+  rápido e `ensurePaymentForFulfillment`), busca único fulfillment
+  `pending_payment` sem `payment_id` do mesmo customer e amarra
+  retroativamente. Aborta se houver ambiguidade (>1 candidato).
+  Atua apenas em `pending_payment`; `paid+` e duplicatas viram
+  `alreadyPaid`; `pending_acceptance` / `cancelled` viram
+  `invalid_state`. UPDATE com guard de status (`.eq('status',
+  'pending_payment')`) protege contra race de concorrência: se
+  outro worker promoveu entre select e update, tratamos como
+  idempotência bem-sucedida.
+- **`composePaidWhatsAppMessage`:** helper puro que monta a mensagem
+  personalizada com primeiro nome do paciente e nome do plano.
+  Fácil de testar e de evoluir pra template aprovado futuramente.
+- **`src/lib/fulfillment-promote.test.ts`:** 15 testes — happy path
+  (com/sem resolução via asaas_payment_id), idempotência (paid,
+  pharmacy_requested, shipped, delivered, race no UPDATE),
+  estados inválidos (pending_acceptance, cancelled), fallback
+  (único, ambíguo, ausente), erros de entrada (payment não
+  existe, ausência de ids, db_error), composição de WhatsApp.
+- **`src/app/api/asaas/webhook/route.ts` extendido:** nova função
+  `handleFulfillmentLifecycle` chamada em paralelo a
+  `handleEarningsLifecycle`. Detecta `PAYMENT_RECEIVED` /
+  `PAYMENT_CONFIRMED` / `PAYMENT_RECEIVED_IN_CASH`, chama
+  `promoteFulfillmentAfterPayment`, e se promoveu envia `sendText`
+  (janela de 24h aberta pelo aceite/invoice). Erros best-effort
+  (log, sem bloquear webhook). Casos `payment_not_found` /
+  `fulfillment_not_found` viram log nível `log` (não `error`),
+  porque são esperados em pagamentos de consulta (fluxo antigo).
+
+**Status:**
+
+- `npx tsc --noEmit` ✅
+- `npx next lint --dir src` ✅
+- `npx vitest run` ✅ — 265 testes (17 arquivos). +15 em
+  `fulfillment-promote.test.ts`.
+- `npx next build` ✅.
+
+**Fluxo ponta-a-ponta agora fechado do paciente:**
+
+1. médica finaliza consulta + prescreve (2.B) →
+2. fulfillment `pending_acceptance` vira card no `/paciente` (2.C.2) →
+3. paciente aceita em `/paciente/oferta/[id]`, Asaas cria cobrança (2.C.2) →
+4. paciente paga na invoice →
+5. **webhook Asaas promove fulfillment pra `paid` e manda WA (2.D)** →
+6. admin vê lista de pagos pra enviar à farmácia (2.E, próxima) →
+7. admin marca `shipped` com código de rastreio →
+8. paciente confirma recebimento no painel (2.F).
+
+**Próximo:**
+
+- Onda 2.E: painel admin de fulfillment com transições
+  (pharmacy_requested → shipped → delivered) e WhatsApp em cada
+  etapa.
+
+---
+
 ## 2026-04-20 · Aceite do paciente · endpoint + UI + Asaas (D-044 · onda 2.C.2) · IA
 
 **Por quê:** a 2.C.1 deixou o backend do aceite pronto (hash, termo,

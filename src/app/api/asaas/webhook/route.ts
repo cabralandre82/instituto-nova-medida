@@ -9,6 +9,11 @@ import {
   scheduleRemindersForAppointment,
 } from "@/lib/notifications";
 import { markRefundProcessed } from "@/lib/refunds";
+import {
+  composePaidWhatsAppMessage,
+  promoteFulfillmentAfterPayment,
+} from "@/lib/fulfillment-promote";
+import { sendText } from "@/lib/whatsapp";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -165,6 +170,18 @@ export async function POST(req: Request) {
         const internalPaymentId = updatedPayment?.id as string | undefined;
         if (internalPaymentId) {
           await handleEarningsLifecycle(
+            supabase,
+            body.event,
+            payment.status,
+            internalPaymentId,
+            asaasPaymentId
+          );
+
+          // === Promoção de fulfillment (D-044 · 2.D) ===
+          // Independente do earnings lifecycle (que é por appointment).
+          // Se este payment está vinculado a um fulfillment, promovemos
+          // pending_payment → paid e notificamos o paciente.
+          await handleFulfillmentLifecycle(
             supabase,
             body.event,
             payment.status,
@@ -423,6 +440,97 @@ async function handleEarningsLifecycle(
           already: markResult.alreadyProcessed,
         });
       }
+    }
+  }
+}
+
+/**
+ * Roteador de eventos Asaas → promoção de fulfillment (D-044 · 2.D).
+ *
+ * Quando o pagamento de um fulfillment é confirmado:
+ *   1. promove o fulfillment pra `paid` (idempotente);
+ *   2. dispara WhatsApp "pagamento confirmado" best-effort.
+ *
+ * Não bloqueia o webhook — erros só viram log.
+ */
+async function handleFulfillmentLifecycle(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  event: string,
+  paymentStatus: string,
+  internalPaymentId: string,
+  asaasPaymentId: string | null
+): Promise<void> {
+  const isReceived =
+    event === "PAYMENT_RECEIVED" ||
+    event === "PAYMENT_CONFIRMED" ||
+    event === "PAYMENT_RECEIVED_IN_CASH" ||
+    paymentStatus === "RECEIVED" ||
+    paymentStatus === "CONFIRMED" ||
+    paymentStatus === "RECEIVED_IN_CASH";
+
+  if (!isReceived) return;
+
+  const result = await promoteFulfillmentAfterPayment(supabase, {
+    paymentId: internalPaymentId,
+    asaasPaymentId,
+  });
+
+  if (!result.ok) {
+    // payment_not_found / fulfillment_not_found são casos comuns
+    // quando o payment é de uma consulta (fluxo antigo), não de um
+    // plano prescrito. Loga em nível baixo pra não poluir.
+    if (
+      result.code === "payment_not_found" ||
+      result.code === "fulfillment_not_found"
+    ) {
+      console.log("[asaas-webhook] fulfillment skip:", {
+        code: result.code,
+        paymentId: internalPaymentId,
+      });
+      return;
+    }
+    console.error("[asaas-webhook] promote fulfillment falhou:", result);
+    return;
+  }
+
+  if (result.wasPromoted) {
+    console.log("[asaas-webhook] fulfillment promovido:", {
+      fulfillment_id: result.fulfillmentId,
+      plan: result.planName,
+    });
+  } else if (result.alreadyPaid) {
+    console.log("[asaas-webhook] fulfillment já estava pago:", {
+      fulfillment_id: result.fulfillmentId,
+      status: result.status,
+    });
+    // se já estava pago em webhook anterior, não reenviamos WA.
+    return;
+  }
+
+  // Best-effort: notifica paciente.
+  if (result.customerPhone && result.wasPromoted) {
+    try {
+      const message = composePaidWhatsAppMessage({
+        customerName: result.customerName,
+        planName: result.planName,
+      });
+      const waRes = await sendText({
+        to: result.customerPhone,
+        text: message,
+      });
+      if (waRes.ok) {
+        console.log("[asaas-webhook] WA pagamento-ok enviado:", {
+          fulfillment_id: result.fulfillmentId,
+          message_id: waRes.messageId,
+        });
+      } else {
+        console.warn("[asaas-webhook] WA pagamento-ok falhou:", {
+          fulfillment_id: result.fulfillmentId,
+          error: waRes.message,
+        });
+      }
+    } catch (e) {
+      console.error("[asaas-webhook] WA pagamento-ok exception:", e);
     }
   }
 }
