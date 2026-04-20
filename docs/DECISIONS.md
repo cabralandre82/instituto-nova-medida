@@ -5,6 +5,153 @@
 
 ---
 
+## D-041 · Painel financeiro da médica + upload de NF-e + cron de cobrança · 2026-04-20
+
+**Contexto:** depois do D-040, a geração de payouts virou automática
+e idempotente — mas o **fecho do ciclo fiscal** continuava fora do
+sistema. A médica não tinha como:
+
+1. Ver em tempo real o **saldo** (pending + available + próximo payout
+   estimado) — só conseguia abrir `/medico/ganhos` e filtrar por mês.
+2. **Anexar NF-e** pra cada payout confirmado. O fluxo atual era:
+   admin cobra por WhatsApp → médica emite NF-e no prefeitura → envia
+   por e-mail → admin arquiva manualmente. Frágil e não auditável.
+3. Ter um admin que **validasse** formalmente a NF recebida (CNPJ
+   correto, valor bate com o repasse, número válido).
+
+Sem isso, o instituto ficava com um passivo invisível: payouts pagos
+mas sem documento fiscal correspondente, criando risco tributário e
+sobrecarga de follow-up manual.
+
+**Alternativas consideradas:**
+
+1. **Continuar manual fora do sistema** — operador cobra no WhatsApp,
+   arquiva NF em pasta. Barato de construir (zero código), mas cada
+   ciclo mensal consome ~30 min do admin e a auditoria depende de
+   pastas de Drive. Não escala além de ~10 médicas.
+2. **Integrar com API municipal (NFS-e) pra emitir NF automaticamente
+   em nome da médica** — tecnicamente inviável sem certificado digital
+   dela, juridicamente inviável (a NF é emitida pelo CNPJ da médica,
+   não do instituto). Descartado.
+3. **Upload de NF pela médica + validação humana pelo admin** (o que
+   escolhemos). Mantém a emissão como responsabilidade da médica
+   (correta juridicamente), mas traz o documento pra dentro do sistema
+   pra auditoria. Médio esforço de engenharia (~1 dia).
+
+**Decisão:** Opção 3 — fluxo self-service da médica + validação admin.
+
+**Arquitetura:**
+
+1. **Storage dedicado (migration 015):**
+   - Novo bucket privado `billing-documents` (separado do
+     `payouts-proofs` do D-022/D-026). Aceita PDF/XML/PNG/JPG/WEBP
+     até 5 MB. Service role only — zero exposição cliente.
+   - Path convenção: `billing/{payout_id}/{timestamp}-{slug}.{ext}`.
+   - `doctor_billing_documents(payout_id)` virou UNIQUE — 1 NF por
+     payout. Substituição é DELETE + POST explícito (operação rara,
+     melhor que versionamento invisível).
+   - Coluna nova `doctor_payouts.last_nf_reminder_at` pra idempotência
+     do cron de cobrança (índice parcial pra query rápida).
+
+2. **Core: `src/lib/doctor-finance.ts` (fonte única da verdade):**
+   - `getDoctorBalance(supabase, doctorId)` — agrega por status
+     (pending / available / in_payout / paid).
+   - `estimateNextPayout(supabase, doctorId, now)` — separa
+     "eligible" (available_at < mês atual) de "deferred" (cairá no
+     ciclo seguinte). Retorna `scheduledAt` = próximo dia 1 às 09:15
+     UTC (alinhado com Vercel Cron do D-040).
+   - `listPayoutsWithDocuments(supabase, doctorId, limit)` — join
+     `doctor_payouts` + `doctor_billing_documents` (camelCase pro
+     consumo em React).
+   - `countPendingBillingDocuments(supabase, doctorId?)` — distingue
+     `pendingUpload` (sem doc) de `awaitingValidation` (doc sem
+     `validated_at`). Alimenta o banner no dashboard.
+
+3. **Storage helpers: `src/lib/billing-documents.ts`:**
+   - Espelho deliberado de `payout-proofs.ts`. Bucket separado permite
+     policies de retenção independentes no futuro (NF-e tem exigência
+     fiscal de 5 anos para a médica; comprovante PIX é responsabilidade
+     do instituto).
+   - `buildStoragePath`, `slugifyFilename`, `createSignedUrl`,
+     `removeFromStorage` — API idêntica, paths diferentes.
+
+4. **APIs HTTP (reutilizam padrão do D-026):**
+
+   - `POST /api/medico/payouts/[id]/billing-document` (multipart):
+     valida MIME/tamanho, confere ownership, insere/atualiza linha
+     em `doctor_billing_documents`, tira o arquivo antigo. Substituição
+     zera `validated_at` (admin precisa re-validar).
+   - `GET` — signed URL 60s.
+   - `DELETE` — só ENQUANTO não validado (após validação, só admin remove).
+
+   - `GET /api/admin/payouts/[id]/billing-document` — signed URL 60s.
+   - `DELETE` — admin pode remover mesmo após validação (casos de
+     correção).
+   - `POST /api/admin/payouts/[id]/billing-document/validate[?unvalidate=1]`
+     — mutação explícita (POST com body opcional pra `validation_notes`).
+     Idempotente: revalidar preserva o `validated_at` original
+     (auditoria).
+
+5. **UI self-service:**
+   - `/medico/repasses` reescrito: mostra saldo em tempo real (4 cards
+     — disponível, aguardando, próximo repasse, total recebido),
+     banner quando há NF pendente, card por payout com status + botão
+     "Enviar NF" integrado (`BillingDocumentBlock`). Form com número
+     da NF, data de emissão e valor (opcionais, ajudam na conferência).
+   - `/medico` (dashboard): banner de aviso quando há payouts confirmados
+     sem NF enviada, com link pra `/medico/repasses`.
+   - `/admin/payouts/[id]`: novo painel `BillingDocumentAdminPanel` no
+     sidebar. Mostra número/valor/diferença; destaca se
+     `document_amount_cents !== amount_cents` (vermelho). Textarea pra
+     `validation_notes`. Botões: Validar / Desvalidar / Remover.
+
+6. **Cron de cobrança (`src/lib/notify-pending-documents.ts`):**
+   - Roda diariamente às 09:00 UTC ≈ 06:00 BRT via Vercel Cron.
+   - Query: payouts `status='confirmed'` com `paid_at ≤ now - 7d`.
+   - Para cada payout sem NF validada:
+     - Interval guard: `last_nf_reminder_at` mais recente que
+       `REMINDER_INTERVAL_HOURS` (24h) → pula (evita spam).
+     - Médica sem phone/nome → pula MAS marca `last_nf_reminder_at`
+       (impede loop).
+     - Template stub (`templates_not_approved`) → pula MAS marca
+       `last_nf_reminder_at` (impede loop daily em dev).
+     - Send real → incrementa `notified`, marca timestamp.
+   - Guard de `MAX_NOTIFICATIONS_PER_RUN` (100) pra proteger quota Meta.
+   - Retorno estruturado: `{ evaluated, notified, skippedInterval,
+     skippedTemplate, skippedMissingPhone, errors, details }` — vai
+     pro `cron_runs.payload`.
+
+7. **Observabilidade (`src/lib/system-health.ts`):**
+   - Novo check `cron_notify_pending_documents` (36h warning, 7d erro).
+   - `payloadSummary` estendido pra mostrar `evaluated`, `notified`,
+     `skippedInterval`, `skippedTemplate`, `skippedMissingPhone` na
+     tela `/admin/health`.
+
+**Idempotência e segurança:**
+
+- UNIQUE(`payout_id`) protege corrida na criação do doc.
+- Ownership check em TODA rota `/api/medico/*` (compara
+  `payout.doctor_id` com `requireDoctor()`).
+- `validated_at` só pode ser mexido pela rota admin dedicada.
+- Bucket 100% privado, signed URLs de 60s. Service role never exposed.
+- `last_nf_reminder_at` garante que o cron não spama (mesmo se rodar
+  10x no dia).
+
+**Consequências:**
+
+- Ciclo fiscal fecha dentro do sistema: cron gera draft → admin
+  aprova/paga → médica sobe NF → admin valida. Zero trabalho humano
+  recorrente além da validação (que é obrigatória por natureza).
+- Auditoria completa: `/admin/payouts/[id]` mostra o documento junto
+  do comprovante de PIX. Uma página, uma fonte da verdade.
+- Quando o template Meta `medica_documento_pendente` for aprovado, o
+  cron passa a cobrar automaticamente — o stub atual já registra
+  `last_nf_reminder_at` pra não entrar em loop em dev.
+- 91 testes passando (27 novos em `doctor-finance.test.ts`,
+  `billing-documents.test.ts`, `notify-pending-documents.test.ts`).
+
+---
+
 ## D-040 · Crons financeiros reimplementados em Node, com observabilidade · 2026-04-20
 
 **Contexto:** a migration 005 (D-022) já tinha criado as RPCs Postgres

@@ -195,7 +195,8 @@ testes novos (85 no total).
         `auto_generated=true`. Idempotente via UNIQUE constraint +
         handler 23505. Warnings pra médica sem PIX ativo.
   - [x] Tabela `cron_runs` + system-health checks freshness.
-  - [ ] `notify_pending_documents()` — diário 06:00, cobra NF (Sprint 5)
+  - [x] `notify_pending_documents` — diário 06:00 BRT, cobra NF
+        (entregue em D-041, Sprint 5).
 - [ ] **Lib `src/lib/video.ts`:**
   - [ ] Interface `VideoProvider` (createRoom, getJoinUrl, deleteRoom,
         validateWebhook)
@@ -417,15 +418,20 @@ automatizado (estorno já foi em D-034; NF-e upload flow fica aqui).
 
 **Frente 1 — Completar área da médica:**
 
-- [ ] Página `/medico/financeiro` com saldo atual (available + pending),
-      próximo payout estimado, histórico de payouts, upload de NF-e
+- [x] **D-041 · Painel financeiro da médica + upload NF-e + cron de
+      cobrança** — `/medico/repasses` ganhou saldo em tempo real
+      (disponível, aguardando, próximo repasse, total recebido),
+      banner de NF pendente, e upload de NF-e por payout. Admin valida
+      em `/admin/payouts/[id]`. Cron `notify_pending_documents` roda
+      diariamente 09:00 UTC (06:00 BRT) cobrando NF pendente há > 7d
+      via template WhatsApp `medica_documento_pendente`. Bucket
+      privado `billing-documents` + `src/lib/doctor-finance.ts` como
+      fonte da verdade. 91 testes passando (27 novos).
 - [ ] Página `/medico/configuracoes` com PIX auto-serviço (CRUD de
       `doctor_payment_methods`, idealmente validação Asaas do holder)
 - [ ] Página `/medico/agenda` (CRUD de `doctor_availability`)
 - [ ] Auto-serviço de desmarque pela médica com janela mínima de
       aviso (liga na política de reliability D-036)
-- [ ] `notify_pending_documents()` — cron diário 06:00 WhatsApp
-      cobra NF pendente pros payouts confirmados há > 7 dias
 
 **Frente 2 — Ciclo do paciente:**
 

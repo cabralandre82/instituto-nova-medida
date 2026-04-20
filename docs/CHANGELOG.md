@@ -6,6 +6,113 @@
 
 ---
 
+## 2026-04-20 · Painel financeiro da médica + upload NF-e + cron de cobrança (D-041) · IA
+
+**Por quê:** o D-040 automatizou a geração do payout, mas o ciclo
+fiscal continuava fora do sistema (médica emitia NF externamente,
+mandava por e-mail, admin arquivava em pasta). Sem NF dentro do
+sistema: passivo tributário invisível + ~30 min/ciclo de follow-up
+manual + auditoria dependente de Drive. Resolvido fechando o
+loop dentro do produto.
+
+**Entregáveis:**
+
+- **Migration `20260421010000_billing_documents.sql`:**
+  - Bucket privado `billing-documents` (10 MB hard cap, aceita
+    PDF/XML/PNG/JPG/WEBP).
+  - `UNIQUE(payout_id)` em `doctor_billing_documents` — 1 NF por
+    payout, substituição é DELETE+POST explícito.
+  - `doctor_payouts.last_nf_reminder_at` + índice parcial — idempotência
+    do cron.
+
+- **`src/lib/billing-documents.ts`** (novo): helpers espelho do
+  `payout-proofs.ts` mas apontando pro bucket novo. `buildStoragePath`
+  monta `billing/{payout_id}/{ts}-{slug}.{ext}`. Bucket separado
+  permite retention policies independentes no futuro.
+
+- **`src/lib/doctor-finance.ts`** (novo): fonte única da verdade do
+  lado da médica.
+  - `getDoctorBalance(supabase, doctorId)` → agrega por status.
+  - `estimateNextPayout(supabase, doctorId, now)` → separa `eligible`
+    (available_at < mês atual) de `deferred` (cairá no próximo ciclo).
+    `scheduledAt` = próximo dia 1 às 09:15 UTC (alinhado com cron D-040).
+  - `listPayoutsWithDocuments(supabase, doctorId, limit)` → join
+    payouts + NFs em camelCase.
+  - `countPendingBillingDocuments(supabase, doctorId?)` → distingue
+    `pendingUpload` (sem doc) de `awaitingValidation` (doc sem
+    `validated_at`).
+
+- **APIs da médica:**
+  - `POST /api/medico/payouts/[id]/billing-document` (multipart) —
+    upload com ownership check e UNIQUE guard.
+  - `GET` — signed URL 60s.
+  - `DELETE` — remove ENQUANTO não validado; após validação só admin
+    remove.
+
+- **APIs do admin:**
+  - `GET /api/admin/payouts/[id]/billing-document` — signed URL.
+  - `DELETE` — remove a qualquer momento (casos de correção).
+  - `POST /api/admin/payouts/[id]/billing-document/validate[?unvalidate=1]`
+    — mutação explícita (POST + body opcional pra `validation_notes`).
+    Revalidar preserva o `validated_at` original (auditoria).
+
+- **UI médica:**
+  - `/medico/repasses` reescrito: 4 cards de saldo (disponível,
+    aguardando, próximo repasse, total recebido); banner "NF pendente
+    em N repasses"; por payout: status + comprovante PIX (quando
+    confirmado) + `BillingDocumentBlock` (form com arquivo / número /
+    data / valor NF).
+  - `/medico` dashboard: banner alerta quando há payouts confirmados
+    sem NF.
+
+- **UI admin:**
+  - `BillingDocumentAdminPanel` no sidebar de `/admin/payouts/[id]`:
+    mostra NF, destaca divergência de valor, textarea de notes,
+    botões Validar / Desvalidar / Remover.
+
+- **Cron `notify-pending-documents`** (novo, diário 09:00 UTC ≈ 06:00 BRT):
+  - `src/lib/notify-pending-documents.ts`: query payouts `confirmed`
+    com `paid_at ≤ now - 7d` sem NF validada; envia
+    `sendMedicaDocumentoPendente` via WhatsApp; interval guard de 24h
+    via `last_nf_reminder_at`.
+  - Defesa contra loop: médica sem phone/nome OU template stub
+    (`templates_not_approved`) → pula MAS marca o timestamp mesmo
+    assim.
+  - Max 100 notificações/run pra proteger quota Meta.
+  - `vercel.json` agendado; rota `GET /api/internal/cron/notify-pending-documents`
+    protegida por `CRON_SECRET`.
+
+- **`src/lib/system-health.ts`** ganha check
+  `cron_notify_pending_documents` (warn 36h / error 7d).
+  `payloadSummary` estendido pra mostrar `evaluated, notified,
+  skippedInterval, skippedTemplate, skippedMissingPhone` no dashboard.
+
+- **Testes (27 novos, 91 total):**
+  - `doctor-finance.test.ts` — balance, estimate (boundary dez/jan),
+    list com join, count pending/awaiting.
+  - `billing-documents.test.ts` — slugify, buildStoragePath (MIME
+    variations), constantes.
+  - `notify-pending-documents.test.ts` — idempotência via
+    interval, skip missing phone/name, stub → marca timestamp,
+    exceção do send, db error.
+
+**Como testar:**
+
+1. Como médica com payout confirmed (seed ou banco real), entrar em
+   `/medico/repasses` → ver saldo + banner "NF pendente".
+2. Clicar "Enviar NF-e" no card do payout → selecionar PDF → submit
+   → recarrega com "NF enviada — aguardando validação".
+3. Como admin, abrir `/admin/payouts/{id}` → ver painel NF-e → clicar
+   "Ver NF" (signed URL abre em nova aba) → "Validar NF" → recarrega
+   "Validada".
+4. Voltar à médica em `/medico/repasses` → badge vira "NF validada".
+5. Manual cron: `curl -H "x-cron-secret: $CRON_SECRET"
+   https://.../api/internal/cron/notify-pending-documents` → JSON
+   com `notified`, `skippedInterval` etc.
+6. `/admin/health?ping=1` → novo check `cron_notify_pending_documents`.
+
+---
+
 ## 2026-04-20 · Crons financeiros em Node com observabilidade (D-040) · IA
 
 **Por quê:** as RPCs Postgres `recalculate_earnings_availability()` e

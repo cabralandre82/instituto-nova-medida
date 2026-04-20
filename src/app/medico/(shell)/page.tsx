@@ -13,6 +13,7 @@
 import Link from "next/link";
 import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { countPendingBillingDocuments } from "@/lib/doctor-finance";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -29,6 +30,7 @@ type DashboardData = {
   availableCents: number;
   receivedThisMonthCents: number;
   payoutsCount: { draft: number; approved: number; pixSent: number };
+  billingDocs: { pendingUpload: number; awaitingValidation: number };
 };
 
 async function loadDashboard(doctorId: string): Promise<DashboardData> {
@@ -114,6 +116,8 @@ async function loadDashboard(doctorId: string): Promise<DashboardData> {
     };
   }
 
+  const billingDocs = await countPendingBillingDocuments(supabase, doctorId);
+
   return {
     appointmentsToday: appsToday.count ?? 0,
     nextAppointment,
@@ -121,6 +125,7 @@ async function loadDashboard(doctorId: string): Promise<DashboardData> {
     availableCents,
     receivedThisMonthCents,
     payoutsCount,
+    billingDocs,
   };
 }
 
@@ -171,6 +176,25 @@ export default async function DoctorDashboard() {
           })}
         </p>
       </header>
+
+      {d.billingDocs.pendingUpload > 0 && (
+        <div className="mb-6 rounded-2xl border border-terracotta-200 bg-terracotta-50 p-4 sm:p-5 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-terracotta-800">
+            <strong>
+              NF-e pendente em {d.billingDocs.pendingUpload} repasse
+              {d.billingDocs.pendingUpload === 1 ? "" : "s"} confirmado
+              {d.billingDocs.pendingUpload === 1 ? "" : "s"}.
+            </strong>{" "}
+            Emita e envie a nota para manter o ciclo fiscal em dia.
+          </p>
+          <Link
+            href="/medico/repasses"
+            className="inline-flex items-center px-3 py-1.5 rounded-lg bg-ink-800 text-white text-sm font-medium hover:bg-ink-900 whitespace-nowrap"
+          >
+            Ver repasses →
+          </Link>
+        </div>
+      )}
 
       <section className="grid sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-10">
         <Card

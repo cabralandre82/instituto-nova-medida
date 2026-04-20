@@ -25,6 +25,9 @@
     },
     "src/app/api/internal/cron/generate-payouts/route.ts": {
       "maxDuration": 120
+    },
+    "src/app/api/internal/cron/notify-pending-documents/route.ts": {
+      "maxDuration": 60
     }
   },
   "crons": [
@@ -47,6 +50,10 @@
     {
       "path": "/api/internal/cron/generate-payouts",
       "schedule": "15 9 1 * *"
+    },
+    {
+      "path": "/api/internal/cron/notify-pending-documents",
+      "schedule": "0 9 * * *"
     }
   ],
   "headers": [

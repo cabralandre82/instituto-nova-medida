@@ -94,6 +94,10 @@ const CRON_EARNINGS_ERROR_DAYS = 7;
 const CRON_PAYOUTS_WARN_DAYS = 40;
 const CRON_PAYOUTS_ERROR_DAYS = 70;
 
+/** Cron notify-pending-documents (diário): > 36h = warning, > 7d = erro. */
+const CRON_NOTIFY_DOCS_WARN_HOURS = 36;
+const CRON_NOTIFY_DOCS_ERROR_DAYS = 7;
+
 const DEFAULT_TIMEOUT_MS = 5000;
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -176,6 +180,17 @@ export async function runHealthCheck(
           "generate_monthly_payouts",
           CRON_PAYOUTS_WARN_DAYS * 24 * 60 * 60 * 1000,
           CRON_PAYOUTS_ERROR_DAYS * 24 * 60 * 60 * 1000
+        ),
+      timeoutMs
+    ),
+    withTimeout(
+      "cron_notify_pending_documents",
+      "Cron · cobrança de NF-e",
+      () =>
+        checkCronFreshness(
+          "notify_pending_documents",
+          CRON_NOTIFY_DOCS_WARN_HOURS * 60 * 60 * 1000,
+          CRON_NOTIFY_DOCS_ERROR_DAYS * 24 * 60 * 60 * 1000
         ),
       timeoutMs
     ),
@@ -668,6 +683,11 @@ function payloadSummary(
     "payoutsSkippedExisting",
     "payoutsSkippedMissingPix",
     "totalCentsDrafted",
+    "evaluated",
+    "notified",
+    "skippedInterval",
+    "skippedTemplate",
+    "skippedMissingPhone",
     "errors",
   ];
   const parts: string[] = [];

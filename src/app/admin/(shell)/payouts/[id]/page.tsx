@@ -10,6 +10,7 @@ import { notFound } from "next/navigation";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { PayoutActions } from "./PayoutActions";
 import { ProofPanel } from "./ProofPanel";
+import { BillingDocumentAdminPanel } from "./BillingDocumentAdminPanel";
 
 export const dynamic = "force-dynamic";
 
@@ -54,6 +55,15 @@ type Earning = {
   earned_at: string;
 };
 
+type BillingDocument = {
+  id: string;
+  uploaded_at: string | null;
+  validated_at: string | null;
+  document_number: string | null;
+  document_amount_cents: number | null;
+  validation_notes: string | null;
+};
+
 function brl(cents: number): string {
   return (cents / 100).toLocaleString("pt-BR", {
     style: "currency",
@@ -88,7 +98,7 @@ async function load(id: string) {
     .maybeSingle();
   if (!payout) return null;
 
-  const [docRes, pmRes, earningsRes] = await Promise.all([
+  const [docRes, pmRes, earningsRes, billingRes] = await Promise.all([
     supabase
       .from("doctors")
       .select("id, full_name, display_name, email")
@@ -105,6 +115,13 @@ async function load(id: string) {
       .select("id, type, amount_cents, description, status, appointment_id, payment_id, earned_at")
       .eq("payout_id", id)
       .order("earned_at", { ascending: true }),
+    supabase
+      .from("doctor_billing_documents")
+      .select(
+        "id, uploaded_at, validated_at, document_number, document_amount_cents, validation_notes"
+      )
+      .eq("payout_id", id)
+      .maybeSingle(),
   ]);
 
   return {
@@ -112,6 +129,7 @@ async function load(id: string) {
     doctor: docRes.data as Doctor | null,
     pix: pmRes.data as PaymentMethod | null,
     earnings: (earningsRes.data ?? []) as Earning[],
+    billing: (billingRes.data as BillingDocument | null) ?? null,
   };
 }
 
@@ -123,7 +141,7 @@ export default async function PayoutDetailPage({
   const { id } = await params;
   const data = await load(id);
   if (!data) notFound();
-  const { payout, doctor, pix, earnings } = data;
+  const { payout, doctor, pix, earnings, billing } = data;
 
   const st = STATUS[payout.status];
 
@@ -302,6 +320,23 @@ export default async function PayoutDetailPage({
 
           {/* Comprovante (sempre visível pra histórico) */}
           <ProofPanel payoutId={payout.id} rawValue={payout.pix_proof_url} />
+
+          {/* NF-e da médica (D-041) */}
+          <BillingDocumentAdminPanel
+            payoutId={payout.id}
+            amountCents={payout.amount_cents}
+            document={
+              billing
+                ? {
+                    uploadedAt: billing.uploaded_at,
+                    validatedAt: billing.validated_at,
+                    documentNumber: billing.document_number,
+                    documentAmountCents: billing.document_amount_cents,
+                    validationNotes: billing.validation_notes,
+                  }
+                : null
+            }
+          />
         </aside>
       </div>
     </div>
