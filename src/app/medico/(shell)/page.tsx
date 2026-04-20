@@ -14,6 +14,7 @@ import Link from "next/link";
 import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { countPendingBillingDocuments } from "@/lib/doctor-finance";
+import { getActivePaymentMethod } from "@/lib/doctor-payment-methods";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -150,6 +151,7 @@ function formatNextLabel(scheduledAt: string, minutesAway: number): string {
 export default async function DoctorDashboard() {
   const { doctorId } = await requireDoctor();
   const d = await loadDashboard(doctorId);
+  const pix = await getActivePaymentMethod(getSupabaseAdmin(), doctorId);
 
   const greetingHour = new Date().getHours();
   const greeting =
@@ -176,6 +178,22 @@ export default async function DoctorDashboard() {
           })}
         </p>
       </header>
+
+      {!pix && (
+        <div className="mb-6 rounded-2xl border border-terracotta-300 bg-terracotta-50 p-4 sm:p-5 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-terracotta-800">
+            <strong>Cadastre seu PIX para liberar os repasses.</strong>{" "}
+            Sem chave cadastrada, o fechamento mensal não consegue gerar seu
+            pagamento automaticamente.
+          </p>
+          <Link
+            href="/medico/perfil/pix"
+            className="inline-flex items-center px-3 py-1.5 rounded-lg bg-ink-800 text-white text-sm font-medium hover:bg-ink-900 whitespace-nowrap"
+          >
+            Cadastrar PIX →
+          </Link>
+        </div>
+      )}
 
       {d.billingDocs.pendingUpload > 0 && (
         <div className="mb-6 rounded-2xl border border-terracotta-200 bg-terracotta-50 p-4 sm:p-5 flex flex-wrap items-center justify-between gap-3">

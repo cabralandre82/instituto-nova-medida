@@ -427,8 +427,19 @@ automatizado (estorno já foi em D-034; NF-e upload flow fica aqui).
       via template WhatsApp `medica_documento_pendente`. Bucket
       privado `billing-documents` + `src/lib/doctor-finance.ts` como
       fonte da verdade. 91 testes passando (27 novos).
-- [ ] Página `/medico/configuracoes` com PIX auto-serviço (CRUD de
-      `doctor_payment_methods`, idealmente validação Asaas do holder)
+- [x] **D-042 · PIX self-service da médica** — `/medico/perfil/pix`
+      com card vigente (tipo + chave mascarada + titular), form de
+      troca com `window.confirm` e lista de histórico com botão
+      "Remover". API `POST /api/medico/payment-methods` faz **troca
+      não-destrutiva**: marca default antigo como
+      `active=false, is_default=false, replaced_at=now,
+      replaced_by=userId` e insere o novo. Migration
+      `20260422000000_doctor_payment_methods_history.sql` adiciona
+      auditoria. Admin refatorado pra usar a mesma lib
+      (`src/lib/doctor-payment-methods.ts`). Banner no `/medico`
+      quando sem PIX. Cron D-040 continua funcionando sem mudança.
+      Validação Asaas adiada (PIX hoje é manual; retomar quando
+      execução via Asaas). 120 testes passando (29 novos).
 - [ ] Página `/medico/agenda` (CRUD de `doctor_availability`)
 - [ ] Auto-serviço de desmarque pela médica com janela mínima de
       aviso (liga na política de reliability D-036)

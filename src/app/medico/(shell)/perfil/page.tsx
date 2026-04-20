@@ -3,8 +3,15 @@
  * "duros" (read-only) que só o operador pode mudar (CRM, CNPJ, status).
  */
 
+import Link from "next/link";
 import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import {
+  getActivePaymentMethod,
+  labelForPixType,
+  maskPixKey,
+  type PixKeyType,
+} from "@/lib/doctor-payment-methods";
 import { ProfileForm } from "./ProfileForm";
 
 export const dynamic = "force-dynamic";
@@ -57,6 +64,8 @@ export default async function DoctorProfilePage() {
     label: doctor.status,
     className: "bg-ink-50 text-ink-600 border-ink-200",
   };
+
+  const pix = await getActivePaymentMethod(supabase, doctorId);
 
   return (
     <div>
@@ -114,6 +123,35 @@ export default async function DoctorProfilePage() {
             <p className="mt-4 text-xs text-ink-500">
               Para alterar qualquer um destes, fale com o operador.
             </p>
+          </div>
+
+          <div className="rounded-2xl border border-ink-100 bg-white p-5">
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <h3 className="font-serif text-[1.1rem] text-ink-800">Chave PIX</h3>
+              <Link
+                href="/medico/perfil/pix"
+                className="text-xs font-medium text-sage-700 hover:text-sage-800"
+              >
+                {pix ? "Gerenciar →" : "Cadastrar →"}
+              </Link>
+            </div>
+            {pix ? (
+              <div className="text-sm space-y-1">
+                <div className="text-ink-500">
+                  {labelForPixType(pix.pix_key_type as PixKeyType)}
+                </div>
+                <div className="text-ink-800 font-mono break-all">
+                  {maskPixKey(pix.pix_key_type as PixKeyType, pix.pix_key)}
+                </div>
+                <div className="text-xs text-ink-500">
+                  Titular: {pix.account_holder_name ?? "—"}
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-terracotta-700">
+                Sem PIX cadastrado. Repasses ficam bloqueados.
+              </p>
+            )}
           </div>
 
           <div className="rounded-2xl border border-ink-100 bg-white p-5">

@@ -5,6 +5,128 @@
 
 ---
 
+## D-042 · PIX self-service da médica · 2026-04-20
+
+**Contexto:** com o ciclo fiscal fechado (D-041) e o cron de payouts
+operando (D-040), sobrou um único gargalo humano no onboarding da
+médica: **a chave PIX**. Até agora, só o admin podia cadastrar ou
+trocar o PIX em `/admin/doctors/[id]`. Resultado prático:
+
+- Médica nova entra → precisa abrir ticket WhatsApp pro operador
+- Troca de chave (conta nova, banco novo) → outro ticket
+- Operador digita os dados a partir de print/foto → risco de typo
+  em `pix_key_type` + `pix_key` vs `CPF/CNPJ do titular`
+- Zero histórico auditável: a única chave existente era sempre a
+  atual; não sabíamos se tinha sido trocada nem quando
+
+Sem resolver isso, o cadastro "Convidada → Ativa" sempre depende
+do admin. E sem histórico, não temos como responder um "essa NF
+foi paga pro PIX certo naquele mês?".
+
+**Alternativas consideradas:**
+
+1. **Manter admin-only** — barato, zero código, mas cada onboarding
+   e cada troca exige intervenção humana. Mostrou-se insuficiente
+   mesmo com volume baixo (3-5 médicas). Descartado.
+2. **Self-service com UPDATE destrutivo** — médica edita o registro
+   `is_default=true` existente. Mais simples mas **apaga o
+   histórico**. Perde auditoria do "quem trocou, quando, para
+   quê". Descartado.
+3. **Self-service com troca não-destrutiva + histórico**
+   (o que escolhemos) — nova chave é INSERT; o registro antigo vira
+   `is_default=false, active=false, replaced_at=now(),
+   replaced_by=user.id`. Preserva TUDO.
+4. **Validar com API Asaas (`/accounts/validatePixKey`)** —
+   tecnicamente interessante mas adiado: hoje o PIX é executado
+   manualmente pelo admin no app do banco, não via Asaas. Validação
+   viraria falsa segurança (retorna "chave válida" mas não garante
+   nada sobre a execução manual). Retomar quando a execução for
+   também via Asaas (D-04X futuro).
+
+**Decisão:** Opção 3.
+
+**Arquitetura:**
+
+1. **Migration 017 (`20260422000000_doctor_payment_methods_history.sql`):**
+   - `doctor_payment_methods.replaced_at timestamptz` — quando
+     deixou de ser default
+   - `doctor_payment_methods.replaced_by uuid references auth.users` —
+     quem trocou (médica via self-service OU admin)
+   - Índice `idx_dpm_history(doctor_id, created_at desc)` pra listar
+     histórico rápido na UI
+   - RLS **não muda**: a policy `dpm_doctor_self` (migration 005) já
+     permite leitura/escrita da médica dona.
+
+2. **Core: `src/lib/doctor-payment-methods.ts` (fonte única):**
+   - `PIX_KEY_TYPES`, `isValidPixKey`, `normalizePixKey`,
+     `validatePixInput`, `isHolderConsistent` — validação/normalização
+     por tipo (cpf, cnpj, email, phone, random)
+   - `listPaymentMethods(supabase, doctorId)` — default + histórico
+     ordenados (default primeiro, depois created_at desc)
+   - `getActivePaymentMethod(supabase, doctorId)` — só o default
+   - `createOrReplacePaymentMethod(supabase, doctorId, input,
+     {replacedByUserId})` — **troca não-destrutiva**:
+       1. Busca default vigente
+       2. `UPDATE doctor_payment_methods SET is_default=false,
+          active=false, replaced_at=now(), replaced_by=userId
+          WHERE doctor_id=... AND (active OR is_default)`
+       3. `INSERT` novo registro com `is_default=true, active=true`
+     Resultado: invariante de `idx_dpm_one_active` (só 1 active=true
+     por médica) e `idx_dpm_one_default` (só 1 is_default=true)
+     mantidas; cron D-040 continua funcionando sem mudança.
+   - `deleteHistoricalPaymentMethod(supabase, doctorId, id)` —
+     remove registro do histórico **apenas se não-default**. Não é
+     possível se deixar sem PIX.
+   - `maskPixKey`, `labelForPixType` — helpers de apresentação.
+
+3. **APIs HTTP (espelham padrão de /api/medico/*):**
+   - `GET /api/medico/payment-methods` → lista (default + histórico)
+   - `POST /api/medico/payment-methods` → cria/substitui
+   - `DELETE /api/medico/payment-methods/[id]` → remove histórico
+   - `POST /api/admin/doctors/[id]/payment-method` — **refatorado**
+     pra delegar pra `createOrReplacePaymentMethod` (mesma lógica).
+     Admin também gera entradas de `replaced_at`/`replaced_by`.
+
+4. **UI `/medico/perfil/pix`:**
+   - Card vigente (tipo + chave mascarada + titular + verified_at)
+   - Form de troca (com `window.confirm` porque é ação sensível)
+   - Lista de histórico com botão "Remover" por item
+   - Sidebar educativa ("como os repasses funcionam", "dicas")
+   - Card no `/medico/perfil` mostra PIX atual + CTA "Gerenciar"
+   - **Banner terracotta no `/medico` dashboard** quando não há PIX:
+     sem chave, o payout não consegue gerar automaticamente.
+
+5. **Preservação do cron D-040:** o cron
+   `/api/internal/cron/generate-payouts` lê PIX com `active=true`.
+   A troca não-destrutiva garante **sempre no máximo 1** registro
+   `active=true` por médica. Não há snapshot "histórico" no payout
+   (já que o payout registra `pix_key_snapshot` no próprio
+   `doctor_payouts` no momento da criação — imutável por design).
+
+**Impacto:**
+- Onboarding da médica agora é 100% self-service:
+  convite → login → completa perfil → cadastra PIX → recebe.
+- Troca de chave sem intervenção humana (e com auditoria).
+- Admin mantém o poder via `/admin/doctors/[id]` (mesma lib), para
+  casos de suporte (médica sem acesso ao email, etc).
+
+**Métricas alvo:**
+- Tempo médio "convidada → ativa": < 24h (antes: 2-5 dias
+  limitado por disponibilidade do admin)
+- % de médicas ativas com PIX cadastrado: ≥ 95%
+- Nº de tickets "quero trocar meu PIX": → 0
+
+**Testes (29 casos novos):**
+- `doctor-payment-methods.test.ts`: validação por tipo,
+  normalização, createOrReplace (insere, substitui, propaga erro),
+  deleteHistorical (bloqueia default, rejeita outra médica).
+
+**ADRs relacionados:** D-022 (estrutura `doctor_payment_methods`),
+D-026 (campos `is_default` / `account_holder_*`), D-040 (cron que
+consome o PIX), D-041 (ciclo fiscal que complementa este fluxo).
+
+---
+
 ## D-041 · Painel financeiro da médica + upload de NF-e + cron de cobrança · 2026-04-20
 
 **Contexto:** depois do D-040, a geração de payouts virou automática

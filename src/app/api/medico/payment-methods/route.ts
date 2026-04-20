@@ -1,18 +1,20 @@
 /**
- * POST /api/admin/doctors/[id]/payment-method
+ * /api/medico/payment-methods — D-042 · PIX self-service
  *
- * Troca de PIX default por decisão do admin. Delega toda a lógica pra
- * `src/lib/doctor-payment-methods.ts` (mesma fonte usada pelo endpoint
- * da médica em /api/medico/payment-methods — D-042).
+ * GET  → lista PIX da médica (default + histórico)
+ * POST → cria novo default (invalida o anterior via replaced_at/replaced_by)
  *
- * Registra `replaced_by` = user.id do admin pra auditoria.
+ * Autenticação: requireDoctor → doctorId da médica logada.
+ *
+ * A lógica de troca não-destrutiva vive em `src/lib/doctor-payment-methods.ts`.
  */
 
 import { NextResponse } from "next/server";
+import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { requireAdmin } from "@/lib/auth";
 import {
   createOrReplacePaymentMethod,
+  listPaymentMethods,
   type PixInput,
   type PixKeyType,
   PIX_KEY_TYPES,
@@ -21,6 +23,18 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+export async function GET() {
+  const { doctorId } = await requireDoctor();
+  const supabase = getSupabaseAdmin();
+  try {
+    const methods = await listPaymentMethods(supabase, doctorId);
+    return NextResponse.json({ ok: true, methods });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "erro";
+    return NextResponse.json({ ok: false, error: message }, { status: 500 });
+  }
+}
+
 type Body = {
   pix_key_type?: string;
   pix_key?: string;
@@ -28,12 +42,8 @@ type Body = {
   account_holder_cpf_or_cnpj?: string;
 };
 
-export async function POST(
-  req: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const admin = await requireAdmin();
-  const { id: doctorId } = await params;
+export async function POST(req: Request) {
+  const { user, doctorId } = await requireDoctor();
 
   let body: Body;
   try {
@@ -58,7 +68,7 @@ export async function POST(
 
   const supabase = getSupabaseAdmin();
   const result = await createOrReplacePaymentMethod(supabase, doctorId, input, {
-    replacedByUserId: admin.id,
+    replacedByUserId: user.id,
   });
 
   if (!result.ok) {
@@ -71,6 +81,6 @@ export async function POST(
   return NextResponse.json({
     ok: true,
     id: result.id,
-    action: result.replacedId ? "updated" : "created",
+    replacedId: result.replacedId,
   });
 }

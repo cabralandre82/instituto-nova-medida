@@ -6,6 +6,84 @@
 
 ---
 
+## 2026-04-20 · PIX self-service da médica (D-042) · IA
+
+**Por quê:** com o ciclo fiscal fechado (D-041) e o cron de payouts
+operando (D-040), o único gargalo humano no onboarding da médica
+virou o PIX — só o admin podia cadastrar/trocar. Cada nova médica e
+cada troca de chave virava ticket. Sem histórico auditável, também
+não conseguíamos responder "pro PIX certo daquele mês?".
+
+**Entregáveis:**
+
+- **Migration `20260422000000_doctor_payment_methods_history.sql`:**
+  - `doctor_payment_methods.replaced_at timestamptz` + `replaced_by
+    uuid references auth.users` — quem trocou, quando.
+  - Índice `idx_dpm_history(doctor_id, created_at desc)` pra listar
+    histórico rápido.
+  - RLS não muda — `dpm_doctor_self` (mig 005) já permitia médica
+    ler/escrever o próprio PIX.
+
+- **`src/lib/doctor-payment-methods.ts`** (novo): fonte única de
+  CRUD + validação.
+  - `PIX_KEY_TYPES`, `isValidPixKey`, `normalizePixKey`,
+    `validatePixInput`, `isHolderConsistent` — validação por tipo
+    (cpf/cnpj/email/phone/random).
+  - `listPaymentMethods`, `getActivePaymentMethod`.
+  - **`createOrReplacePaymentMethod`** — troca **não-destrutiva**:
+    marca default vigente como `active=false, is_default=false,
+    replaced_at=now(), replaced_by=userId` e faz INSERT do novo.
+    Invariante de 1 `active=true` por médica mantida (cron D-040
+    continua funcionando sem mudança).
+  - `deleteHistoricalPaymentMethod` — só permite remover não-default.
+  - `maskPixKey`, `labelForPixType` — helpers de UI.
+
+- **APIs HTTP novas:**
+  - `GET /api/medico/payment-methods` — lista default + histórico.
+  - `POST /api/medico/payment-methods` — cria/substitui.
+  - `DELETE /api/medico/payment-methods/[id]` — remove histórico.
+  - `POST /api/admin/doctors/[id]/payment-method` **refatorado** pra
+    delegar pra mesma lib. Admin também grava `replaced_by`.
+
+- **UI `/medico/perfil/pix`:**
+  - Card vigente (tipo + chave mascarada + titular + verified_at).
+  - Form de troca com `window.confirm` (ação sensível).
+  - Lista de histórico com botão "Remover" por item.
+  - Sidebar educativa ("como funcionam os repasses", "dicas").
+
+- **Integração no `/medico/perfil`:** novo card "Chave PIX" com
+  preview mascarado + CTA "Gerenciar →" (ou "Cadastrar →" se vazio).
+
+- **Banner no `/medico` (dashboard):** se a médica não tem PIX
+  cadastrado, aparece alerta terracotta "Cadastre seu PIX para
+  liberar os repasses" com CTA direto pro form.
+
+- **Testes (29 novos, todos verdes):**
+  `src/lib/doctor-payment-methods.test.ts` cobrindo: validação por
+  tipo (cpf, cnpj, email, phone, random, vazio), normalização
+  (dígitos/lowercase), `validatePixInput` (campos e mensagens),
+  `isHolderConsistent` (CPF/CNPJ bate com chave), `maskPixKey`,
+  `labelForPixType`, `createOrReplacePaymentMethod` (insere, marca
+  antigo, propaga erro, valida antes de tocar banco),
+  `deleteHistoricalPaymentMethod` (OK, bloqueia default, rejeita
+  outra médica, NOT FOUND).
+
+  Total: 91 → **120 testes passando**.
+
+**Impacto:**
+- Onboarding da médica agora é 100% self-service:
+  convite → login → completa perfil → cadastra PIX → recebe.
+  Admin-in-the-loop zero.
+- Troca de chave auditável (sabemos quem trocou, quando, de qual
+  chave pra qual).
+
+**Decisão adiada (consciente):** validação Asaas do holder via
+`/v3/accounts/validatePixKey` — sem execução PIX via Asaas hoje,
+validar só a chave é falsa segurança. Retomado quando D-04X
+automatizar a execução.
+
+---
+
 ## 2026-04-20 · Painel financeiro da médica + upload NF-e + cron de cobrança (D-041) · IA
 
 **Por quê:** o D-040 automatizou a geração do payout, mas o ciclo
