@@ -1,3 +1,25 @@
+/**
+ * /checkout/[plano] — fluxo antigo, mantido como BACK-OFFICE.
+ *
+ * IMPORTANTE (D-044 · 2.G): esta rota NÃO é mais o CTA público
+ * padrão de compra. O fluxo canônico hoje é:
+ *
+ *   1. Visitante → home/quiz → lead → agendamento de consulta (gratuita).
+ *   2. Médica avalia → prescreve plano → paciente aceita
+ *      em `/paciente/oferta/[appointment_id]` → paga via Asaas.
+ *   3. Webhook Asaas promove fulfillment pra `paid` e o Instituto
+ *      despacha o medicamento.
+ *
+ * Esta página fica viva para:
+ *   - Casos pontuais em que a equipe envia um link manual (lead que
+ *     veio por fora do funil, renovação excepcional aprovada, etc).
+ *   - Compatibilidade com links antigos que possam estar circulando.
+ *
+ * Nenhum CTA público leva aqui. A rota é `noindex, nofollow` e não
+ * está no sitemap. Se quiser desligar de vez, remova; mas preservamos
+ * enquanto houver operação residual.
+ */
+
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";

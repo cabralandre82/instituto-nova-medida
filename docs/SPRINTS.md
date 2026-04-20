@@ -578,9 +578,17 @@ automatizado (estorno já foi em D-034; NF-e upload flow fica aqui).
       `transitionFulfillment` com `actor: 'patient'`. WhatsApp
       best-effort de entrega. 8 testes novos (296 totais).
       `next build` verde.
-- [ ] **D-044 onda 2.G · Desligar fluxo antigo "paga antes".**
-      Remover qualquer CTA público que leve a `/checkout` sem
-      consulta prévia; manter endpoints como back-office.
+- [x] **D-044 onda 2.G · Desligar fluxo antigo "paga antes".**
+      (2026-04-20) `/planos` reescrita: cards perdem CTA
+      de compra, ganham bloco "a contratação ocorre após a
+      consulta"; hero ganha único CTA "Agendar consulta gratuita"
+      apontando pra home. `/paciente/renovar` reescrita: seção
+      primária é "Agendar reconsulta" via WhatsApp (renovação
+      exige reavaliação médica), cards dos planos viram
+      referência informativa. `/checkout/[plano]` preservada
+      como back-office (JSDoc de topo documenta o papel;
+      `noindex` ativo). Auditoria confirma zero `href="/checkout"`
+      em CTAs públicos. D-044 **completo**. `next build` verde.
 
 ---
 

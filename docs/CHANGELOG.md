@@ -6,6 +6,111 @@
 
 ---
 
+## 2026-04-20 · Desligar CTAs públicos do fluxo antigo de checkout (D-044 · onda 2.G · final) · IA
+
+**Por quê:** com o novo fluxo completo (ondas 2.A–2.F), qualquer
+botão público que leve a `/checkout/[slug]` contradiz o pacto
+sanitário: tratamento só é contratado após consulta gratuita,
+indicação médica e aceite formal. Essa onda audita, desativa os
+CTAs públicos que restaram e reescreve a copy das páginas
+relevantes pra refletir o modelo correto — sem remover o
+`/checkout/[slug]` em si, que fica como back-office.
+
+**Entregáveis:**
+
+- **`/planos` redesenhada como página informativa.** O card de cada
+  plano perdeu o botão "Quero esse plano" e ganhou um bloco
+  explicativo: "A contratação deste plano ocorre somente após a
+  consulta médica gratuita e indicação clínica." O hero da página
+  ganhou copy nova e um único CTA: "Agendar minha consulta
+  gratuita →" apontando pra `/` (home/quiz). Meta `noindex,
+  nofollow` já estava ativa desde a onda 1.
+- **`/paciente/renovar` reescrita.** Seção principal agora é
+  "Agendar reconsulta" com CTA pro WhatsApp da equipe — renovação
+  exige reavaliação médica (evolução, exames, tolerância) antes
+  de qualquer contratação. Os cards dos planos ficam como
+  referência informativa, sem botão de compra. O texto "Como
+  funciona a renovação" foi reescrito pra documentar o novo
+  caminho (reconsulta → prescrição → aceite → pagamento).
+- **`/checkout/[plano]` documentada como back-office.** Novo
+  JSDoc de topo explicita que a rota é preservada para envio
+  manual de links excepcionais (lead externo, renovação
+  aprovada fora do fluxo), mas não é CTA público em nenhum
+  lugar. Meta `noindex, nofollow` já estava ativa.
+- **Auditoria completa de CTAs públicos.** `grep` no código
+  confirma: nenhum `href="/checkout..."` em componentes,
+  páginas ou layouts públicos. As únicas referências restantes
+  são: docs, comentários explicativos, redirects internos do
+  próprio `CheckoutForm` (pra `/checkout/sucesso`), e o
+  endpoint `/api/checkout`.
+
+**Decisões-chave:**
+
+- **Preservar `/checkout/[plano]` em vez de remover.** A equipe
+  ainda pode precisar enviar link manual em casos pontuais
+  (lead que veio por fora do funil, renovação excepcional
+  aprovada em reunião, migração de paciente antigo). Manter a
+  rota ativa como back-office é mais seguro que deletar +
+  ter que restaurar depois. Meta `noindex` + zero CTA público
+  já garantem que nenhum novo visitante entra por ali.
+- **Renovação via WhatsApp por ora.** Idealmente, `/paciente/renovar`
+  levaria a uma página de agendamento self-service — mas essa
+  página ainda não existe no MVP (consultas são agendadas
+  offline pela equipe). Link direto pro WhatsApp resolve hoje
+  e é substituível facilmente quando construirmos agendamento
+  automatizado.
+- **`/planos` continua existindo mesmo com CTAs desligados.**
+  É útil como material de consulta: a equipe pode enviar o link
+  pra um paciente pré-consulta que quer "ver o que é", ou a
+  médica pode referenciar durante a consulta. Sem CTA de
+  compra + `noindex` + fora do sitemap = zero risco de
+  conversão indevida.
+- **Card informativo no lugar do botão.** Em vez de esconder o
+  preço, mostramos o preço + uma linha explicando que a
+  contratação depende da consulta. Isso mantém transparência
+  (LGPD-friendly de quebra — não esconde informação que o
+  paciente pode precisar pra decidir se quer agendar).
+- **Nenhum teste automatizado nesta onda.** A mudança é 100%
+  estática (copy + remoção de links). Cobertura via `next build`
+  + `tsc` + `lint` + teste manual.
+
+**Arquivos modificados:**
+
+- `src/app/planos/page.tsx` (CTA do `PlanCard` substituído por
+  bloco informativo; hero com CTA de consulta gratuita)
+- `src/app/paciente/(shell)/renovar/page.tsx` (reescrita
+  completa; CTA primário é WhatsApp pra reconsulta)
+- `src/app/checkout/[plano]/page.tsx` (JSDoc de topo
+  documentando papel de back-office)
+- `docs/CHANGELOG.md`, `docs/DECISIONS.md`, `docs/SPRINTS.md`
+
+**Métricas:**
+
+- 296 testes passam (nenhum novo, nenhum quebrado).
+- `npx tsc --noEmit` limpo.
+- `npx next lint` limpo.
+- `npx next build` OK; nenhuma rota removida.
+- `rg "href=['\"]/checkout" src/` → 0 matches.
+
+**Status:** D-044 COMPLETO. O loop paciente → consulta →
+prescrição → aceite → pagamento → fulfillment → confirmação está
+inteiro: UI pública, UI do paciente, UI do admin, webhook e
+notificações. Fluxo antigo permanece como back-office.
+
+**Próximos passos sugeridos (fora desta decisão):**
+
+- Medir taxa de confirmação espontânea de `delivered` pelos
+  pacientes; se <50%, criar cron `system` auto-delivered após
+  N dias sem confirmação (hook na lib já existe).
+- Construir página pública de agendamento de consulta —
+  hoje a equipe agenda offline; quando virar self-service,
+  substituir o link de WhatsApp em `/paciente/renovar`.
+- Adicionar lembretes automatizados de reconsulta X dias
+  antes do fim do ciclo (WhatsApp + notificação no
+  dashboard).
+
+---
+
 ## 2026-04-20 · Área do paciente: card "Meu tratamento" + confirmar recebimento (D-044 · onda 2.F) · IA
 
 **Por quê:** depois do pagamento (2.D), o fulfillment fica `paid`,

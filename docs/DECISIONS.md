@@ -5,6 +5,85 @@
 
 ---
 
+## D-044 · Desligar CTAs públicos do fluxo antigo (onda 2.G · FINAL) · 2026-04-20
+
+**Contexto:** com ondas 2.A–2.F, o fluxo novo está inteiro:
+visitante agenda consulta gratuita → médica avalia e prescreve →
+paciente aceita + paga → Instituto despacha → paciente confirma.
+Qualquer botão público que ainda leve a `/checkout/[slug]`
+contradiz esse pacto sanitário: permitiria compra sem
+consulta médica prévia.
+
+**Decisões:**
+
+1. **Desativar, não deletar.** Preservamos `/checkout/[plano]`,
+   `/api/checkout`, `/checkout/sucesso`, `/checkout/aguardando`
+   como back-office. A equipe pode precisar enviar link manual
+   em casos excepcionais (lead externo, renovação aprovada em
+   reunião, migração de paciente antigo). `noindex, nofollow` +
+   zero CTA público garantem que visitantes espontâneos não
+   entrem por ali.
+
+2. **Card informativo em `/planos`, não remoção.** Os cards
+   perdem o botão "Quero esse plano" e ganham um bloco explicando
+   "a contratação ocorre após a consulta médica gratuita". O
+   preço continua visível — esconder seria pior pra LGPD e pra
+   expectativa do paciente antes de agendar. Único CTA da página
+   é "Agendar consulta gratuita" no hero, apontando pra home.
+
+3. **Renovação passa por reconsulta obrigatória.**
+   `/paciente/renovar` era o ponto onde um paciente existente
+   podia recomprar sem passar por médica. Agora a seção primária
+   é "Agendar reconsulta" com CTA pra WhatsApp da equipe. Isso
+   reflete o fato clínico: dose e plano podem precisar de ajuste
+   conforme a evolução do paciente, tolerância, exames.
+
+4. **WhatsApp como ponte temporária.** Agendamento de consulta
+   não tem UI pública self-service no MVP (é offline pela
+   equipe). Mais honesto linkar pro WhatsApp oficial do
+   Instituto do que construir uma página vazia. Quando o
+   agendamento automatizado existir (backlog futuro), basta
+   trocar o `href`.
+
+5. **Zero teste novo.** A onda é 100% copy + remoção de links.
+   `npx next build` + `tsc` + `lint` + auditoria via `rg
+   "href=\"/checkout"` → 0 matches cobrem o que precisa ser
+   coberto. Adicionar teste de "o CTA da página X NÃO é Y" seria
+   acoplamento frágil sem valor agregado.
+
+6. **Não mexemos nas migrations nem na tabela `plans`.** A
+   estrutura de dados continua; só a exposição pública muda.
+   A view `fulfillments_operational` + payments continuam
+   ligando tudo.
+
+**Consequências:**
+
+- Novo visitante não tem como comprar direto — é canalizado
+  para o fluxo correto (consulta → indicação → aceite → pagamento).
+- Pacientes antigos (se houver) que salvaram links diretos
+  pra `/checkout/[slug]` ainda conseguem completar compra —
+  importante pra compatibilidade durante transição.
+- Equipe ganha ferramenta de back-office que pode usar em
+  casos pontuais sem risco de vazar publicamente.
+- D-044 fecha como projeto: fluxo operacional ponta a ponta
+  está coerente e auditável.
+
+**Aberto/pendente:**
+
+- Construir UI pública de agendamento de consulta (hoje é
+  offline). Quando existir, trocar links de WhatsApp em
+  `/paciente/renovar` por link self-service.
+- Medir taxa real de confirmação espontânea de `delivered`
+  pelos pacientes após 2–4 semanas operando.
+- Lembretes automatizados de reconsulta X dias antes do fim
+  do ciclo (WhatsApp + notificação no dashboard).
+- Se a rota `/checkout/[plano]` não for usada em 3 meses,
+  deletar como próxima decisão (D-045+).
+
+**Referência:** `docs/CHANGELOG.md` 2026-04-20 (onda 2.G).
+
+---
+
 ## D-044 · Paciente confirma recebimento (onda 2.F) · 2026-04-20
 
 **Contexto:** as ondas 2.A–2.E criaram toda a infraestrutura

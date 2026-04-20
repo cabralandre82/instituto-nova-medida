@@ -1,9 +1,22 @@
 /**
- * /paciente/renovar — D-043
+ * /paciente/renovar — D-044 · 2.G
  *
- * Mostra o status do ciclo atual e redireciona o paciente ao
- * checkout do mesmo plano (fluxo já existente em /checkout/[slug]).
- * Sem pagamento recorrente — renovação é manual, 1 clique.
+ * Mostra o status do ciclo atual do paciente e explica o processo
+ * de renovação. No novo modelo (D-044), renovação NÃO é recompra
+ * direta — exige reavaliação médica: a mesma médica olha evolução,
+ * exames, tolerância e decide se mantém, ajusta ou descontinua.
+ *
+ * Por que não deixar "renovar → /checkout/[slug]":
+ *   - Violaria o pacto sanitário do novo fluxo (consulta → prescrição
+ *     → aceite → pagamento).
+ *   - O preço exibido pode mudar conforme a médica ajuste a dose ou
+ *     troque de plano.
+ *   - Tirzepatida/semaglutida não são produtos de catálogo; são
+ *     tratamentos com acompanhamento obrigatório.
+ *
+ * O CTA principal é "Agendar reconsulta" (contato via WhatsApp/equipe
+ * por ora; no futuro vira página de agendamento). Os cards dos planos
+ * continuam visíveis como referência informativa, sem botão de compra.
  */
 
 import Link from "next/link";
@@ -21,12 +34,16 @@ function brl(cents: number): string {
   });
 }
 
+const WHATSAPP_NUMBER = "5521998851851"; // mesmo da equipe operacional
+const WHATSAPP_MSG = encodeURIComponent(
+  "Oi! Quero agendar a reconsulta pra renovar meu tratamento."
+);
+
 export default async function RenovarPage() {
   const { customerId } = await requirePatient();
   const supabase = getSupabaseAdmin();
   const renewal = await getRenewalInfo(supabase, customerId);
 
-  // Busca outros planos ativos para oferecer alternativa
   const { data: plansData } = await supabase
     .from("plans")
     .select("slug, name, description, medication, cycle_days, price_pix_cents, price_cents, highlight")
@@ -46,9 +63,9 @@ export default async function RenovarPage() {
           Continue seu cuidado
         </h1>
         <p className="mt-2 text-ink-500 max-w-2xl">
-          A renovação é manual, quando você quiser. Cada ciclo novo
-          reinicia o acompanhamento com a médica e uma nova dose do
-          medicamento.
+          A renovação começa por uma <strong>reconsulta gratuita</strong> com
+          a mesma médica. Ela avalia a evolução até aqui e define se o plano
+          continua igual, se ajusta a dose ou se troca de caminho.
         </p>
       </header>
 
@@ -104,10 +121,44 @@ export default async function RenovarPage() {
         </section>
       )}
 
-      <section>
-        <h2 className="font-serif text-[1.3rem] text-ink-800 mb-4">
-          {active ? "Renovar com o mesmo plano" : "Escolher um plano"}
+      <section className="mb-10 rounded-2xl border border-sage-200 bg-sage-50 p-6 sm:p-7">
+        <h2 className="font-serif text-[1.3rem] text-ink-800 mb-2">
+          Agendar reconsulta
         </h2>
+        <p className="text-sm text-ink-600 max-w-2xl">
+          A reconsulta é online, gratuita e dura cerca de 30 minutos.
+          {active
+            ? " A equipe organiza um horário com a mesma médica que te acompanha."
+            : " Fale com a equipe pra escolher a primeira consulta."}
+        </p>
+        <div className="mt-5 flex flex-wrap gap-3">
+          <a
+            href={`https://wa.me/${WHATSAPP_NUMBER}?text=${WHATSAPP_MSG}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center rounded-xl bg-ink-900 hover:bg-ink-800 text-white text-sm font-semibold px-5 py-2.5 transition-colors shadow-sm"
+          >
+            Falar com a equipe no WhatsApp →
+          </a>
+          <Link
+            href="/paciente/consultas"
+            className="inline-flex items-center rounded-xl border border-ink-200 bg-white hover:bg-cream-50 text-ink-700 text-sm font-medium px-4 py-2.5 transition-colors"
+          >
+            Ver minhas consultas
+          </Link>
+        </div>
+      </section>
+
+      <section>
+        <h2 className="font-serif text-[1.3rem] text-ink-800 mb-2">
+          Para referência: planos disponíveis
+        </h2>
+        <p className="text-sm text-ink-500 mb-5 max-w-2xl">
+          A contratação do plano novo é feita <strong>depois da
+          reconsulta</strong>, a partir da indicação da médica. Você
+          recebe um link pessoal para revisar a prescrição, aceitar e
+          pagar — tudo aqui na sua área.
+        </p>
 
         {plans.length === 0 ? (
           <p className="text-sm text-ink-500">
@@ -132,7 +183,7 @@ export default async function RenovarPage() {
                     </h3>
                     {isRecommended && (
                       <span className="text-[0.7rem] uppercase tracking-wide text-sage-700 font-semibold">
-                        Seu plano
+                        Seu plano atual
                       </span>
                     )}
                   </div>
@@ -153,16 +204,6 @@ export default async function RenovarPage() {
                   <p className="text-xs text-ink-500 mt-1">
                     ou {brl(p.price_cents)} em cartão
                   </p>
-                  <Link
-                    href={`/checkout/${p.slug}`}
-                    className={`mt-5 inline-flex items-center w-full justify-center rounded-xl font-medium px-5 py-3 transition-colors ${
-                      isRecommended
-                        ? "bg-ink-800 hover:bg-ink-900 text-white"
-                        : "bg-white border border-ink-200 hover:border-ink-400 text-ink-800"
-                    }`}
-                  >
-                    {isRecommended ? "Renovar →" : "Escolher este plano"}
-                  </Link>
                 </div>
               );
             })}
@@ -175,14 +216,18 @@ export default async function RenovarPage() {
           Como funciona a renovação
         </h3>
         <ol className="space-y-1.5 list-decimal pl-5">
-          <li>Você confirma o plano e paga (PIX ou cartão).</li>
+          <li>Você agenda a reconsulta gratuita com a equipe.</li>
           <li>
-            Assim que o pagamento é confirmado, a equipe envia as próximas
-            datas de consulta pelo WhatsApp.
+            A médica reavalia sua evolução, exames e tolerância, e
+            decide se mantém, ajusta ou troca de plano.
           </li>
           <li>
-            O ciclo novo começa na data do pagamento e dura{" "}
-            {active?.cycleDays ?? 90} dias.
+            Se houver indicação, você recebe na sua área um link pra
+            revisar a prescrição, aceitar e pagar.
+          </li>
+          <li>
+            O ciclo novo começa a contar a partir do pagamento
+            confirmado e dura {active?.cycleDays ?? 90} dias.
           </li>
         </ol>
       </section>

@@ -108,14 +108,36 @@ export default async function PlanosPage() {
             O cuidado certo, no ritmo que cabe em você.
           </h1>
           <p className="mt-6 text-[1.1rem] sm:text-[1.2rem] leading-relaxed text-ink-500 max-w-2xl mx-auto">
-            Cada plano inclui avaliação médica, medicação manipulada quando
-            indicada, entrega refrigerada na sua casa e acompanhamento
-            contínuo pelo WhatsApp com a mesma médica.
+            Esta página é informativa. A contratação de qualquer plano
+            acontece <strong className="text-ink-700">somente após a
+            consulta gratuita</strong>, quando a médica avalia o seu caso
+            e, se for o caso, prescreve o tratamento mais adequado.
           </p>
           <p className="mt-3 text-[0.95rem] text-ink-400">
-            Ciclo de tratamento de 90 dias · cancelamento sem multa em 7 dias
-            (CDC) · reembolso integral se a médica não indicar tratamento.
+            Ciclo de tratamento de 90 dias · sem assinatura recorrente ·
+            reembolso integral se a médica não indicar tratamento.
           </p>
+
+          <div className="mt-8">
+            <Link
+              href="/"
+              className="inline-flex items-center gap-2 rounded-full bg-ink-900 hover:bg-ink-800 text-cream-100 px-6 py-3.5 text-[0.95rem] font-medium transition-colors"
+            >
+              Agendar minha consulta gratuita
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <path
+                  d="M3 7H11M11 7L7 3M11 7L7 11"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </Link>
+            <p className="mt-3 text-[0.85rem] text-ink-400">
+              A consulta é online, gratuita, e sem compromisso de compra.
+            </p>
+          </div>
         </section>
 
         {/* Cards de planos ─────────────────────────────────────────────── */}
@@ -387,27 +409,17 @@ function PlanCard({ plan }: { plan: Plan }) {
         ))}
       </ul>
 
-      <Link
-        href={`/checkout/${plan.slug}`}
+      <div
         className={
-          "mt-auto inline-flex items-center justify-center gap-2 rounded-full px-6 py-3.5 text-[0.95rem] font-medium transition-colors " +
+          "mt-auto rounded-2xl px-5 py-4 text-[0.88rem] leading-[1.5] " +
           (isHighlight
-            ? "bg-terracotta-500 text-cream-100 hover:bg-terracotta-600"
-            : "bg-sage-700 text-cream-100 hover:bg-sage-800")
+            ? "bg-cream-100/10 text-cream-100/90 border border-cream-100/15"
+            : "bg-ink-50 text-ink-600 border border-ink-100")
         }
-        aria-label={`Quero o plano ${plan.name}`}
       >
-        Quero esse plano
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-          <path
-            d="M3 7H11M11 7L7 3M11 7L7 11"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      </Link>
+        A contratação deste plano ocorre somente após a consulta médica
+        gratuita e indicação clínica.
+      </div>
     </article>
   );
 }
