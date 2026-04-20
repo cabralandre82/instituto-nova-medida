@@ -130,6 +130,12 @@ Foco: subir um fluxo end-to-end "paciente paga → agenda → médica
 atende → recebe earning → admin paga via PIX no fim do mês". Sem fila
 on-demand ainda, sem Memed ainda — esses entram na 4.2.
 
+**Status (2026-04-20):** 90% entregue. Bloqueio conhecido: registro
+do webhook no Daily via `POST /v1/webhooks` falha por bug HTTP/2 do
+superagent antigo do Daily (D-029). Código está deployed e funcional
+— telemetria de consulta fica parada até migrarmos atrás do
+Cloudflare com `institutonovamedida.com.br`.
+
 **Entregáveis:**
 
 - [ ] **Schema multi-médico:**
@@ -242,7 +248,9 @@ da "consulta agora".
 3. Paciente que pagou (Sprint 3) entra em `/agendar`, escolhe médica
    + horário, é confirmado por WhatsApp.
 4. 15min antes da consulta, paciente recebe link da sala via WhatsApp.
-5. Ambos entram, conversam, médica encerra → webhook Daily dispara.
+5. Ambos entram, conversam, médica encerra → webhook Daily dispara
+   (⚠️ bloqueado enquanto D-029 estiver aberto — só vai passar após
+   migração Cloudflare ou Daily atualizar superagent).
 6. Earning aparece em `/medico/financeiro` com status `pending`.
 7. Após D+7 (PIX), earning vira `available`.
 8. No dia 1 do mês seguinte, payout draft aparece em `/admin/payouts`.

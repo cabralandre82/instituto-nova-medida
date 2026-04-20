@@ -40,9 +40,12 @@ DAILY_API_KEY=
 # Ex: 'instituto-nova-medida' → salas em
 # https://instituto-nova-medida.daily.co/{room}.
 DAILY_DOMAIN=
-# Secret estático que o Daily envia em x-daily-webhook-secret nos
-# webhooks. Configurado em dashboard.daily.co → Developers → Webhooks.
-# Nós escolhemos o valor.
+# Secret HMAC pra validar assinatura dos webhooks do Daily.
+# IMPORTANTE: a API do Daily (POST /v1/webhooks) exige que seja
+# uma string **base64 válida** (ex: 32 bytes random). Secrets em
+# formato livre como `whsec_...` são rejeitados com
+# `"hmac" must be a valid base64 string`.
+# Gerar: `python3 -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"`
 DAILY_WEBHOOK_SECRET=
 # Provider de vídeo ativo. Default 'daily'. Trocar pra 'jitsi' quando
 # migrarmos (D-021). Sem valor = 'daily'.
@@ -51,10 +54,12 @@ DAILY_WEBHOOK_SECRET=
 # === WhatsApp Cloud API (Meta) ===
 META_APP_ID=
 META_APP_SECRET=
+META_CLIENT_TOKEN=                  # opcional; usado pelo Meta Pixel client-side
 WHATSAPP_BUSINESS_ACCOUNT_ID=
 WHATSAPP_PHONE_NUMBER_ID=
 WHATSAPP_ACCESS_TOKEN=
 WHATSAPP_WEBHOOK_VERIFY_TOKEN=      # nós escolhemos, configurar no painel da Meta
+WHATSAPP_PHONE_DISPLAY=             # só exibição (rodapé/landing), não usado em APIs
 
 # === Analytics ===
 NEXT_PUBLIC_META_PIXEL_ID=
@@ -65,8 +70,20 @@ NEXT_PUBLIC_GTM_ID=
 RESEND_API_KEY=
 EMAIL_FROM="Instituto Nova Medida <contato@institutonovamedida.com.br>"
 
-# === Domínio / Auth ===
+# === Domínio / Auth / Links públicos ===
+# URL canônica do site (marketing + SEO). Ficará
+# https://institutonovamedida.com.br após migração do DNS.
 NEXT_PUBLIC_SITE_URL=https://institutonovamedida.com.br
+# URL usada pra montar links públicos de consulta (ex: /consulta/[id]).
+# Em dev pode ser http://localhost:3000, em prod fica igual
+# NEXT_PUBLIC_SITE_URL após a virada. Hoje aponta pra
+# https://instituto-nova-medida.vercel.app.
+NEXT_PUBLIC_BASE_URL=https://instituto-nova-medida.vercel.app
+# HMAC secret usado pelos tokens de acesso público do paciente à
+# consulta (/consulta/[id]?t=...). Rotacionar invalida todos os
+# links já enviados — aceitável porque paciente pode recuperar via
+# WhatsApp. Gerar: `openssl rand -base64 32`.
+PATIENT_TOKEN_SECRET=
 ```
 
 ## Onde criar cada conta (passo a passo no Sprint 2)
@@ -91,3 +108,36 @@ NEXT_PUBLIC_SITE_URL=https://institutonovamedida.com.br
 - **Ambiente sandbox** (Asaas, Memed) para todo desenvolvimento; só usar
   produção a partir do beta fechado
 - **Webhook secrets** sempre validados antes de processar payload
+
+## Estado atual no Vercel (production + preview + development)
+
+Snapshot em **2026-04-20** após setup ops via CLI + REST API:
+
+| Nome | Adicionada em | Observação |
+|---|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` / `_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_PROJECT_REF` | Sprint 2 | Supabase |
+| `ASAAS_API_KEY`, `ASAAS_ENV`, `ASAAS_WALLET_ID`, `ASAAS_WEBHOOK_TOKEN` | Sprint 3 | Sandbox |
+| `META_APP_ID`, `META_APP_SECRET`, `META_CLIENT_TOKEN` | 2026-04-20 | `META_CLIENT_TOKEN` faltava |
+| `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_BUSINESS_ACCOUNT_ID`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_WEBHOOK_VERIFY_TOKEN`, `WHATSAPP_PHONE_DISPLAY` | Sprint 2/4 | `PHONE_DISPLAY` faltava |
+| `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_BASE_URL` | 2026-04-20 | `BASE_URL` faltava |
+| `DAILY_API_KEY`, `DAILY_DOMAIN`, `DAILY_WEBHOOK_SECRET` | 2026-04-20 | Faltavam todas |
+| `PATIENT_TOKEN_SECRET` | 2026-04-20 | Faltava |
+
+**Faltam ainda** (para sprints futuras): `MEMED_API_KEY`, `MEMED_API_SECRET`,
+`MEMED_ENV`, `RESEND_API_KEY`, `EMAIL_FROM`, `NEXT_PUBLIC_META_PIXEL_ID`,
+`NEXT_PUBLIC_GA4_ID`, `NEXT_PUBLIC_GTM_ID`.
+
+## Gotchas documentados
+
+- **Vercel CLI `env add name production preview development`** só insere
+  em `production` e `development` (ignora `preview` silenciosamente).
+  Usar `POST /v10/projects/{id}/env` com `target: ["preview"]` e
+  `upsert=true` para o terceiro ambiente.
+- **Daily `DAILY_WEBHOOK_SECRET`** precisa ser **base64 válido**
+  (ex: `base64(os.urandom(32))` → 44 chars com `=`). Secrets em
+  formato livre (`whsec_...`) são rejeitados pela API com
+  `"hmac" must be a valid base64 string`.
+- **Daily `X-Webhook-Timestamp`** vem em **milissegundos**, não
+  segundos. Normalizar antes da janela anti-replay.
+- **Daily `POST /v1/webhooks` + Vercel HTTP/2** → erro
+  `"recvd undefined"` por bug do superagent 3.8.3. Ver D-029.

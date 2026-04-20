@@ -195,11 +195,31 @@ eventos_lgpd (
 
 | Serviço | Uso | Auth | Webhook |
 |---|---|---|---|
-| **Asaas** | Cobrança, PIX, cartão, split | API key + webhook secret | Sim (status pagamento) |
+| **Asaas** | Cobrança, PIX, cartão, split | API key + webhook secret | Sim (status pagamento) — `/api/asaas/webhook` |
 | **Memed** | Prescrição com ICP-Brasil | OAuth + API token | Sim (status receita) |
-| **Daily.co** | Vídeo teleconsulta | API key | Sim (eventos sala) |
+| **Daily.co** | Vídeo teleconsulta | API key + HMAC secret | Sim — **bloqueado até migração Cloudflare (D-029)**; código pronto em `/api/daily/webhook` (App Router) e `/api/daily-webhook` (Pages Router) |
 | **WhatsApp Cloud API** | Mensagens automáticas e suporte | App secret + access token | Sim (mensagens recebidas) |
 | **Meta Ads / Google Ads** | Conversões | Pixel + Conversion API | Não |
+
+### Webhooks que recebemos — detalhes operacionais
+
+**Por que dois handlers para o Daily?**
+
+- `/api/daily/webhook` (App Router, Node runtime): handler "canônico".
+  Adiciona `Vary: RSC, Next-Router-State-Tree, Next-Router-Prefetch`
+  automaticamente por design do Next 14. Funciona pra qualquer
+  cliente HTTP moderno.
+- `/api/daily-webhook` (Pages Router, Node runtime): handler
+  "sem-Vary-RSC", criado pra contornar o bug do `node-superagent/3.8.3`
+  que o Daily usa no check de verificação do `POST /v1/webhooks`.
+  Mesmo handler lógico (HMAC idêntico, idempotência idêntica).
+  Não resolveu o bug (é em nível HTTP/2, não de header) mas fica
+  como segunda porta pra testes manuais e pro futuro (Cloudflare
+  na frente servindo HTTP/1.1 ao origin Daily).
+
+Ambos escrevem em `daily_events` (raw + idempotência via
+`unique(event_id, event_type)`) e atualizam `appointments`.
+Trocar o URL no Daily não quebra nada — o segundo handler é drop-in.
 
 ## Segurança
 

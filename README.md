@@ -78,11 +78,16 @@ vinculado à compra via `localStorage`.
   `participant.joined`, atualização de `started_at`/`ended_at`/
   `duration_seconds`/`status` (`in_progress` → `completed`/
   `no_show_patient`/`no_show_doctor`/`cancelled_by_admin`).
+  ✅ **Ops Vercel + Daily** (2026-04-20): 7 envs adicionadas em
+  production/preview/development (Daily keys, `PATIENT_TOKEN_SECRET`,
+  `NEXT_PUBLIC_BASE_URL`, `META_CLIENT_TOKEN`, `WHATSAPP_PHONE_DISPLAY`),
+  `DAILY_WEBHOOK_SECRET` trocado pra base64 válido, handler Pages
+  Router `/api/daily-webhook` criado como fallback. **Registro do
+  webhook no Daily bloqueado por bug HTTP/2 do superagent — D-029**.
 
 **Restante da Sprint 4.1 (3/3):** cron de expiração de
-`pending_payment`, helpers WhatsApp pros 7 templates, env vars Daily
-+ `PATIENT_TOKEN_SECRET` no Vercel, política de estorno automático
-em no-show (D-029?).
+`pending_payment`, helpers WhatsApp pros 7 templates, política de
+estorno automático em no-show.
 
 Veja [`docs/SPRINTS.md`](./docs/SPRINTS.md) para o roadmap completo.
 
@@ -167,7 +172,7 @@ instituto-nova-medida/
 │   │       ├── wa/webhook/route.ts
 │   │       ├── auth/                         # magic-link / callback / signout
 │   │       ├── agendar/reserve/route.ts      # cria customer + reserva slot + cobra
-│   │       ├── daily/webhook/route.ts        # meeting.* → status do appointment
+│   │       ├── daily/webhook/route.ts        # meeting.* → status do appointment (App Router)
 │   │       ├── admin/                        # APIs do painel admin
 │   │       │   ├── doctors/[id]/(compensation|payment-method|availability)
 │   │       │   └── payouts/[id]/(approve|pay|confirm|cancel|proof)
@@ -177,6 +182,8 @@ instituto-nova-medida/
 │   │       │   └── appointments/[id]/join (POST → cria sala Daily)
 │   │       └── paciente/                     # APIs públicas (token HMAC)
 │   │           └── appointments/[id]/join (POST → URL Daily, janela 30 min)
+│   ├── pages/api/
+│   │   └── daily-webhook.ts          # Pages Router handler (fallback D-029)
 │   ├── components/                   # 16+ componentes
 │   └── lib/
 │       ├── asaas.ts                  # cliente Asaas (sandbox/prod)
