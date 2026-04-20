@@ -13,6 +13,7 @@ import {
   RELIABILITY_SOFT_WARN,
   RELIABILITY_HARD_BLOCK,
 } from "@/lib/reliability";
+import { getReconciliationCounts } from "@/lib/reconciliation";
 
 export const dynamic = "force-dynamic";
 
@@ -29,6 +30,8 @@ type DashboardData = {
   reconciledLast24hBySource: Record<string, number>;
   reliabilityPaused: number;
   reliabilitySoftWarn: number;
+  reconciliationCritical: number;
+  reconciliationWarning: number;
 };
 
 async function loadDashboard(): Promise<DashboardData> {
@@ -59,6 +62,7 @@ async function loadDashboard(): Promise<DashboardData> {
     reconcileStuck,
     reconciledRecent,
     reliabilityOverview,
+    reconciliation,
   ] = await Promise.all([
     supabase
       .from("doctors")
@@ -108,6 +112,7 @@ async function loadDashboard(): Promise<DashboardData> {
       .gte("reconciled_at", last24h.toISOString())
       .not("reconciled_by_source", "is", null),
     listDoctorReliabilityOverview(),
+    getReconciliationCounts(),
   ]);
 
   const sumCents = (rows: { amount_cents: number }[] | null) =>
@@ -139,6 +144,8 @@ async function loadDashboard(): Promise<DashboardData> {
     reliabilitySoftWarn: reliabilityOverview.filter(
       (r) => !r.isPaused && r.isInSoftWarn
     ).length,
+    reconciliationCritical: reconciliation.totalCritical,
+    reconciliationWarning: reconciliation.totalWarning,
   };
 }
 
@@ -379,13 +386,52 @@ export default async function AdminDashboard() {
                 </span>
               </li>
             )}
+            {d.reconciliationCritical > 0 && (
+              <li className="flex items-start gap-3">
+                <span className="mt-1 h-2 w-2 rounded-full bg-terracotta-500 flex-shrink-0" />
+                <span>
+                  <strong className="text-ink-800">
+                    {d.reconciliationCritical}
+                  </strong>{" "}
+                  divergência{d.reconciliationCritical === 1 ? "" : "s"}{" "}
+                  crítica{d.reconciliationCritical === 1 ? "" : "s"} de
+                  conciliação financeira.{" "}
+                  <Link
+                    href="/admin/financeiro"
+                    className="text-sage-700 hover:underline"
+                  >
+                    Investigar
+                  </Link>
+                  .
+                </span>
+              </li>
+            )}
+            {d.reconciliationWarning > 0 && (
+              <li className="flex items-start gap-3">
+                <span className="mt-1 h-2 w-2 rounded-full bg-terracotta-300 flex-shrink-0" />
+                <span>
+                  {d.reconciliationWarning} warning
+                  {d.reconciliationWarning === 1 ? "" : "s"} de conciliação
+                  (ganhos/refunds parados).{" "}
+                  <Link
+                    href="/admin/financeiro"
+                    className="text-sage-700 hover:underline"
+                  >
+                    Revisar
+                  </Link>
+                  .
+                </span>
+              </li>
+            )}
             {d.doctorsActive > 0 &&
               d.payoutsDraft.count === 0 &&
               d.refundsPending === 0 &&
               d.notificationsFailed === 0 &&
               d.reconcileStuck === 0 &&
               d.reliabilityPaused === 0 &&
-              d.reliabilitySoftWarn === 0 && (
+              d.reliabilitySoftWarn === 0 &&
+              d.reconciliationCritical === 0 &&
+              d.reconciliationWarning === 0 && (
                 <li className="flex items-start gap-3">
                   <span className="mt-1 h-2 w-2 rounded-full bg-sage-500 flex-shrink-0" />
                   <span>Tudo em dia.</span>

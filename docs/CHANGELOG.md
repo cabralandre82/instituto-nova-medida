@@ -6,6 +6,71 @@
 
 ---
 
+## 2026-04-20 · Conciliação financeira read-only (D-037) · IA
+
+**Por quê:** payments/earnings/payouts têm ciclos de vida
+independentes com handlers diferentes (webhook Asaas, cron, admin).
+Mesmo com idempotência em cada ponto, há modos de falha que deixam
+os três dessincronizados (earning que não foi criada, clawback que
+falhou silencioso, payout pago mas earnings ainda `in_payout`, drift
+de valores após edição manual). Antes de D-037 a única forma de
+descobrir era a médica reclamar ou o admin desconfiar do saldo.
+
+**Entregáveis:**
+
+- **`src/lib/reconciliation.ts`** (novo): função `runReconciliation()`
+  que roda 6 checks em paralelo, agrega tudo em um `ReconciliationReport`
+  com discrepâncias tipadas (kind, severity, detalhes, hint de ação).
+  Também exporta `getReconciliationCounts()` pra chamadas leves no
+  dashboard global. Hard limit de 100 itens por check com flag
+  `truncated` na UI.
+
+- **Checks críticos:**
+  - `consultation_without_earning` — appointment completed há >1h
+    sem earning type='consultation'
+  - `no_show_doctor_without_clawback` — no-show com policy aplicada
+    + payment_id, sem earning type='refund_clawback'
+  - `payout_paid_earnings_not_paid` — payout paid/confirmed com
+    earnings em status != 'paid'
+  - `payout_amount_drift` — soma earnings.amount_cents != payout.amount_cents
+    (ou contagem em drift)
+
+- **Checks warning:**
+  - `earning_available_stale` — earning `available` há >45d sem payout
+  - `refund_required_stale` — refund_required=true há >7d sem processar
+
+- **`/admin/financeiro/page.tsx`** (novo): dashboard de conciliação
+  que chama `runReconciliation()` no request. 4 cards de resumo
+  (críticas, warnings, checks rodados, rodado em). Seções separadas
+  por severidade e agrupadas por kind. Cada item mostra detalhes
+  estruturados (com formatação inteligente pra valores em reais e
+  timestamps) + hint de ação. Estado "nada pra reconciliar" quando
+  tudo bate.
+
+- **Dashboard global (`/admin`)**: 2 alertas novos em "Próximos
+  passos" (N críticas → link vermelho; N warnings → link neutro).
+  Condição "Tudo em dia" incorpora os dois contadores. Chama a
+  mesma lib pra garantir consistência.
+
+**Operação:**
+
+- Zero mutations. Toda correção é manual via SQL (hint dá a sugestão).
+  Razão: auto-fix em finanças é risco assimétrico.
+- Sem cron automático nesta versão. Admin roda on-demand — recomendação
+  toda sexta antes de fechar o mês.
+- 6 queries rápidas por request; todas passam por índices existentes.
+
+**Pendente (Sprint 5+):**
+
+- Alerta automático (WhatsApp/email) quando `totalCritical > 0`.
+- Ações "1 clique" pros casos triviais (ex: propagar paid_at nas
+  earnings do payout confirmado).
+- Conciliação bancária (extrato PIX vs payouts pagos) — precisa
+  Open Finance ou parser OFX.
+- Export CSV do relatório pra contador.
+
+---
+
 ## 2026-04-20 · Regras de confiabilidade da médica (D-036) · IA
 
 **Por quê:** até agora `doctors.reliability_incidents` era só um

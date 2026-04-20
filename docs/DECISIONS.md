@@ -5,6 +5,138 @@
 
 ---
 
+## D-037 · Conciliação financeira read-only (on-demand) · 2026-04-20
+
+**Contexto:** D-022 (controle financeiro interno) instituiu três
+tabelas que movimentam dinheiro — `payments`, `doctor_earnings`,
+`doctor_payouts` — com ciclos de vida separados: payment tem status
+controlado pelo Asaas (via webhook), earning tem ciclo
+pending→available→in_payout→paid, payout tem draft→approved→pix_sent→
+confirmed. Cada transição é controlada por um handler diferente
+(webhook Asaas, cron de availability, admin aprovando payout, etc).
+
+Mesmo com idempotência em cada handler, existem modos de falha onde
+os três podem sair de sincronia:
+
+1. Webhook Asaas `PAYMENT_RECEIVED` registra no payments mas o
+   handler falha ao criar earning (erro silencioso no
+   `handleEarningsLifecycle`).
+2. `applyNoShowPolicy` chama `createClawback` que retorna erro —
+   policy segue (por design, pra não travar o fluxo) mas o clawback
+   nunca é criado.
+3. Admin aprova payout, PIX é enviado, admin esquece de clicar
+   `confirm` — earnings ficam `in_payout` indefinidamente mesmo com
+   dinheiro já na conta da médica.
+4. Earning é adicionada manualmente via SQL depois do payout gerado,
+   e `amount_cents` do payout não é atualizado — drift.
+5. Refund processado no painel Asaas direto (D-034 webhook dedupe
+   cobre, mas se webhook falhar, fica dessincronizado).
+
+Sem ferramenta pra detectar isso, o admin só descobre quando a médica
+reclama ("não recebi X consulta") ou quando o saldo disponível no
+`/admin/payouts` parece alto demais. Ambos já são sintomas tardios.
+
+**Alternativas consideradas:**
+
+- **Triggers SQL que bloqueiam inserções inconsistentes.** Rejeitado:
+  o custo de rigidez é maior que o benefício. Cada operação válida
+  teria que passar por checks custosos; e quando algo falhasse, o
+  erro ficaria em log do Postgres em vez de UI pro admin.
+
+- **Cron periódico que aplica correções automáticas.** Rejeitado pra
+  primeira versão: conciliação financeira é exatamente o tipo de
+  coisa em que correção automática pode piorar o problema (pagar duas
+  vezes, deletar earning legítima). Decidimos: **detectar
+  automaticamente, corrigir manualmente**.
+
+- **Integração com conciliação bancária (extrato PIX).** Rejeitado
+  pra essa versão: exige conexão com Open Finance ou parser de OFX;
+  escopo muito maior. A conciliação interna já resolve 90% dos casos
+  (dinheiro que saiu do sistema mas não foi registrado corretamente);
+  bancária cobriria "PIX não chegou ao destinatário" — cobrir depois.
+
+- **Persistir o relatório em tabela pra histórico.** Rejeitado por
+  ora: admin roda on-demand, foto fica no navegador. Se precisar
+  auditar "isso já existia semana passada?", dá pra re-rodar com
+  query de data. Adicionar persistência quando surgir caso de uso
+  real (ex: relatório mensal exportável).
+
+**Decisão:**
+
+1. **Lib `src/lib/reconciliation.ts` com 6 checks read-only.**
+   Cada check retorna array de `Discrepancy` tipada com severidade,
+   ids, valores, idade e hint de ação.
+
+   Críticos (ação imediata):
+   - `consultation_without_earning`: appointment completed há >1h
+     sem earning `type='consultation'`.
+   - `no_show_doctor_without_clawback`: policy aplicada + payment_id
+     + status de no-show, sem earning `type='refund_clawback'`.
+   - `payout_paid_earnings_not_paid`: payout `paid`/`confirmed` com
+     earnings ainda em status != 'paid'.
+   - `payout_amount_drift`: soma de earnings.amount_cents !=
+     payout.amount_cents OR contagem != earnings_count.
+
+   Warnings (suspeitos mas podem ser legítimos):
+   - `earning_available_stale`: earning `available` há >45d sem
+     payout (cron mensal pode estar off).
+   - `refund_required_stale`: `refund_required=true` há >7d sem
+     processar (paciente esperando).
+
+2. **Hard limit de 100 itens por check.** Se estourar, marca como
+   truncado na UI — sinaliza que operação está fora de controle, pede
+   atenção, mas não trava o render. 100 é generoso o bastante pra
+   cobrir cenários reais de meses ruins.
+
+3. **Página `/admin/financeiro` chama `runReconciliation()` no
+   request.** Server Component, sem cache. Cada visita é foto nova.
+   Custo: ~6 queries rápidas no Supabase (todas com índices
+   existentes). Aceitável pra UI de admin.
+
+4. **Dashboard global (`/admin`) chama `getReconciliationCounts()`**
+   no load pra mostrar alertas em "Próximos passos". Mesma lib, só
+   descarta os detalhes. Evita duplicação de lógica e garante que
+   números batem entre as duas páginas.
+
+5. **Zero mutations.** Toda correção é manual via SQL. O hint na
+   UI dá o comando sugerido; admin decide caso-a-caso. Razão: auto-fix
+   de finanças é risco assimétrico — errado, paga duas vezes; certo,
+   só economiza 30s de SQL.
+
+6. **UI agrupa por severidade → por kind.** Críticas primeiro
+   (vermelho), warnings depois (neutro). Cada card de grupo tem
+   descrição da categoria + lista de casos com detalhes
+   estruturados + hint de ação.
+
+**Implementação:** 1 lib nova (`reconciliation.ts`), 1 página nova
+(`/admin/financeiro/page.tsx` — item do AdminNav que estava apontando
+pra pasta vazia), 1 modificação no dashboard global.
+
+**Consequências imediatas:**
+
+- Admin pode auditar sanidade financeira on-demand. Recomendação
+  operacional: toda sexta antes de fechar o mês + sempre que o
+  dashboard principal mostrar "N críticas".
+- Bugs silenciosos em handlers de earning/payout passam a aparecer
+  com contexto e sugestão de ação — tempo de detecção vai de "quando
+  médica reclama" pra "no próximo visit do admin".
+- Zero risco de corromper dados — ferramenta puramente
+  diagnóstica.
+
+**Pendente (Sprint 5+):**
+
+- Cron diário que envia alerta (email/WhatsApp admin) quando
+  `totalCritical > 0`. Hoje depende de admin abrir a UI.
+- Ações "corrigir com 1 clique" pros casos triviais (ex: payout com
+  earnings ainda `in_payout` → marcar como paid com paid_at do
+  payout). Só fazer depois que a operação tiver confiança no report.
+- Conciliação bancária (extrato PIX vs `doctor_payouts.paid_at`) —
+  exige Open Finance ou parser OFX. Escopo de Sprint futura.
+- Export do relatório em CSV pra contador — trivial quando
+  precisar.
+
+---
+
 ## D-036 · Regras de confiabilidade da médica (auto-pause) · 2026-04-20
 
 **Contexto:** D-032 instituiu o contador `doctors.reliability_incidents`

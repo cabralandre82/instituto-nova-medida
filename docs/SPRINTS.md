@@ -130,7 +130,7 @@ Foco: subir um fluxo end-to-end "paciente paga → agenda → médica
 atende → recebe earning → admin paga via PIX no fim do mês". Sem fila
 on-demand ainda, sem Memed ainda — esses entram na 4.2.
 
-**Status (2026-04-20):** 97% entregue. Bloqueio D-029 (webhook Daily
+**Status (2026-04-20):** 98% entregue. Bloqueio D-029 (webhook Daily
 falha no registro por bug HTTP/2 do superagent deles) **mitigado** em
 D-035: cron `/api/internal/cron/daily-reconcile` rodando a cada 5 min
 fecha o ciclo dos appointments via polling da Daily REST API. Webhook
@@ -138,6 +138,9 @@ continuará no código — quando Daily consertar ou migrarmos pra
 Cloudflare, passa a rodar em paralelo como caminho primário.
 D-036 (governança da médica) entregue: eventos de confiabilidade
 granulares + auto-pause em 3 eventos/30d + painel admin completo.
+D-037 (conciliação financeira) entregue: 6 checks on-demand em
+/admin/financeiro detectando divergências entre payments, earnings
+e payouts, com severidade e hint de ação.
 
 **Entregáveis:**
 
@@ -262,6 +265,19 @@ granulares + auto-pause em 3 eventos/30d + painel admin completo.
       eventos recentes. AdminNav ganha item "Confiabilidade".
       Dashboard admin ganha dois alertas novos (N pausadas, N em
       alerta) em "Próximos passos".
+- [x] **Conciliação financeira (D-037)** — fecha o arco de auditoria
+      de payments/earnings/payouts. Novo `src/lib/reconciliation.ts`
+      com 6 checks read-only (4 críticos: consultation_without_earning,
+      no_show_doctor_without_clawback, payout_paid_earnings_not_paid,
+      payout_amount_drift; 2 warnings: earning_available_stale,
+      refund_required_stale). Cada discrepância vem tipada com
+      severidade, IDs relacionados, valores, idade e hint de ação.
+      Hard limit de 100 itens/check sinaliza truncamento na UI.
+      Nova página `/admin/financeiro` com cards de resumo e seções
+      agrupadas por severidade/kind. Dashboard admin ganha dois
+      alertas novos (N críticas, N warnings) em "Próximos passos".
+      Zero mutations — admin corrige manual via SQL (hint sugere).
+      Recomendação operacional: rodar toda sexta antes de fechar mês.
 - [ ] **Auth:** roles `doctor` e `admin` no Supabase, middleware
       protegendo `/medico/*` e `/admin/*`
 - [ ] **API routes:**
