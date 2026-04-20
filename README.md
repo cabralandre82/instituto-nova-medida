@@ -38,7 +38,7 @@ Validado E2E na produção. Landing conectada (Header, Hero, Cost e
 Success modal apontam para `/planos`); lead capturado pelo quiz é
 vinculado à compra via `localStorage`.
 
-**Sprint 4.1** 🟡 — **Em andamento** (entregas 1/3 e 2/3 concluídas).
+**Sprint 4.1** 🟡 — **Em andamento** (1/3, 2/3 e parte de 3/3 concluídas).
 
 - **1/3** ✅ Schema completo (`doctors`, `doctor_availability`,
   `doctor_payment_methods`, `doctor_compensation_rules`, `appointments`,
@@ -58,12 +58,17 @@ vinculado à compra via `localStorage`.
   `PAYMENT_REFUNDED`/CHARGEBACK. Decisão: **D-025** magic-link only,
   roles em `app_metadata`. Usuário admin inicial:
   `cabralandre@yahoo.com.br`.
+- **3/3 (parcial)** ✅ Painel da médica (`/medico/*`): login próprio,
+  dashboard com 4 cards, agenda com botão "Entrar na sala" (cria sala
+  Daily idempotente), extrato de ganhos por mês com filtro, histórico
+  de repasses read-only e edição de perfil restrita
+  (`display_name`, `bio`, `phone`, `consultation_minutes`).
 
-**Próxima entrega Sprint 4.1 (3/3):** painel médica (`/medico/*`),
-fluxo paciente (`/agendar` + reserva → checkout → criação automática
-de appointment + sala Daily), webhook Daily (`meeting.started/ended`
-atualiza `appointment.status`), helpers WhatsApp pros 7 templates,
-Storage privado pra comprovantes/NF-e, env vars Daily no Vercel.
+**Restante da Sprint 4.1 (3/3):** fluxo do paciente (`/agendar` +
+reserva → checkout → criação automática de appointment + sala Daily),
+webhook Daily (`meeting.started/ended` atualiza `appointment.status`),
+helpers WhatsApp pros 7 templates, Storage privado pra comprovantes
+PIX/NF-e, env vars Daily no Vercel.
 
 Veja [`docs/SPRINTS.md`](./docs/SPRINTS.md) para o roadmap completo.
 
@@ -127,15 +132,26 @@ instituto-nova-medida/
 │   │   │       ├── page.tsx          # dashboard
 │   │   │       ├── doctors/          # CRUD de médicas
 │   │   │       └── payouts/          # gestão de repasses
+│   │   ├── medico/                   # painel da médica
+│   │   │   ├── login/                # magic link form
+│   │   │   └── (shell)/              # layout com sidebar (requer doctor)
+│   │   │       ├── page.tsx          # dashboard
+│   │   │       ├── agenda/           # consultas + entrar na sala
+│   │   │       ├── ganhos/           # extrato com filtro mensal
+│   │   │       ├── repasses/         # histórico read-only
+│   │   │       └── perfil/           # edição limitada
 │   │   └── api/
 │   │       ├── lead/route.ts
 │   │       ├── checkout/route.ts
 │   │       ├── asaas/webhook/route.ts
 │   │       ├── wa/webhook/route.ts
 │   │       ├── auth/                 # magic-link / callback / signout
-│   │       └── admin/                # APIs do painel
-│   │           ├── doctors/[id]/(compensation|payment-method|availability)
-│   │           └── payouts/[id]/(approve|pay|confirm|cancel)
+│   │       ├── admin/                # APIs do painel admin
+│   │       │   ├── doctors/[id]/(compensation|payment-method|availability)
+│   │       │   └── payouts/[id]/(approve|pay|confirm|cancel)
+│   │       └── medico/               # APIs do painel da médica
+│   │           ├── profile (PATCH)
+│   │           └── appointments/[id]/join (POST → cria sala Daily)
 │   ├── components/                   # 16+ componentes
 │   └── lib/
 │       ├── asaas.ts                  # cliente Asaas (sandbox/prod)

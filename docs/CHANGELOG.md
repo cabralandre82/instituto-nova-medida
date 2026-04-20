@@ -6,6 +6,56 @@
 
 ---
 
+## 2026-04-19 · Sprint 4.1 (3/3 parcial) — Painel da médica `/medico/*` · IA
+
+**Por quê:** com magic link + papel `doctor` operacional, faltava onde
+a médica cair depois de clicar no convite. Esta entrega entrega o
+"home da médica": dashboard, agenda com botão de entrar na sala,
+extrato de ganhos por mês, histórico de repasses e edição de perfil
+limitada (`display_name`, `bio`, `phone`, `consultation_minutes`).
+
+**Login:**
+
+- `/medico/login` espelha `/admin/login` (anti-enumeração + rate limit
+  reaproveitados de `/api/auth/magic-link`, que já aceitava `doctor`).
+- `/api/auth/callback` agora detecta se o `next` é `/medico/*` e
+  redireciona erros para `/medico/login` (em vez de `/admin/login`).
+- `/api/auth/signout` aceita `to=` (form field ou query) para
+  diferenciar logout de admin vs. médica.
+
+**Rotas (route group `/medico/(shell)/`):**
+
+- `/medico` — dashboard: 4 cards (consultas hoje, próxima consulta,
+  a receber, recebido neste mês) + bloco "próxima consulta" com CTA.
+- `/medico/agenda` — próxima consulta destacada + lista 30 dias +
+  histórico 60 dias. Botão "Entrar na sala" habilitado entre 60 min
+  antes do horário e 30 min depois do fim.
+- `/medico/ganhos` — extrato com filtro por mês (últimos 6) e 4
+  totais por status (pending / available / in_payout / paid).
+- `/medico/repasses` — cards de cada `doctor_payout` com timeline
+  textual (Em revisão → Aprovado → PIX enviado → Pago), exibe chave
+  PIX snapshot, ID PIX e link de comprovante quando existir.
+- `/medico/perfil` — formulário client com `display_name`, `phone`,
+  `consultation_minutes` (15/20/30/45/60) e `bio` (1500 chars). Painel
+  lateral mostra dados read-only (CRM, CNPJ, status) com aviso de
+  que mudanças passam pelo operador.
+
+**APIs (require role=doctor):**
+
+- `POST /api/medico/appointments/[id]/join` — provisiona sala Daily
+  (idempotente: reusa `video_room_url` se já existe; sempre gera
+  meeting-token novo) e devolve `{ url }` pronta para abrir. Devolve
+  503 amigável se `DAILY_API_KEY` não está configurada.
+- `PATCH /api/medico/profile` — aceita só os 4 campos seguros; valida
+  comprimento de `display_name`/`bio` e dígitos do `phone`. Nunca
+  aceita `crm_*`, `email`, `cnpj`, `status` (D-024 — esses passam
+  pelo operador).
+
+**Build:** 8 rotas adicionadas (6 páginas + 2 APIs). Bundle das pages
+do médico ≤ 1.6 kB cada (server-rendered).
+
+---
+
 ## 2026-04-19 · Sprint 4.1 (2/3) — Auth + painel admin completo · IA
 
 **Por quê:** Sprint 4.1 (1/3) entregou o schema. Agora a operação
