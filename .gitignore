@@ -15,6 +15,12 @@ dist
 *.tsbuildinfo
 
 # =============================
+# Supabase CLI cache
+# =============================
+supabase/.temp/
+supabase/.branches/
+
+# =============================
 # Environment / secrets
 # =============================
 .env
