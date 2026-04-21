@@ -86,7 +86,7 @@ type AppointmentRow = {
   scheduled_at: string;
   scheduled_until: string | null;
   status: string;
-  completed_at: string | null;
+  ended_at: string | null;
   doctors:
     | { full_name: string; display_name: string | null; consultation_minutes: number }
     | { full_name: string; display_name: string | null; consultation_minutes: number }[]
@@ -172,7 +172,7 @@ export async function getUpcomingAppointment(
   const { data, error } = await supabase
     .from("appointments")
     .select(
-      "id, scheduled_at, scheduled_until, status, completed_at, doctors ( full_name, display_name, consultation_minutes )",
+      "id, scheduled_at, scheduled_until, status, ended_at, doctors ( full_name, display_name, consultation_minutes )",
     )
     .eq("customer_id", customerId)
     .in("status", ACTIVE_APPOINTMENT_STATUSES)
@@ -228,7 +228,7 @@ export async function listPastAppointments(
   const { data, error } = await supabase
     .from("appointments")
     .select(
-      "id, scheduled_at, scheduled_until, status, completed_at, doctors ( full_name, display_name, consultation_minutes )",
+      "id, scheduled_at, scheduled_until, status, ended_at, doctors ( full_name, display_name, consultation_minutes )",
     )
     .eq("customer_id", customerId)
     .or(
@@ -250,7 +250,7 @@ export async function listPastAppointments(
       status: row.status,
       doctorName: doctor?.display_name || doctor?.full_name || "Médica",
       durationMinutes: doctor?.consultation_minutes ?? 30,
-      completedAt: row.completed_at,
+      completedAt: row.ended_at,
     };
   });
 }
@@ -398,6 +398,12 @@ export type ActiveFulfillment = {
   pharmacyRequestedAt: string | null;
   shippedAt: string | null;
   trackingNote: string | null;
+  shippingRecipientName: string | null;
+  shippingZipcode: string | null;
+  shippingStreet: string | null;
+  shippingNumber: string | null;
+  shippingComplement: string | null;
+  shippingDistrict: string | null;
   shippingCity: string | null;
   shippingState: string | null;
 };
@@ -410,7 +416,10 @@ export async function listActiveFulfillments(
     .from("fulfillments")
     .select(
       `id, status, appointment_id, paid_at, pharmacy_requested_at, shipped_at,
-       tracking_note, shipping_city, shipping_state,
+       tracking_note,
+       shipping_recipient_name, shipping_zipcode, shipping_street,
+       shipping_number, shipping_complement, shipping_district,
+       shipping_city, shipping_state,
        plan:plans!inner(name, medication),
        doctor:doctors!inner(full_name, display_name)`
     )
@@ -450,6 +459,13 @@ export async function listActiveFulfillments(
       pharmacyRequestedAt: (r.pharmacy_requested_at as string | null) ?? null,
       shippedAt: (r.shipped_at as string | null) ?? null,
       trackingNote: (r.tracking_note as string | null) ?? null,
+      shippingRecipientName:
+        (r.shipping_recipient_name as string | null) ?? null,
+      shippingZipcode: (r.shipping_zipcode as string | null) ?? null,
+      shippingStreet: (r.shipping_street as string | null) ?? null,
+      shippingNumber: (r.shipping_number as string | null) ?? null,
+      shippingComplement: (r.shipping_complement as string | null) ?? null,
+      shippingDistrict: (r.shipping_district as string | null) ?? null,
       shippingCity: (r.shipping_city as string | null) ?? null,
       shippingState: (r.shipping_state as string | null) ?? null,
     };

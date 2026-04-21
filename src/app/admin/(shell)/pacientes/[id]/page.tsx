@@ -18,7 +18,9 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { headers } from "next/headers";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { requireAdmin } from "@/lib/auth";
 import {
   buildPatientTimeline,
   loadPatientProfile,
@@ -27,6 +29,17 @@ import {
   type TimelineEvent,
   type TimelineEventKind,
 } from "@/lib/patient-profile";
+import {
+  formatCurrencyBRL,
+  formatDateBR,
+  formatDateTimeBR,
+  formatTimeBR,
+} from "@/lib/datetime-br";
+import {
+  getAccessContextFromHeaders,
+  logPatientAccess,
+} from "@/lib/patient-access-log";
+import { LgpdBlock } from "./_LgpdBlock";
 
 export const dynamic = "force-dynamic";
 
@@ -37,10 +50,25 @@ export default async function AdminPatientProfilePage({
 }: {
   params: Promise<Params>;
 }) {
+  const admin = await requireAdmin();
   const { id } = await params;
   const supabase = getSupabaseAdmin();
   const profile = await loadPatientProfile(supabase, id);
   if (!profile) notFound();
+
+  // PR-032 · D-051: cada abertura da ficha do paciente é um acesso a
+  // PII e precisa ser auditável. Faz sentido logar *antes* de gerar o
+  // resto da página — se loadPatientProfile já devolveu 404 acima, não
+  // há PII carregada, logo não logamos. Server Component não tem
+  // `Request`, então usamos `headers()`.
+  const h = await headers();
+  await logPatientAccess(supabase, {
+    adminUserId: admin.id,
+    adminEmail: admin.email,
+    customerId: id,
+    action: "view",
+    metadata: getAccessContextFromHeaders(h, `/admin/pacientes/${id}`),
+  });
 
   const timeline = buildPatientTimeline(profile);
   const stats = summarizePatient(profile);
@@ -54,8 +82,13 @@ export default async function AdminPatientProfilePage({
         >
           ← Pacientes
         </Link>
-        <h1 className="font-serif text-[2rem] sm:text-[2.4rem] leading-tight text-ink-800 mt-2">
-          {profile.customer.name}
+        <h1 className="font-serif text-[2rem] sm:text-[2.4rem] leading-tight text-ink-800 mt-2 flex items-center gap-3 flex-wrap">
+          <span>{profile.customer.name}</span>
+          {profile.customer.anonymizedAt && (
+            <span className="px-3 py-1 rounded-full bg-cream-200 border border-ink-200 text-xs text-ink-700 font-medium uppercase tracking-wider">
+              anonimizado
+            </span>
+          )}
         </h1>
         <p className="mt-2 text-ink-500 flex flex-wrap gap-x-4 gap-y-1 text-sm">
           <span>{profile.customer.email}</span>
@@ -63,7 +96,7 @@ export default async function AdminPatientProfilePage({
           <span className="font-mono">{formatCpf(profile.customer.cpf)}</span>
           <span>
             Cadastro{" "}
-            {new Date(profile.customer.createdAt).toLocaleDateString("pt-BR")}
+            {formatDateBR(profile.customer.createdAt)}
           </span>
           {profile.customer.userId ? (
             <span className="text-sage-700">✓ acesso liberado</span>
@@ -240,7 +273,7 @@ export default async function AdminPatientProfilePage({
                       <FulfillmentStatusPill status={f.status} />
                     </td>
                     <td className="px-4 py-3 text-sm text-ink-500 hidden md:table-cell">
-                      {new Date(f.createdAt).toLocaleDateString("pt-BR")}
+                      {formatDateBR(f.createdAt)}
                     </td>
                     <td className="px-4 py-3 text-right">
                       <Link
@@ -288,13 +321,10 @@ export default async function AdminPatientProfilePage({
                   >
                     <td className="px-4 py-3 text-sm">
                       <div className="text-ink-800">
-                        {new Date(a.scheduledAt).toLocaleDateString("pt-BR")}
+                        {formatDateBR(a.scheduledAt)}
                       </div>
                       <div className="text-xs text-ink-500">
-                        {new Date(a.scheduledAt).toLocaleTimeString("pt-BR", {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
+                        {formatTimeBR(a.scheduledAt)}
                       </div>
                     </td>
                     <td className="px-4 py-3 text-sm text-ink-600 hidden md:table-cell">
@@ -312,9 +342,7 @@ export default async function AdminPatientProfilePage({
                       />
                     </td>
                     <td className="px-4 py-3 text-sm text-ink-500 hidden lg:table-cell">
-                      {a.finalizedAt
-                        ? new Date(a.finalizedAt).toLocaleDateString("pt-BR")
-                        : "—"}
+                      {a.finalizedAt ? formatDateBR(a.finalizedAt) : "—"}
                     </td>
                   </tr>
                 ))}
@@ -363,7 +391,7 @@ export default async function AdminPatientProfilePage({
                       <PaymentStatusPill status={p.status} />
                     </td>
                     <td className="px-4 py-3 text-sm text-ink-500 hidden md:table-cell">
-                      {new Date(p.createdAt).toLocaleDateString("pt-BR")}
+                      {formatDateBR(p.createdAt)}
                     </td>
                   </tr>
                 ))}
@@ -401,7 +429,7 @@ export default async function AdminPatientProfilePage({
                       {a.planName ?? "—"}
                     </td>
                     <td className="px-4 py-3 text-sm text-ink-600">
-                      {new Date(a.acceptedAt).toLocaleString("pt-BR")}
+                      {formatDateTimeBR(a.acceptedAt)}
                     </td>
                     <td className="px-4 py-3 text-sm text-ink-500 font-mono">
                       {a.termsVersion}
@@ -416,6 +444,13 @@ export default async function AdminPatientProfilePage({
           </div>
         </section>
       )}
+
+      {/* ========== LGPD (export + anonymize) ========== */}
+      <LgpdBlock
+        customerId={profile.customer.id}
+        anonymizedAt={profile.customer.anonymizedAt}
+        anonymizedRef={profile.customer.anonymizedRef}
+      />
     </div>
   );
 }
@@ -425,10 +460,7 @@ export default async function AdminPatientProfilePage({
 // ────────────────────────────────────────────────────────────────────────
 
 function brl(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 function formatCpf(cpf: string): string {
@@ -584,7 +616,7 @@ function TimelineRow({ ev }: { ev: TimelineEvent }) {
         <div className="flex items-baseline justify-between gap-3 flex-wrap">
           <p className="text-ink-800 font-medium">{ev.title}</p>
           <span className="text-xs text-ink-500 flex-shrink-0">
-            {new Date(ev.at).toLocaleString("pt-BR")}
+            {formatDateTimeBR(ev.at)}
           </span>
         </div>
         {ev.description && (

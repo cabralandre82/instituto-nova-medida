@@ -258,6 +258,8 @@ function emptyProfile(): PatientProfile {
         city: null,
         state: null,
       },
+      anonymizedAt: null,
+      anonymizedRef: null,
     },
     appointments: [],
     fulfillments: [],

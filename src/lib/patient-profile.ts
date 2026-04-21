@@ -20,6 +20,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { formatCurrencyBRL } from "@/lib/datetime-br";
 
 // ────────────────────────────────────────────────────────────────────────
 // Tipos
@@ -45,6 +46,10 @@ export type PatientCustomer = {
     state: string | null;
   };
   leadId: string | null;
+  /** D-045 · 3.G: quando anonimizado (LGPD Art. 18). NULL = ativo. */
+  anonymizedAt: string | null;
+  /** D-045 · 3.G: hash curto do id original pós-anonymization. */
+  anonymizedRef: string | null;
 };
 
 export type PatientAppointment = {
@@ -130,7 +135,7 @@ export async function loadPatientProfile(
       .from("customers")
       .select(
         `id, name, email, phone, cpf, user_id, asaas_customer_id, lead_id,
-         created_at, updated_at,
+         created_at, updated_at, anonymized_at, anonymized_ref,
          address_zipcode, address_street, address_number, address_complement,
          address_district, address_city, address_state`
       )
@@ -221,6 +226,8 @@ export async function loadPatientProfile(
       city: c.address_city ?? null,
       state: c.address_state ?? null,
     },
+    anonymizedAt: c.anonymized_at ?? null,
+    anonymizedRef: c.anonymized_ref ?? null,
   };
 
   const appointments: PatientAppointment[] = (appsRes.data ?? []).map(
@@ -470,10 +477,7 @@ export function buildPatientTimeline(profile: PatientProfile): TimelineEvent[] {
       at: p.createdAt,
       kind: "payment_created",
       title: `Cobrança criada${p.planName ? ` · ${p.planName}` : ""}`,
-      description: `${(p.amountCents / 100).toLocaleString("pt-BR", {
-        style: "currency",
-        currency: "BRL",
-      })} · ${p.billingType}`,
+      description: `${formatCurrencyBRL(p.amountCents)} · ${p.billingType}`,
       refId: p.id,
     });
     if (p.paidAt) {

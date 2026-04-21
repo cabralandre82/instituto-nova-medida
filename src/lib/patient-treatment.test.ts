@@ -203,7 +203,7 @@ describe("getUpcomingAppointment", () => {
         scheduled_at: scheduled.toISOString(),
         scheduled_until: null,
         status: "scheduled",
-        completed_at: null,
+        ended_at: null,
         doctors: {
           full_name: "Dra Ana",
           display_name: "Dra. Ana",
@@ -241,7 +241,7 @@ describe("getUpcomingAppointment", () => {
         scheduled_at: new Date().toISOString(),
         scheduled_until: null,
         status: "scheduled",
-        completed_at: null,
+        ended_at: null,
         doctors: {
           full_name: "Dra Maria Completa",
           display_name: null,
@@ -276,7 +276,7 @@ describe("listPastAppointments", () => {
           scheduled_at: "2026-02-01T10:00:00Z",
           scheduled_until: null,
           status: "completed",
-          completed_at: "2026-02-01T10:30:00Z",
+          ended_at: "2026-02-01T10:30:00Z",
           doctors: null,
         },
         {
@@ -284,7 +284,7 @@ describe("listPastAppointments", () => {
           scheduled_at: "2026-01-15T10:00:00Z",
           scheduled_until: null,
           status: "no_show_patient",
-          completed_at: null,
+          ended_at: null,
           doctors: {
             full_name: "Dra. X",
             display_name: null,
