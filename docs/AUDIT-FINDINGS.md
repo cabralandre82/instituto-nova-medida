@@ -1489,12 +1489,18 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
 
 ## Lente 11 — Performance
 
-### [11.1 🟠 ALTO] Next.js 14.2.18 desatualizado — warning já observado em runtime
+### [11.1 ✅ RESOLVIDO em PR-041 · D-060 · 2026-04-20] Next.js 14.2.18 desatualizado — warning já observado em runtime
 
 - **Onde:** `package.json:19` (`"next": "14.2.18"`). Usuário observou `Next.js (14.2.18) is outdated` no erro pós-hotfix [5.51].
-- **Risco:** versões 14.2.18→14.2.35+ trazem correções de CVE (prototype pollution, image optimization), perf (app router), hotfixes cold start.
-- **Correção:** bump para 14.2.x mais recente; rodar `npm audit` + smoke-test em preview antes de prod.
+- **Risco (original):** versões 14.2.18→14.2.35+ trazem correções de CVE, perf (app router), hotfixes cold start.
+- **Impacto real identificado durante o fix:** `14.2.18` estava vulnerável ao **CVE-2025-29927 (CVSS 9.1 CRÍTICO)** — bypass de autorização em middleware via header `x-middleware-subrequest: middleware:middleware:middleware:middleware:middleware`. Dado que `src/middleware.ts` é o hard-gate de `/admin/*`, `/medico/*` e `/paciente/*`, qualquer atacante conseguia pular o gate. Defense-in-depth (`requireAdmin`/`requireDoctor`/`requirePatient` em cada Server Component) impedia exfiltração de dados, mas ainda assim era um **CRÍTICO real** não documentado.
+- **Ação executada (PR-041):**
+  1. Bump `next@14.2.18` → `next@14.2.35` (última 14.2.x; release 2026-04-18) + `eslint-config-next@14.2.35`.
+  2. `rm -rf .next node_modules/.cache && npm install`.
+  3. Validação: `tsc --noEmit` 0 erros, 936/936 testes, `eslint` 0 warnings, smoke HTTP em `/`, `/admin/login`, `/paciente/login`, `/medico/login`.
+  4. **Teste empírico do fix CVE-2025-29927:** `curl -H "x-middleware-subrequest: middleware:middleware:middleware:middleware:middleware" http://localhost:3000/admin` retornou **307 → `/admin/login`** (middleware PROCESSOU a request, não bypassou).
 - **Observador:** CISO, SRE, admin solo.
+- **Follow-up detectado (novo) — PR-041-B:** `npm audit` pós-bump mostra 4 advisories `high` residuais na linha 14.x (Image Optimizer DoS, RSC deserialization, rewrite smuggling, next/image cache unbounded). Essas advisories **só têm fix em Next 15.x+** — a linha 14.2.x está efetivamente em EOL para DoS. Mitigantes atuais: hospedagem em Vercel absorve parte dos DoS upstream; superfície de `next/image` é baixa (poucas imagens). Backlog: migração Next 14 → 15 (App Router APIs mudam: `params`/`searchParams`/`cookies()`/`headers()` viram `Promise`).
 
 ### [11.2 🟡 MÉDIO] `loadAdminInbox` + dashboard `/admin` fazem N queries sequenciais no mesmo request
 
@@ -1798,13 +1804,14 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
 | Severidade | Contagem | IDs |
 |---|---|---|
 | 🔴 CRÍTICO | **0** | — |
-| 🟠 ALTO | **5** | 11.1, 12.1, 12.2, 13.2, 19.1, 20.1 (13.1 resolvido em PR-042 · D-058; 14.1 rebaixado pra 🟡 PARCIAL após PR-039 · D-057) |
+| 🟠 ALTO | **4** | 12.1, 12.2, 13.2, 19.1, 20.1 (13.1 resolvido em PR-042 · D-058; 14.1 rebaixado pra 🟡 PARCIAL após PR-039 · D-057; 11.1 resolvido em PR-041 · D-060, incluindo fix CVE-2025-29927 CVSS 9.1) |
 | 🟡 MÉDIO | **16** | 11.2, 11.3, 12.3, 12.4, 13.3, 14.2, 14.3, 15.1, 15.2, 15.3, 16.1, 16.2, 18.2, 18.3, 19.2, 19.3, 20.2, 21.1, 21.2, 21.3 |
 | 🟢 SEGURO | **8** | 11.4, 12.5, 13.4, 14.4, 15.4, 16.3, 19.4, 20.3, 21.4 |
 
 ### Novos PRs sugeridos (PARTE 5)
 
-41. **PR-041 · Bump Next 14.2.18 → 14.2.latest** (11.1).
+41. ~~**PR-041 · Bump Next 14.2.18 → 14.2.latest** (11.1).~~ ✅ RESOLVIDO em D-060 (2026-04-20) — bump para 14.2.35, fix empírica do CVE-2025-29927 CVSS 9.1.
+41-B. **PR-041-B · Migração Next 14 → 15** — endereça advisories DoS residuais (Image Optimizer, RSC deserialization, rewrite smuggling, next/image cache) que só têm fix em 15.x+. Breaking changes: `params`/`searchParams`/`cookies()`/`headers()` viram `Promise<T>`. Planejar janela dedicada com smoke extenso.
 42. **PR-042 · `fetchWithTimeout` helper + substituir fetch externos** (13.1).
 43. **PR-043 · Sentry + Vercel log drain Axiom + `x-request-id`** (14.1) (junta com PR-034 da P4).
 44. **PR-044 · Runbook DR (Supabase/Vercel/Asaas/Daily down)** (20.1).
@@ -1890,7 +1897,7 @@ Ordem recomendada de ataque (1 = primeiro):
 - 7.2 "1.200 pessoas" hardcoded — propaganda enganosa potencial
 - 7.3 "Avaliações abertas hoje na sua região" — dark pattern
 - 8.4 Páginas `/admin/errors`, `/admin/refunds`, `/admin/reliability` órfãs
-- 11.1 Next 14.2.18 desatualizado
+- ~~11.1 Next 14.2.18 desatualizado~~ ✅ RESOLVED em PR-041 · D-060 (bump 14.2.35 + fix CVE-2025-29927)
 
 ### Agentes/LLM adversário (0 pendentes)
 - ~~9.1 Campos livres são prompt-injection pre-wired~~ ✅ RESOLVED nas Ondas 2C+2D+2E (PR-035 + PR-036 + PR-036-B · D-053/054/055)

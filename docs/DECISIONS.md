@@ -5,6 +5,81 @@
 
 ---
 
+## D-060 · Bump Next 14.2.18 → 14.2.35 (fecha CVE-2025-29927 CVSS 9.1 e finding 11.1) · 2026-04-20
+
+**Contexto.** O audit de abril (Lente 11 / Performance) já tinha flagado `package.json` travado em `next@14.2.18` como 🟠 ALTO, motivado pelo próprio runtime do Next avisando "is outdated". A motivação inicial era cosmética + patches acumulados de bug/perf — nada aparentemente bloqueador.
+
+Ao iniciar o PR, a checagem dos CHANGELOGs e advisories do intervalo 14.2.19–14.2.35 revelou algo bem mais grave: **CVE-2025-29927 (CVSS 9.1 CRÍTICO)** — bypass de autorização em middleware disparado via header `x-middleware-subrequest: middleware:middleware:middleware:middleware:middleware`. O fix só entrou em **14.2.25**. Nossa versão 14.2.18 era **vulnerável**.
+
+O risco é direto: `src/middleware.ts` é o hard-gate de `/admin/*`, `/medico/*` e `/paciente/*`. Um atacante passando esse header sobrepujaria o `supabase.auth.getUser()` + redirect pra `/login` — request atingiria o Server Component sem sessão. O único motivo de não ter virado exfil de dados foi a defense-in-depth **de fato implementada**: cada shell chama `requireAdmin()`/`requireDoctor()`/`requirePatient()` de novo no Server Component, abortando antes de renderizar dado.
+
+Ou seja: o finding estava mal-classificado. Era efetivamente um CRÍTICO não-documentado, com mitigação arquitetural pré-existente mas frágil (basta 1 rota futura esquecer a re-validação e cai).
+
+**Decisão.**
+
+1. **Bump minimalista pra última 14.2.x (14.2.35, lançada 2026-04-18)** — não 15.x. Razões:
+   - 15.x tem breaking changes reais: `params`/`searchParams`/`cookies()`/`headers()` viram `Promise<T>`, afetando todas as páginas SSR e rotas API. Risco regressivo alto.
+   - Queremos fechar o CVE hoje, não em 2 semanas de QA regressão.
+   - A linha 14.2.x ainda recebe patches críticos (14.2.35 é de 18/abr/2026, recentíssima).
+   - Permite planejar 14 → 15 com janela dedicada (virou PR-041-B).
+2. **Incluir `eslint-config-next` no mesmo pin** — `14.2.35` — pra evitar drift entre runtime e regras de lint (o audit já tinha flagged como antipattern em outros projetos).
+3. **Limpar cache antes do `npm install`** — `rm -rf .next node_modules/.cache`. O erro "Cannot find module './8948.js'" do incidente passado veio exatamente de `.next` stale após mudança de versão. Custo baixo, previne regressão conhecida.
+4. **Validar empiricamente o fix do CVE** — não basta confiar no CHANGELOG. O teste é:
+   ```bash
+   curl -H "x-middleware-subrequest: middleware:middleware:middleware:middleware:middleware" \
+        http://localhost:3000/admin
+   # ANTES (14.2.18 vulnerável): 200 OK (bypassa middleware)
+   # DEPOIS (14.2.35): 307 → /admin/login?next=%2Fadmin (middleware processa)
+   ```
+   Registrado o resultado no finding [11.1] como evidência auditável.
+
+**Alternativas descartadas.**
+
+- **Pular pra Next 15** agora: breaking changes em APIs async + risco de regressão SSR. Janela dedicada custa 2–3 dias de QA. Fora do escopo "fechar finding rápido".
+- **Aplicar só a fix do CVE via monkey-patch/workaround (remover header no middleware)**: frágil, não resolve os outros fixes acumulados em 14.2.19–34, e o próprio patch oficial da Vercel fez a coisa certa (rejeitar `x-middleware-subrequest` inbound).
+- **Bloquear o header em WAF/proxy em vez de upgrade**: funciona como mitigação emergencial, mas não temos WAF dedicado (Vercel Edge absorve algum tráfego, mas não expusemos rules customizáveis) e não fecha os demais CVEs/bugfixes. Descartado.
+
+**Consequências imediatas.**
+
+- Vulnerabilidade crítica fechada (CVE-2025-29927).
+- Warning `Next.js is outdated` some do console de dev/prod.
+- 4 advisories `npm audit` residuais continuam — **não são aplicáveis na linha 14.x**, só em 15.x+:
+  - Image Optimizer DoS remotePatterns
+  - RSC request deserialization DoS
+  - Rewrite HTTP request smuggling
+  - `next/image` cache unbounded disk growth
+  
+  Todas têm mitigação parcial: hospedagem em Vercel absorve DoS upstream; superfície de `next/image` é baixa (poucas imagens/rotas públicas). Mas a solução completa é Next 15.
+- Criado **PR-041-B** em `PRS-PENDING.md` como "🔜 Próximo sem input" de alta prioridade. Depende de QA regressivo manual, não tem bloqueio operacional.
+
+**Mitigantes para o intervalo (até PR-041-B).**
+
+1. Defense-in-depth do middleware permanece: todo Server Component admin/doctor/patient re-valida via `requireX()`. Isso cobre Next 14 ou 15.
+2. `/admin/health` monitora saúde cron + infra — qualquer anomalia que parecesse exploração apareceria como degradação visível.
+3. Budget de Image Optimization hospedado na Vercel tem limite configurável — se virar vetor, dá pra ligar alerta de consumo lá.
+
+**Protocolo de validação aplicado.**
+
+- `npx tsc --noEmit` — 0 erros.
+- `npx vitest run` — 936/936 testes passando.
+- `npx eslint 'src/**/*.{ts,tsx}' --max-warnings 0` — 0 warnings.
+- Smoke HTTP: home 200, `/admin/login` 200, `/paciente/login` 200, `/medico/login` 200.
+- `/admin` sem sessão → 307 redirect pra login (baseline do middleware).
+- **`/admin` com header malicioso CVE-2025-29927 → 307 redirect pra login** (fix comprovada).
+
+**Follow-up imediato (PR-041-B).**
+
+Migração Next 14 → 15. Breaking changes conhecidos a endereçar:
+- `params: { id: string }` → `params: Promise<{ id: string }>` em todas as rotas `[id]`.
+- `cookies()`/`headers()` passam a ser `async`.
+- `searchParams` idem.
+- `next/image` com `remotePatterns` exige formato mais estrito.
+- ESLint config muda de shareable pra flat config.
+
+Plano: criar branch dedicada, rodar codemod oficial (`@next/codemod@canary upgrade latest`), fixar o que o codemod não pega, smoke HTTP em todas as rotas `/admin`, `/medico`, `/paciente`, webhooks, APIs. Estimativa: 2 dias efetivos.
+
+---
+
 ## D-059 · Dashboard temporal de `cron_runs` em `/admin/crons` · 2026-04-21
 
 **Contexto.** `cron_runs` (D-040) é a trilha de execução dos 7 jobs agendados: cada start/finish grava linha com `status`, `duration_ms`, `payload`, `error_message`. Até hoje a única superfície de consumo era `system-health.ts::checkCronFreshness`, que pergunta só "o último run foi ok e há quanto tempo?". Isso cobre o caso "cron está morto?", mas deixa três perguntas sem resposta:
