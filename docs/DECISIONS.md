@@ -5,6 +5,97 @@
 
 ---
 
+## D-062 · Reconciliação pós-clawback no `generateMonthlyPayouts` (finding 5.5) · 2026-04-20
+
+**Contexto.** Finding [5.5 🟠 ALTO] do audit: `src/lib/monthly-payouts.ts` roda em 2 passos sequenciais:
+
+1. `SELECT doctor_earnings WHERE status='available' AND payout_id IS NULL AND available_at < monthStart`
+2. `INSERT doctor_payouts (amount_cents=sum_do_select)` + `UPDATE doctor_earnings SET payout_id=new`
+
+Entre (1) e (2), um webhook `PAYMENT_REFUNDED` ou `PAYMENT_CHARGEBACK_REQUESTED` pode chamar `createClawback()` e criar um earning negativo (`type='refund_clawback'`, `status='available'`, `available_at=now`). Se esse `now < monthStart`, o clawback é **elegível pro ciclo corrente** mas ficou fora do `agg.total` porque o SELECT já aconteceu. O UPDATE usa `.in("id", earningIds)` com a lista fixa do SELECT — o clawback fica **não-linkado**.
+
+Sintoma no mundo real:
+
+- Payout criado: `amount_cents=+300`, `status=draft`.
+- Médica recebe R$ 300 via PIX no ciclo.
+- Clawback de `-50` fica pendurado pro próximo ciclo: saldo inicial negativo.
+- Se a médica sair antes do próximo mês → prejuízo do Instituto (CFO sem recuperação fácil).
+
+Não é bug hipotético: a superfície cresce linearmente com volume de refunds/chargebacks. Com múltiplas médicas (PR-046 no roadmap) e volume de pagamentos crescente, vira incidente operacional mensal.
+
+**Decisão.** Implementar **reconciliação pós-link** no próprio `generateMonthlyPayouts` (sem exigir transação SQL com `FOR UPDATE`, que implicaria RPC dedicada e seria pesada).
+
+Fluxo novo (passos **4c/4d/4e** após o link inicial):
+
+```
+loop (max 3 iters):
+  SELECT doctor_earnings WHERE doctor_id=X, status='available',
+    payout_id IS NULL, available_at < monthStart
+  se vazio → break (convergiu)
+  UPDATE doctor_earnings SET payout_id=new_payout, status='in_payout'
+    WHERE id IN (extras) AND status='available' AND payout_id IS NULL
+  incorpora sum real do que foi efetivamente linkado
+fim
+
+se extraCount > 0:
+  UPDATE doctor_payouts SET amount_cents=final, earnings_count=final
+    WHERE id=new_payout AND status='draft'
+  warning 'clawback_reconciled' (info)
+
+se final_amount ≤ 0:
+  UPDATE doctor_payouts SET status='cancelled',
+    cancelled_reason='clawback dominou...'
+    WHERE id=new_payout AND status='draft'
+  UPDATE doctor_earnings SET payout_id=NULL, status='available'
+    WHERE payout_id=new_payout
+  warning 'clawback_dominant_cancelled' (substitui o reconciled)
+  reverte stats (payoutsCreated-=1, etc)
+```
+
+**Por que loop e não re-query única.** Em uma tempestade (ex: chargeback em massa no dia do fechamento), múltiplos webhooks rodam em paralelo com o cron. 1 iter garante pegar o estado mais recente **até aquele momento**, mas não protege contra webhooks rodando no intervalo entre nosso UPDATE e o próximo SELECT. 3 iters é empírico: na prática convergem em 1–2; 3 dá folga sem risco de loop infinito.
+
+**Por que `max 3` e não infinito.** Proteção contra:
+- Bug upstream gerando earnings continuamente (improvável mas possível).
+- Rajada patológica de refunds > capacidade do cron.
+
+Se bate o limite e **ainda há extras pendentes**, registramos warning `reconcile_incomplete`. O payout existente fica correto até o último linkado; o resto volta a ser elegível no próximo ciclo. Não é financeiramente errado — só "não otimizado" (paga em 2 ciclos em vez de 1).
+
+**Por que auto-cancelar quando `final ≤ 0`.** Payout negativo/zero via PIX não faz sentido:
+
+- Valor ≤ 0 significa que clawbacks dominaram earnings positivos.
+- Enviar um payout de R$ -50 via PIX é impossível (PIX não reverte assim).
+- Um payout `approved` com `amount_cents=0` vira ruído operacional: admin vê linha, confere, não faz nada.
+- Cancelar + liberar earnings faz o saldo negativo "dormir" até a médica ter earnings positivos novos em ciclos futuros que o absorvam.
+
+**Guard `.eq("status", "draft")`**. Em todos os UPDATEs pós-insert, exigimos que o payout esteja ainda `draft`. Protege cenário extremo (admin aprova o payout entre o `INSERT` e o `UPDATE` de ajuste). Em prática impossível no cron mensal (leva <1s por médica), mas o guard é cinto + suspensório.
+
+**Não fizemos `SELECT ... FOR UPDATE` em RPC.** Alternativa citada no audit. Considerada e rejeitada por:
+
+- Supabase `.from(...).select()` não expõe `FOR UPDATE` — teria que virar RPC SQL dedicada.
+- RPC torna o código MENOS observável (perdemos os warnings estruturados).
+- Lock na tabela inteira prejudica outras operações concorrentes (webhook Asaas rodando no mesmo segundo).
+- A reconciliação aqui **tem exatamente a mesma garantia lógica** (convergência eventual), com melhor UX operacional.
+
+**Status financeiro final garantido pelo design:**
+
+- **Happy path** (sem clawback concorrente): comportamento idêntico ao anterior.
+- **Clawback parcial** (`final > 0`): payout é ajustado, médica recebe valor correto.
+- **Clawback dominante** (`final ≤ 0`): payout cancelado, earnings voltam pra fila, auditoria clara.
+- **Rajada não-convergente**: payout parcial correto + warning; próximo ciclo pega o resto.
+
+**Consequências.**
+
+- Observabilidade: 3 novos `reason` de warning (`clawback_reconciled`, `clawback_dominant_cancelled`, `reconcile_incomplete`). Painel `/admin/payouts` já mostra warnings do cron — automaticamente pega.
+- Performance: adiciona ≤ 3 SELECT + até 3 UPDATE por médica no cron (que roda 1×/mês, baixíssima carga).
+- Testes: 3 testes novos cobrindo reconciled, dominant cancelled, incomplete (total `monthly-payouts.test.ts`: 17/17).
+- Backward-compat: happy path e testes de erro existentes não exigiram mudança de código da lib.
+
+**Referências:** `src/lib/monthly-payouts.ts` (§4c/4d/4e), `src/lib/monthly-payouts.test.ts` (3 testes novos), `docs/AUDIT-FINDINGS.md [5.5]`, `docs/COMPENSATION.md` (política base).
+
+**Supersedes:** nenhum. Complementa [D-040] (geração mensal) e [D-050] (política earning = dinheiro liquidado).
+
+---
+
 ## D-061 · Circuit breaker in-memory pra providers externos (finding 13.2) · 2026-04-20
 
 **Contexto.** Finding [13.2 🟠 ALTO] do audit: quando um provider externo (Asaas, Daily, WhatsApp Meta, ViaCEP) degrada, cada chamada ainda roda `fetchWithTimeout` até o fim (2.5–10s). O cascading é concreto:

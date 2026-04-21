@@ -594,13 +594,18 @@ _Fim da PARTE 1. Seguir pra PARTE 2 (Lentes 5 Dinheiro + 6 LGPD/CFM)._
 
 ### [5.5] `monthly-payouts.ts` — clawback novo entre SELECT e UPDATE vira "dinheiro a mais"
 
-- **Veredicto:** 🟠 ALTO
-- **Achado:** `src/lib/monthly-payouts.ts:140-316` roda em 2 passos sequenciais:
+- **Veredicto:** ✅ RESOLVED em 2026-04-20 via PR-051 · D-062.
+- **Achado original:** `src/lib/monthly-payouts.ts:140-316` rodava em 2 passos sequenciais:
   1. `select doctor_earnings where status='available' ... available_at < monthStart`
   2. `update doctor_earnings set payout_id=new` para os IDs agregados.
-  Entre (1) e (2), se um webhook `PAYMENT_CHARGEBACK_REQUESTED` cria um `refund_clawback` negativo (`status=available`), esse earning **não entra no payout atual**, mas a médica continua recebendo o saldo bruto sem desconto.
-- **Risco:** no caso extremo (chargeback massivo no dia do fechamento), médica recebe via PIX a quantia total + a clawback é aplicada **no mês seguinte**, criando saldo negativo. Se a médica sair antes, saldo negativo vira prejuízo do Instituto.
-- **Correção (PR):** no passo 2, re-agregar valor com `sum(amount_cents)` do universo atual (incluindo clawbacks novos) antes de chamar `insert doctor_payouts`. Ou: rodar tudo numa SQL transaction com `SELECT ... FOR UPDATE` em `doctor_earnings` do doctor_id.
+  Entre (1) e (2), se um webhook `PAYMENT_CHARGEBACK_REQUESTED` criava um `refund_clawback` negativo (`status=available`), esse earning **não entrava no payout atual**, mas a médica continuava recebendo o saldo bruto sem desconto.
+- **Risco original:** no caso extremo (chargeback massivo no dia do fechamento), médica recebe via PIX a quantia total + a clawback é aplicada **no mês seguinte**, criando saldo negativo. Se a médica sair antes, saldo negativo vira prejuízo do Instituto.
+- **Solução aplicada:** loop bounded de reconciliação pós-link (`§4c/4d/4e` em `monthly-payouts.ts`):
+  - Max 3 iter de `SELECT extras → UPDATE link → incorpora sum real`.
+  - Se houve extras: `UPDATE doctor_payouts SET amount_cents=final, earnings_count=final WHERE status='draft'` + warning `clawback_reconciled`.
+  - Se `sum ≤ 0` (clawback dominante): `UPDATE doctor_payouts SET status='cancelled'` + `UPDATE doctor_earnings SET payout_id=NULL, status='available'` (earnings voltam pra fila) + warning `clawback_dominant_cancelled`.
+  - Se não converge em 3 iter: warning `reconcile_incomplete`; próximo ciclo pega.
+  - 3 testes novos em `monthly-payouts.test.ts` (reconciled, dominant cancelled, incomplete). Total 17/17 ✅.
 - **Observador:** CFO, admin solo.
 
 ### [5.6] `/api/checkout` — consentimento LGPD não é persistido
@@ -1874,7 +1879,7 @@ Ordem recomendada de ataque (1 = primeiro):
 
 ### Financeiro (5)
 - ~~5.2 Earning em PAYMENT_CONFIRMED sem compensação financeira~~ — ✅ RESOLVED na Onda 1D (PR-014, D-050).
-- 5.5 Clawback não recalcula payout
+- ~~5.5 Clawback não recalcula payout~~ — ✅ RESOLVED em 2026-04-20 (PR-051, D-062).
 - 5.6 Checkout consent não persiste
 - 5.8 `asaas_events` sem TTL
 - 5.12 PII em `asaas_events`

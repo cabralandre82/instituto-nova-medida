@@ -375,8 +375,10 @@ describe("generateMonthlyPayouts", () => {
     });
     supa.enqueue("doctor_payouts", { data: { id: "p1" }, error: null });
     supa.enqueue("doctor_earnings", { data: [{ id: "e1" }], error: null });
+    supa.enqueue("doctor_earnings", { data: [], error: null }); // reconcile d1
     supa.enqueue("doctor_payouts", { data: { id: "p2" }, error: null });
     supa.enqueue("doctor_earnings", { data: [{ id: "e2" }], error: null });
+    supa.enqueue("doctor_earnings", { data: [], error: null }); // reconcile d2
 
     const r = await generateMonthlyPayouts(
       supa.client as unknown as SupabaseClient,
@@ -387,5 +389,254 @@ describe("generateMonthlyPayouts", () => {
     expect(r.earningsLinked).toBe(2);
     expect(r.totalCentsDrafted).toBe(50000);
     expect(r.errors).toBe(0);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // D-062 · PR-051 · finding 5.5 — reconciliação pós-clawback
+  // ─────────────────────────────────────────────────────────────────────
+
+  it("5.5 · clawback positivo chega entre select e update → é reconciliado ao payout", async () => {
+    // Estado inicial: e1 (+20000), e2 (+4000), sum=24000.
+    supa.enqueue("doctor_earnings", {
+      data: [
+        { id: "e1", doctor_id: "d1", amount_cents: 20000 },
+        { id: "e2", doctor_id: "d1", amount_cents: 4000 },
+      ],
+      error: null,
+    });
+    supa.enqueue("doctors", {
+      data: [
+        {
+          id: "d1",
+          full_name: "Dra. A",
+          display_name: "Dra. A",
+          status: "active",
+        },
+      ],
+      error: null,
+    });
+    supa.enqueue("doctor_payment_methods", {
+      data: [
+        {
+          doctor_id: "d1",
+          pix_key: "chave",
+          pix_key_type: "EMAIL",
+          pix_key_holder: "Dra. A",
+        },
+      ],
+      error: null,
+    });
+    // INSERT payout
+    supa.enqueue("doctor_payouts", { data: { id: "p-new" }, error: null });
+    // UPDATE earnings inicial (linkou e1, e2)
+    supa.enqueue("doctor_earnings", {
+      data: [{ id: "e1" }, { id: "e2" }],
+      error: null,
+    });
+    // Reconcile iter 1: SELECT extras — webhook criou clawback e3=-4000
+    supa.enqueue("doctor_earnings", {
+      data: [{ id: "e3", amount_cents: -4000 }],
+      error: null,
+    });
+    // Reconcile iter 1: UPDATE extras
+    supa.enqueue("doctor_earnings", {
+      data: [{ id: "e3", amount_cents: -4000 }],
+      error: null,
+    });
+    // Reconcile iter 2: SELECT extras (vazio — convergiu)
+    supa.enqueue("doctor_earnings", { data: [], error: null });
+    // Adjust payout amount (não ≤ 0 — amount final = 20000)
+    supa.enqueue("doctor_payouts", { data: null, error: null });
+
+    const r = await generateMonthlyPayouts(
+      supa.client as unknown as SupabaseClient,
+      { referencePeriod: "2026-03" }
+    );
+
+    expect(r.payoutsCreated).toBe(1);
+    expect(r.earningsLinked).toBe(3); // e1 + e2 + e3
+    expect(r.totalCentsDrafted).toBe(20000); // 24000 - 4000
+    expect(r.errors).toBe(0);
+
+    const reconciled = r.warnings.find(
+      (w) => w.reason === "clawback_reconciled"
+    );
+    expect(reconciled).toBeDefined();
+    expect(reconciled!.amountCents).toBe(20000);
+    expect(reconciled!.earningsCount).toBe(3);
+
+    // Verifica que fez UPDATE em doctor_payouts com o novo amount
+    const adjustCalls = supa.calls.filter(
+      (c) =>
+        c.table === "doctor_payouts" &&
+        c.chain.includes("update") &&
+        !c.chain.includes("insert")
+    );
+    expect(adjustCalls.length).toBeGreaterThanOrEqual(1);
+    const adjustPayload = adjustCalls[0].args[
+      adjustCalls[0].chain.indexOf("update")
+    ][0] as { amount_cents: number; earnings_count: number };
+    expect(adjustPayload.amount_cents).toBe(20000);
+    expect(adjustPayload.earnings_count).toBe(3);
+  });
+
+  it("5.5 · clawback dominante (sum final ≤ 0) → payout auto-cancelado + earnings liberadas", async () => {
+    // Estado inicial: e1 (+10000). Sum=+10000 no SELECT inicial.
+    supa.enqueue("doctor_earnings", {
+      data: [{ id: "e1", doctor_id: "d1", amount_cents: 10000 }],
+      error: null,
+    });
+    supa.enqueue("doctors", {
+      data: [
+        {
+          id: "d1",
+          full_name: "Dra. A",
+          display_name: "Dra. A",
+          status: "active",
+        },
+      ],
+      error: null,
+    });
+    supa.enqueue("doctor_payment_methods", {
+      data: [
+        {
+          doctor_id: "d1",
+          pix_key: "k1",
+          pix_key_type: "EMAIL",
+          pix_key_holder: "A",
+        },
+      ],
+      error: null,
+    });
+    supa.enqueue("doctor_payouts", { data: { id: "p1" }, error: null });
+    // UPDATE inicial linka e1
+    supa.enqueue("doctor_earnings", { data: [{ id: "e1" }], error: null });
+    // Reconcile iter 1: webhook criou 2 clawbacks (-6000, -5000) = -11000
+    supa.enqueue("doctor_earnings", {
+      data: [
+        { id: "e2", amount_cents: -6000 },
+        { id: "e3", amount_cents: -5000 },
+      ],
+      error: null,
+    });
+    supa.enqueue("doctor_earnings", {
+      data: [
+        { id: "e2", amount_cents: -6000 },
+        { id: "e3", amount_cents: -5000 },
+      ],
+      error: null,
+    });
+    // Reconcile iter 2: vazio
+    supa.enqueue("doctor_earnings", { data: [], error: null });
+    // Adjust amount (-1000) — ok
+    supa.enqueue("doctor_payouts", { data: null, error: null });
+    // Auto-cancel payout (amount ≤ 0)
+    supa.enqueue("doctor_payouts", { data: null, error: null });
+    // Release earnings (payout_id=null, status=available)
+    supa.enqueue("doctor_earnings", { data: null, error: null });
+
+    const r = await generateMonthlyPayouts(
+      supa.client as unknown as SupabaseClient,
+      { referencePeriod: "2026-03" }
+    );
+
+    // Payout não conta (foi cancelado automaticamente)
+    expect(r.payoutsCreated).toBe(0);
+    expect(r.earningsLinked).toBe(0);
+    expect(r.totalCentsDrafted).toBe(0);
+    expect(r.errors).toBe(0);
+
+    // Warning dominant_cancelled com amount negativo
+    const cancelled = r.warnings.find(
+      (w) => w.reason === "clawback_dominant_cancelled"
+    );
+    expect(cancelled).toBeDefined();
+    expect(cancelled!.amountCents).toBe(-1000); // 10000 - 11000
+    expect(cancelled!.earningsCount).toBe(3);
+
+    // E o `clawback_reconciled` foi removido (substituído pelo cancelled)
+    expect(
+      r.warnings.find((w) => w.reason === "clawback_reconciled")
+    ).toBeUndefined();
+
+    // Verifica que:
+    //  (a) houve UPDATE em doctor_payouts com status='cancelled'
+    //  (b) houve UPDATE em doctor_earnings liberando (payout_id=null)
+    const cancelCall = supa.calls.find(
+      (c) =>
+        c.table === "doctor_payouts" &&
+        c.chain.includes("update") &&
+        (c.args[c.chain.indexOf("update")][0] as { status?: string }).status ===
+          "cancelled"
+    );
+    expect(cancelCall).toBeDefined();
+
+    const releaseCall = supa.calls.find((c) => {
+      if (c.table !== "doctor_earnings" || !c.chain.includes("update"))
+        return false;
+      const payload = c.args[c.chain.indexOf("update")][0] as {
+        payout_id?: string | null;
+        status?: string;
+      };
+      return payload.payout_id === null && payload.status === "available";
+    });
+    expect(releaseCall).toBeDefined();
+  });
+
+  it("5.5 · reconcile não converge em 3 iters → warning reconcile_incomplete", async () => {
+    supa.enqueue("doctor_earnings", {
+      data: [{ id: "e1", doctor_id: "d1", amount_cents: 10000 }],
+      error: null,
+    });
+    supa.enqueue("doctors", {
+      data: [
+        {
+          id: "d1",
+          full_name: "Dra. A",
+          display_name: "Dra. A",
+          status: "active",
+        },
+      ],
+      error: null,
+    });
+    supa.enqueue("doctor_payment_methods", {
+      data: [
+        {
+          doctor_id: "d1",
+          pix_key: "k1",
+          pix_key_type: "EMAIL",
+          pix_key_holder: "A",
+        },
+      ],
+      error: null,
+    });
+    supa.enqueue("doctor_payouts", { data: { id: "p1" }, error: null });
+    supa.enqueue("doctor_earnings", { data: [{ id: "e1" }], error: null });
+    // 3 iters de reconcile: cada uma encontra mais earnings pra linkar
+    // (simulando tempestade contínua de webhooks)
+    for (let i = 0; i < 3; i++) {
+      supa.enqueue("doctor_earnings", {
+        data: [{ id: `ex${i}`, amount_cents: 500 }],
+        error: null,
+      });
+      supa.enqueue("doctor_earnings", {
+        data: [{ id: `ex${i}`, amount_cents: 500 }],
+        error: null,
+      });
+    }
+    // Após 3 iters, faz a checagem final — ainda há 1 extra não convergido
+    supa.enqueue("doctor_earnings", { data: [{ id: "still" }], error: null });
+    // Adjust amount (extras foram linkados mesmo que não convergiu)
+    supa.enqueue("doctor_payouts", { data: null, error: null });
+
+    const r = await generateMonthlyPayouts(
+      supa.client as unknown as SupabaseClient,
+      { referencePeriod: "2026-03" }
+    );
+
+    expect(r.payoutsCreated).toBe(1);
+    expect(r.warnings.some((w) => w.reason === "reconcile_incomplete")).toBe(
+      true
+    );
   });
 });

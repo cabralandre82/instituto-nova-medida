@@ -1,5 +1,5 @@
 /**
- * Geração mensal de payouts (D-040).
+ * Geração mensal de payouts (D-040, D-062).
  *
  * Reimplementação Node da RPC `generate_monthly_payouts()` com
  * observabilidade rica:
@@ -23,9 +23,48 @@
  *   * Se INSERT colide, tratamos como "já gerado" e seguimos — sem erro.
  *   * Rodar duas vezes no mesmo período resulta em
  *     `payoutsSkippedExisting` > 0 e `payoutsCreated` = 0 na segunda.
+ *
+ * Race contra clawback (D-062 · PR-051 · finding 5.5):
+ *   Entre o SELECT inicial (passo 1) e o UPDATE de vinculação (passo 4b),
+ *   um webhook PAYMENT_REFUNDED / PAYMENT_CHARGEBACK pode criar um
+ *   earning negativo (`type='refund_clawback'`, `status='available'`,
+ *   `available_at=now`). Se `now < monthStart` ainda (virada de ciclo),
+ *   esse clawback é elegível pro payout corrente, mas NÃO entrou no
+ *   `agg.total` porque o SELECT já aconteceu.
+ *
+ *   Sintoma: payout criado com amount=+300, médica recebe via PIX, clawback
+ *   de -50 fica órfão pro próximo mês → saldo inicial negativo. Se a médica
+ *   sair antes, vira prejuízo do Instituto (audit 5.5).
+ *
+ *   Correção: após o link inicial, fazer um loop bounded de reconciliação
+ *   (max 3 iter) que:
+ *     (a) re-busca earnings available/unlinked do doctor (apenas com
+ *         available_at < monthStart — só o ciclo corrente);
+ *     (b) tenta linkar ao payout recém-criado (guard status + payout_id);
+ *     (c) se encontra extras, ajusta `amount_cents` e `earnings_count` do
+ *         payout (somente se ainda `draft`).
+ *
+ *   Se a soma final ficar ≤ 0 (clawback dominante), o payout é
+ *   automaticamente cancelado (`status='cancelled'`, razão explícita)
+ *   e os earnings voltam pra `available`/`payout_id=null` — o próximo
+ *   ciclo reprocessa. Limite de 3 iter evita starvation em cenário
+ *   patológico (chargeback em massa) — nesse caso fica warning
+ *   `reconcile_incomplete` e o resto rola pro próximo mês.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "monthly-payouts" });
+
+/**
+ * Limite do loop de reconciliação. Valor empírico: 3 iters dão espaço
+ * pra absorver até 3 rajadas consecutivas de clawback enquanto o cron
+ * roda, sem arriscar loop infinito se algum bug criar earnings
+ * continuamente. Na prática, a 2ª iter já deveria convergir (o cron
+ * leva <5s por médica).
+ */
+const RECONCILE_MAX_ITERATIONS = 3;
 
 export type GenerateMonthlyPayoutsOptions = {
   /**
@@ -49,7 +88,13 @@ export type DoctorPayoutWarning = {
     | "pix_key_empty"
     | "existing_payout"
     | "doctor_inactive"
-    | "doctor_not_found";
+    | "doctor_not_found"
+    /** Extras linkados pós-criação (info — não é falha). D-062. */
+    | "clawback_reconciled"
+    /** Sum final ≤ 0; payout cancelado automaticamente. D-062. */
+    | "clawback_dominant_cancelled"
+    /** 3 iters sem convergir; próximo ciclo pega. D-062. */
+    | "reconcile_incomplete";
 };
 
 export type GenerateMonthlyPayoutsResult = {
@@ -323,7 +368,8 @@ export async function generateMonthlyPayouts(
       continue;
     }
 
-    const linkedCount = (linked ?? []).length;
+    const linkedRows = (linked ?? []) as Array<{ id: string }>;
+    const linkedCount = linkedRows.length;
     result.earningsLinked += linkedCount;
     result.payoutsCreated += 1;
     result.totalCentsDrafted += agg.total;
@@ -338,6 +384,261 @@ export async function generateMonthlyPayouts(
         earningsCount: 0,
         reason: "existing_payout",
       });
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 4c) Reconciliação pós-link (D-062 · PR-051 · finding 5.5).
+    //
+    // Captura earnings que chegaram ENTRE o SELECT inicial (passo 1)
+    // e o UPDATE de vínculo (passo 4b) — tipicamente, clawbacks
+    // criados por webhook PAYMENT_REFUNDED rodando em paralelo.
+    //
+    // Loop bounded: re-seleciona extras candidatos; tenta linkar ao
+    // payout recém-criado; se algum rolou, incorpora. Repete até
+    // esvaziar ou bater RECONCILE_MAX_ITERATIONS.
+    // ────────────────────────────────────────────────────────────────
+
+    let extraSum = 0;
+    let extraCount = 0;
+    let iter = 0;
+    let converged = true;
+
+    while (iter < RECONCILE_MAX_ITERATIONS) {
+      iter += 1;
+
+      const { data: extras, error: extrasErr } = await supabase
+        .from("doctor_earnings")
+        .select("id, amount_cents")
+        .eq("doctor_id", doctorId)
+        .eq("status", "available")
+        .is("payout_id", null)
+        .lt("available_at", monthStart);
+
+      if (extrasErr) {
+        // Falha na leitura: não sabemos se há extras. Registra error
+        // mas não bloqueia — o payout original segue válido com o sum
+        // capturado no SELECT inicial. Próximo ciclo reprocessa se
+        // sobrar earning.
+        result.errors += 1;
+        result.errorDetails.push(
+          `reconcile select ${doctorId}: ${extrasErr.message}`
+        );
+        converged = false;
+        break;
+      }
+
+      const extraRows = (extras ?? []) as Array<{
+        id: string;
+        amount_cents: number;
+      }>;
+      if (extraRows.length === 0) break; // convergiu
+
+      const extraIds = extraRows.map((e) => e.id);
+
+      const { data: extraLinked, error: linkExtraErr } = await supabase
+        .from("doctor_earnings")
+        .update({
+          payout_id: newPayoutId,
+          status: "in_payout",
+          updated_at: new Date().toISOString(),
+        })
+        .in("id", extraIds)
+        .eq("status", "available")
+        .is("payout_id", null)
+        .select("id, amount_cents");
+
+      if (linkExtraErr) {
+        result.errors += 1;
+        result.errorDetails.push(
+          `reconcile link ${doctorId}: ${linkExtraErr.message}`
+        );
+        converged = false;
+        break;
+      }
+
+      // Soma só do que EFETIVAMENTE foi linkado (concorrência pode ter
+      // roubado parte pra outro payout — teoricamente impossível hoje,
+      // mas o guard cobre de graça).
+      const actualLinked = (extraLinked ?? []) as Array<{
+        id: string;
+        amount_cents: number;
+      }>;
+
+      if (actualLinked.length === 0) {
+        // Vimos extras no SELECT mas nada foi linked — alguém mais rápido
+        // pegou. Sai pra não loopar à toa; se ainda restarem, próximo
+        // ciclo pega.
+        break;
+      }
+
+      extraSum += actualLinked.reduce((a, r) => a + r.amount_cents, 0);
+      extraCount += actualLinked.length;
+
+      // Se o UPDATE linkou MENOS do que o SELECT viu, provavelmente há
+      // mais chegando — próxima iter re-scaneia. Se linkou TUDO, próxima
+      // iter confirma ausência e sai.
+    }
+
+    if (!converged) {
+      // `reconcile select/link` error já foi registrado acima.
+    } else if (iter >= RECONCILE_MAX_ITERATIONS) {
+      // Potencialmente não convergiu — verifica de novo (barato).
+      const { data: stillExtras } = await supabase
+        .from("doctor_earnings")
+        .select("id")
+        .eq("doctor_id", doctorId)
+        .eq("status", "available")
+        .is("payout_id", null)
+        .lt("available_at", monthStart)
+        .limit(1);
+      if ((stillExtras ?? []).length > 0) {
+        log.warn("reconcile not converged", {
+          doctor_id: doctorId,
+          payout_id: newPayoutId,
+          iterations: iter,
+        });
+        result.warnings.push({
+          doctorId,
+          doctorName,
+          amountCents: 0,
+          earningsCount: 0,
+          reason: "reconcile_incomplete",
+        });
+      }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 4d) Se houve extras, ajusta amount_cents + earnings_count do
+    // payout. Guard `.eq("status", "draft")` evita sobrescrever um
+    // payout que o admin tenha aprovado no meio tempo (cenário extremo
+    // de corrida humana × cron — não deveria acontecer, mas cinto +
+    // suspensório).
+    // ────────────────────────────────────────────────────────────────
+
+    if (extraCount > 0) {
+      const finalAmount = agg.total + extraSum;
+      const finalCount = linkedCount + extraCount;
+
+      const { error: adjErr } = await supabase
+        .from("doctor_payouts")
+        .update({
+          amount_cents: finalAmount,
+          earnings_count: finalCount,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", newPayoutId)
+        .eq("status", "draft");
+
+      if (adjErr) {
+        log.warn("payout amount adjust failed", {
+          payout_id: newPayoutId,
+          err: adjErr.message,
+        });
+        result.errors += 1;
+        result.errorDetails.push(
+          `reconcile adjust ${doctorId}: ${adjErr.message}`
+        );
+      } else {
+        result.earningsLinked += extraCount;
+        result.totalCentsDrafted += extraSum;
+        result.warnings.push({
+          doctorId,
+          doctorName,
+          amountCents: finalAmount,
+          earningsCount: finalCount,
+          reason: "clawback_reconciled",
+        });
+        log.info("payout reconciled", {
+          payout_id: newPayoutId,
+          initial_amount_cents: agg.total,
+          final_amount_cents: finalAmount,
+          extra_count: extraCount,
+        });
+      }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 4e) Se a soma final ficou ≤ 0 (clawback dominante), cancela o
+    // payout automaticamente e libera os earnings pro próximo ciclo.
+    //
+    // Cenário: médica teve +300 em earnings elegíveis, mas um
+    // chargeback gerou um clawback de -400 que foi reconciliado. Payout
+    // de -100 não faz sentido (médica não "deve" dinheiro pra nós via
+    // PIX); o certo é deixar o saldo negativo acumular pro próximo mês
+    // quando ela tiver earnings novas pra compensar.
+    // ────────────────────────────────────────────────────────────────
+
+    const finalAmountCheck = agg.total + extraSum;
+    if (finalAmountCheck <= 0) {
+      const { error: cancelErr } = await supabase
+        .from("doctor_payouts")
+        .update({
+          status: "cancelled",
+          cancelled_reason:
+            "Auto-cancelado: soma final dos earnings vinculados ≤ 0 (clawback ≥ earnings positivos). Earnings liberados pra fila do próximo ciclo.",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", newPayoutId)
+        .eq("status", "draft");
+
+      if (cancelErr) {
+        log.error("payout auto-cancel failed", {
+          payout_id: newPayoutId,
+          err: cancelErr.message,
+        });
+        result.errors += 1;
+        result.errorDetails.push(
+          `reconcile cancel ${doctorId}: ${cancelErr.message}`
+        );
+      } else {
+        // Libera earnings: voltam pra available, unlinked.
+        const { error: releaseErr } = await supabase
+          .from("doctor_earnings")
+          .update({
+            payout_id: null,
+            status: "available",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("payout_id", newPayoutId);
+
+        if (releaseErr) {
+          log.error("earnings release failed", {
+            payout_id: newPayoutId,
+            err: releaseErr.message,
+          });
+          result.errors += 1;
+          result.errorDetails.push(
+            `reconcile release ${doctorId}: ${releaseErr.message}`
+          );
+        }
+
+        // Reverte stats: esse payout "não conta".
+        result.payoutsCreated -= 1;
+        result.totalCentsDrafted -= agg.total + extraSum;
+        result.earningsLinked -= linkedCount + extraCount;
+
+        // Substitui o warning `clawback_reconciled` (se houve) pelo
+        // estado final `clawback_dominant_cancelled`.
+        const lastIdx = result.warnings.findIndex(
+          (w) =>
+            w.doctorId === doctorId && w.reason === "clawback_reconciled"
+        );
+        if (lastIdx >= 0) result.warnings.splice(lastIdx, 1);
+
+        result.warnings.push({
+          doctorId,
+          doctorName,
+          amountCents: finalAmountCheck,
+          earningsCount: linkedCount + extraCount,
+          reason: "clawback_dominant_cancelled",
+        });
+
+        log.warn("payout auto-cancelled (clawback dominant)", {
+          payout_id: newPayoutId,
+          doctor_id: doctorId,
+          final_amount_cents: finalAmountCheck,
+        });
+      }
     }
   }
 
