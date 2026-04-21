@@ -14,6 +14,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { signPatientToken } from "@/lib/patient-tokens";
 import { labelForAppointmentStatus } from "@/lib/patient-treatment";
 import { JoinRoomButton } from "@/app/consulta/[id]/JoinRoomButton";
+import { formatDateBR, formatDateTimeBR, formatTimeBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -24,8 +25,8 @@ type AppointmentRecord = {
   status: string;
   scheduled_at: string;
   scheduled_until: string | null;
-  completed_at: string | null;
-  cancel_reason: string | null;
+  ended_at: string | null;
+  cancelled_reason: string | null;
   recording_consent: boolean | null;
   doctors:
     | { full_name: string; display_name: string | null; consultation_minutes: number }
@@ -39,20 +40,14 @@ function pickSingle<T>(v: T | T[] | null): T | null {
 }
 
 function fmtDateTime(iso: string): { date: string; time: string } {
-  const d = new Date(iso);
   return {
-    date: d.toLocaleDateString("pt-BR", {
+    date: formatDateBR(iso, {
       weekday: "long",
       day: "2-digit",
       month: "long",
       year: "numeric",
-      timeZone: "America/Sao_Paulo",
     }),
-    time: d.toLocaleTimeString("pt-BR", {
-      hour: "2-digit",
-      minute: "2-digit",
-      timeZone: "America/Sao_Paulo",
-    }),
+    time: formatTimeBR(iso),
   };
 }
 
@@ -68,7 +63,7 @@ export default async function AppointmentDetailPage({
   const { data, error } = await supabase
     .from("appointments")
     .select(
-      "id, customer_id, status, scheduled_at, scheduled_until, completed_at, cancel_reason, recording_consent, doctors ( full_name, display_name, consultation_minutes )",
+      "id, customer_id, status, scheduled_at, scheduled_until, ended_at, cancelled_reason, recording_consent, doctors ( full_name, display_name, consultation_minutes )",
     )
     .eq("id", appointmentId)
     .maybeSingle();
@@ -160,18 +155,14 @@ export default async function AppointmentDetailPage({
               <p className="text-sm text-ink-600 leading-relaxed">
                 Esta consulta foi encerrada.
               </p>
-              {appt.cancel_reason && (
+              {appt.cancelled_reason && (
                 <p className="mt-2 text-xs text-ink-500">
-                  Motivo registrado: {appt.cancel_reason}
+                  Motivo registrado: {appt.cancelled_reason}
                 </p>
               )}
-              {appt.completed_at && (
+              {appt.ended_at && (
                 <p className="mt-2 text-xs text-ink-500">
-                  Concluída em{" "}
-                  {new Date(appt.completed_at).toLocaleString("pt-BR", {
-                    dateStyle: "short",
-                    timeStyle: "short",
-                  })}
+                  Concluída em {formatDateTimeBR(appt.ended_at)}
                 </p>
               )}
             </div>

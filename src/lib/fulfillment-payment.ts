@@ -1,18 +1,25 @@
 /**
- * src/lib/fulfillment-payment.ts — D-044 · onda 2.C.2
+ * src/lib/fulfillment-payment.ts — D-044 · onda 2.C.2 · hardened em PR-015.
  *
  * Garante que um fulfillment em `pending_payment` tenha uma
  * cobrança no Asaas com `invoice_url` pra redirecionar o paciente.
  *
- * Idempotência em duas camadas:
+ * Idempotência em TRÊS camadas (PR-015 / audit [5.3]):
  *
- * 1. Se `fulfillments.payment_id` já está setado e a row em
- *    `payments` ainda é PENDING/awaiting — devolve o invoice_url
- *    existente. Não cria outra cobrança.
+ * 1. Query inicial por `payments.fulfillment_id = ff.id` com status
+ *    "vivo" (não DELETED/REFUNDED/REFUND_REQUESTED). Se achar, devolve
+ *    direto — é o caminho rápido.
  *
- * 2. Se o row local existe mas o Asaas payment foi cancelado ou
- *    está com status de erro, criamos uma nova cobrança vinculada
- *    ao mesmo fulfillment (soltamos o payment_id antigo).
+ * 2. INSERT em `payments` com `fulfillment_id = ff.id`. O banco tem um
+ *    UNIQUE PARTIAL INDEX (`payments_fulfillment_id_alive_uniq`) que
+ *    garante no máximo uma cobrança viva por fulfillment. Se duas
+ *    threads chegarem aqui simultaneamente, só uma passa; a outra
+ *    recebe `23505` e re-lê a row vencedora — sem criar cobrança
+ *    duplicada no Asaas.
+ *
+ * 3. Se a tentativa de criar no Asaas falhar, marcamos a row local como
+ *    DELETED pra liberar o slot do UNIQUE PARTIAL, permitindo nova
+ *    tentativa legítima na próxima chamada.
  *
  * A função assume que `acceptFulfillment` já foi executado com
  * sucesso — ou seja, o fulfillment está em `pending_payment` com
@@ -37,6 +44,7 @@ import {
   type AsaasBillingType,
   type AsaasEnv,
 } from "./asaas";
+import { formatCurrencyBRL } from "./datetime-br";
 
 // ────────────────────────────────────────────────────────────────────────
 // Tipos
@@ -111,6 +119,18 @@ const REUSABLE_PAYMENT_STATUSES = new Set([
   "PENDING",
   "AWAITING_RISK_ANALYSIS",
   "CONFIRMED", // em casos raros onde o status já avançou mas o invoice ainda serve
+]);
+
+/**
+ * Status que liberam o slot do unique parcial `payments_fulfillment_id_alive_uniq`.
+ * Row nesses estados NÃO bloqueia a criação de uma nova cobrança pro
+ * mesmo fulfillment — é o que nos dá legitimidade pra retentar após
+ * cancelamento no provedor.
+ */
+const DEAD_PAYMENT_STATUSES = new Set([
+  "DELETED",
+  "REFUNDED",
+  "REFUND_REQUESTED",
 ]);
 
 function unwrap<T>(v: unknown): T | null {
@@ -189,42 +209,72 @@ export async function ensurePaymentForFulfillment(
     };
   }
 
-  // 2. Se já tem payment, reusar se estiver em estado ok
-  if (ff.payment_id) {
-    const payRes = await supabase
-      .from("payments")
-      .select("id, status, invoice_url, amount_cents, asaas_payment_id")
-      .eq("id", ff.payment_id)
-      .maybeSingle();
-
-    if (payRes.error) {
+  // 2. Idempotência: existe cobrança VIVA pra esse fulfillment?
+  //    PR-015: consulta por fulfillment_id (fonte de verdade) em vez
+  //    de fulfillments.payment_id. Isso garante que mesmo se o link
+  //    `fulfillments.payment_id` ficar temporariamente vazio (ex.:
+  //    falha no UPDATE depois do insert bem-sucedido), a próxima
+  //    chamada ainda encontra a cobrança.
+  const existingAlive = await findAlivePaymentForFulfillment(supabase, ff.id);
+  if (existingAlive.error) {
+    return {
+      ok: false,
+      code: "db_error",
+      message: `Erro ao carregar pagamento: ${existingAlive.error}`,
+    };
+  }
+  if (existingAlive.payment) {
+    const p = existingAlive.payment;
+    if (REUSABLE_PAYMENT_STATUSES.has(p.status) && p.invoice_url && p.asaas_payment_id) {
+      // Garante que fulfillments.payment_id aponta pra esta row
+      // (recuperação de um estado onde o link se perdeu).
+      if (ff.payment_id !== p.id) {
+        const relinkRes = await supabase
+          .from("fulfillments")
+          .update({ payment_id: p.id })
+          .eq("id", ff.id);
+        if (relinkRes.error) {
+          console.error(
+            "[ensurePaymentForFulfillment] re-link ff→payment falhou:",
+            relinkRes.error
+          );
+        }
+      }
       return {
-        ok: false,
-        code: "db_error",
-        message: `Erro ao carregar pagamento: ${payRes.error.message}`,
+        ok: true,
+        paymentId: p.id,
+        asaasPaymentId: p.asaas_payment_id,
+        invoiceUrl: p.invoice_url,
+        amountCents: p.amount_cents,
+        alreadyExisted: true,
       };
     }
-    if (payRes.data) {
-      const p = payRes.data as {
-        id: string;
-        status: string;
-        invoice_url: string | null;
-        amount_cents: number;
-        asaas_payment_id: string | null;
-      };
-      if (REUSABLE_PAYMENT_STATUSES.has(p.status) && p.invoice_url && p.asaas_payment_id) {
+    // Row existe mas não é mais usável (status transitório ou sem
+    // invoice_url). Não tentamos reciclar — criamos nova somente se
+    // a row atual estiver em estado "morto" (liberando o slot do
+    // unique parcial). Se estiver em estado "vivo mas inútil" (ex.:
+    // PENDING sem invoice_url porque o Asaas falhou no meio), o
+    // unique parcial impediria novo insert. Nesse caso, marcamos
+    // DELETED antes.
+    if (!DEAD_PAYMENT_STATUSES.has(p.status)) {
+      const markDead = await supabase
+        .from("payments")
+        .update({
+          status: "DELETED",
+          asaas_raw: {
+            error: "payment_unusable_precleanup",
+            previous_status: p.status,
+            cleared_at: new Date().toISOString(),
+          } as unknown as Record<string, unknown>,
+        })
+        .eq("id", p.id);
+      if (markDead.error) {
         return {
-          ok: true,
-          paymentId: p.id,
-          asaasPaymentId: p.asaas_payment_id,
-          invoiceUrl: p.invoice_url,
-          amountCents: p.amount_cents,
-          alreadyExisted: true,
+          ok: false,
+          code: "db_error",
+          message: `Não foi possível limpar cobrança anterior inutilizável: ${markDead.error.message}`,
         };
       }
-      // Caiu aqui: payment existe mas não é aproveitável (refunded,
-      // deleted, etc.). Seguimos criando novo, mas sem desvincular o
-      // antigo (histórico preservado).
     }
   }
 
@@ -288,6 +338,7 @@ export async function ensurePaymentForFulfillment(
     .insert({
       customer_id: ff.customer.id,
       plan_id: ff.plan.id,
+      fulfillment_id: ff.id,
       amount_cents: amountCents,
       billing_type: billingType,
       status: "PENDING",
@@ -298,6 +349,31 @@ export async function ensurePaymentForFulfillment(
     .single();
 
   if (insertRes.error || !insertRes.data) {
+    // PR-015: 23505 = unique parcial acionado. Outra thread venceu a
+    // race e já criou a cobrança viva desse fulfillment. Re-lemos e
+    // devolvemos idempotentemente — sem criar nada no Asaas.
+    if (insertRes.error?.code === "23505") {
+      const recheck = await findAlivePaymentForFulfillment(supabase, ff.id);
+      if (recheck.payment && recheck.payment.asaas_payment_id && recheck.payment.invoice_url) {
+        return {
+          ok: true,
+          paymentId: recheck.payment.id,
+          asaasPaymentId: recheck.payment.asaas_payment_id,
+          invoiceUrl: recheck.payment.invoice_url,
+          amountCents: recheck.payment.amount_cents,
+          alreadyExisted: true,
+        };
+      }
+      // Race vencida pela outra thread mas ela ainda não finalizou
+      // o round-trip no Asaas. Não criamos outra — o cliente deve
+      // retentar em alguns segundos. Retornamos erro transitório.
+      return {
+        ok: false,
+        code: "db_error",
+        message:
+          "Uma cobrança para este tratamento está sendo criada. Tente novamente em alguns segundos.",
+      };
+    }
     return {
       ok: false,
       code: "db_error",
@@ -379,14 +455,57 @@ export async function ensurePaymentForFulfillment(
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Helpers de consulta (PR-015)
+// ────────────────────────────────────────────────────────────────────────
+
+type AlivePayment = {
+  id: string;
+  status: string;
+  invoice_url: string | null;
+  amount_cents: number;
+  asaas_payment_id: string | null;
+};
+
+type FindAlivePaymentResult = {
+  payment: AlivePayment | null;
+  error: string | null;
+};
+
+/**
+ * Busca a cobrança VIVA (status não em DELETED/REFUNDED/REFUND_REQUESTED)
+ * vinculada a um fulfillment. Usa o índice único parcial criado em
+ * `20260429010000_payments_fulfillment_id_unique.sql` — como há no
+ * máximo uma row satisfazendo o filtro, ordenamos por `created_at desc`
+ * por defesa em profundidade.
+ */
+async function findAlivePaymentForFulfillment(
+  supabase: SupabaseClient,
+  fulfillmentId: string
+): Promise<FindAlivePaymentResult> {
+  const res = await supabase
+    .from("payments")
+    .select("id, status, invoice_url, amount_cents, asaas_payment_id")
+    .eq("fulfillment_id", fulfillmentId)
+    .not("status", "in", "(DELETED,REFUNDED,REFUND_REQUESTED)")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (res.error) {
+    return { payment: null, error: res.error.message };
+  }
+  if (!res.data) {
+    return { payment: null, error: null };
+  }
+  return { payment: res.data as AlivePayment, error: null };
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Formatação (reuso pelo UI)
 // ────────────────────────────────────────────────────────────────────────
 
 export function formatBRL(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 export function reaisFromCents(cents: number): number {

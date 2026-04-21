@@ -152,11 +152,10 @@ function countBySource(
   return out;
 }
 
+import { formatCurrencyBRL, formatWeekdayLongBR, formatTimeBR } from "@/lib/datetime-br";
+
 function brl(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 function sourceLabel(source: string): string {
@@ -185,11 +184,7 @@ export default async function AdminDashboard() {
           {greeting()}.
         </h1>
         <p className="mt-2 text-ink-500">
-          {new Date().toLocaleDateString("pt-BR", {
-            weekday: "long",
-            day: "numeric",
-            month: "long",
-          })}
+          {formatWeekdayLongBR(new Date())}
           {" · "}
           <InboxSummaryInline inbox={d.inbox} />
         </p>
@@ -337,7 +332,7 @@ export default async function AdminDashboard() {
                   crítica{d.reconciliationCritical === 1 ? "" : "s"} financeira
                   {d.reconciliationCritical === 1 ? "" : "s"}.{" "}
                   <Link
-                    href="/admin/financeiro"
+                    href="/admin/financeiro/conciliacao"
                     className="text-sage-700 hover:underline"
                   >
                     Investigar
@@ -352,7 +347,7 @@ export default async function AdminDashboard() {
                   {d.reconciliationWarning} warning
                   {d.reconciliationWarning === 1 ? "" : "s"} de conciliação.{" "}
                   <Link
-                    href="/admin/financeiro"
+                    href="/admin/financeiro/conciliacao"
                     className="text-sage-700 hover:underline"
                   >
                     Revisar
@@ -409,10 +404,7 @@ function InboxSection({ inbox }: { inbox: AdminInbox }) {
         </p>
         <p className="text-sm text-sage-700">
           Nenhuma ação pendente no momento. Gerado{" "}
-          {new Date(inbox.generatedAt).toLocaleTimeString("pt-BR", {
-            hour: "2-digit",
-            minute: "2-digit",
-          })}
+          {formatTimeBR(inbox.generatedAt)}
           .
         </p>
       </div>

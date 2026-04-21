@@ -10,6 +10,7 @@
 import Link from "next/link";
 import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { formatCurrencyBRL, formatDateBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -56,7 +57,7 @@ function recentMonths(count: number): { key: string; label: string }[] {
   for (let i = 0; i < count; i += 1) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-    const label = d.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+    const label = formatDateBR(d, { month: "long", year: "numeric" });
     out.push({ key, label });
   }
   return out;
@@ -84,10 +85,7 @@ async function loadEarnings(doctorId: string, year: number, month: number) {
 }
 
 function brl(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 function brlSigned(cents: number): string {
@@ -96,7 +94,7 @@ function brlSigned(cents: number): string {
 }
 
 function fmtDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("pt-BR", {
+  return formatDateBR(iso, {
     day: "2-digit",
     month: "short",
   });

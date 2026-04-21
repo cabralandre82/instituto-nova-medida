@@ -25,6 +25,7 @@ import { notFound } from "next/navigation";
 import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { FinalizeForm } from "./FinalizeForm";
+import { formatCurrencyBRL, formatDateBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -101,7 +102,7 @@ async function loadData(
 }
 
 function fmtDateTime(iso: string): string {
-  return new Date(iso).toLocaleString("pt-BR", {
+  return formatDateBR(iso, {
     day: "2-digit",
     month: "short",
     year: "numeric",
@@ -111,10 +112,7 @@ function fmtDateTime(iso: string): string {
 }
 
 function brlFromCents(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 export default async function FinalizarConsultaPage({ params }: Params) {

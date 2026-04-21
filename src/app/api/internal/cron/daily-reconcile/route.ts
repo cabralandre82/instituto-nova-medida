@@ -53,6 +53,7 @@ import {
   reconcileAppointmentFromMeetings,
   type ReconcileAction,
 } from "@/lib/reconcile";
+import { assertCronRequest } from "@/lib/cron-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -61,15 +62,6 @@ const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 200;
 const MIN_AGE_MINUTES = 5; // só reconcilia após 5 min do fim previsto
 const MAX_AGE_HOURS = 2; // não volta > 2h pra trás
-
-function isAuthorized(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true;
-  const auth = req.headers.get("authorization") || "";
-  if (auth === `Bearer ${secret}`) return true;
-  if (req.headers.get("x-cron-secret") === secret) return true;
-  return false;
-}
 
 function parseLimit(req: NextRequest): number {
   const raw = req.nextUrl.searchParams.get("limit");
@@ -117,12 +109,8 @@ function newCounters(): ReportCounters {
 }
 
 export async function GET(req: NextRequest) {
-  if (!isAuthorized(req)) {
-    return NextResponse.json(
-      { ok: false, error: "unauthorized" },
-      { status: 401 }
-    );
-  }
+  const unauth = assertCronRequest(req);
+  if (unauth) return unauth;
 
   const limit = parseLimit(req);
   const supabase = getSupabaseAdmin();

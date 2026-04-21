@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { formatTimeBR } from "@/lib/datetime-br";
 
 type DoctorEditable = {
   display_name: string | null;
@@ -149,12 +150,7 @@ export function ProfileForm({ initial }: { initial: DoctorEditable }) {
         </button>
         {savedAt && (
           <span className="text-sm text-sage-700">
-            Salvo às{" "}
-            {savedAt.toLocaleTimeString("pt-BR", {
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
-            .
+            Salvo às {formatTimeBR(savedAt)}.
           </span>
         )}
       </div>

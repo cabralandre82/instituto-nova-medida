@@ -19,36 +19,33 @@ import {
   listActiveFulfillments,
   listPastAppointments,
   listPendingOffers,
-  type PendingOffer,
 } from "@/lib/patient-treatment";
 import { signPatientToken } from "@/lib/patient-tokens";
+import {
+  formatCurrencyBRL,
+  formatDateBR,
+  formatTimeBR,
+  formatWeekdayLongBR,
+} from "@/lib/datetime-br";
 import { ActiveFulfillmentCard } from "./_ActiveFulfillmentCard";
+import { PendingOfferCard } from "./_PendingOfferCard";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 function fmtDateTime(iso: string): { date: string; time: string } {
-  const d = new Date(iso);
   return {
-    date: d.toLocaleDateString("pt-BR", {
+    date: formatDateBR(iso, {
       weekday: "long",
       day: "2-digit",
       month: "long",
-      timeZone: "America/Sao_Paulo",
     }),
-    time: d.toLocaleTimeString("pt-BR", {
-      hour: "2-digit",
-      minute: "2-digit",
-      timeZone: "America/Sao_Paulo",
-    }),
+    time: formatTimeBR(iso),
   };
 }
 
 function brl(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 export default async function PatientDashboard() {
@@ -81,13 +78,7 @@ export default async function PatientDashboard() {
         <h1 className="font-serif text-[2rem] sm:text-[2.4rem] leading-tight text-ink-800">
           Seu tratamento
         </h1>
-        <p className="mt-2 text-ink-500">
-          {now.toLocaleDateString("pt-BR", {
-            weekday: "long",
-            day: "numeric",
-            month: "long",
-          })}
-        </p>
+        <p className="mt-2 text-ink-500">{formatWeekdayLongBR(now)}</p>
       </header>
 
       {pendingOffers.length > 0 && (
@@ -205,7 +196,7 @@ export default async function PatientDashboard() {
           <InfoCell
             label="Investimento do ciclo"
             value={brl(active.paymentAmountCents)}
-            hint={`pago em ${new Date(active.paidAt).toLocaleDateString("pt-BR")}`}
+            hint={`pago em ${formatDateBR(active.paidAt)}`}
           />
         </section>
       )}
@@ -394,7 +385,7 @@ function TreatmentCard({
           Ciclo de {active.cycleDays} dias ·{" "}
           {isExpired
             ? "expirado"
-            : `termina em ${new Date(active.cycleEndsAt).toLocaleDateString("pt-BR")}`}
+            : `termina em ${formatDateBR(active.cycleEndsAt)}`}
         </p>
       </div>
 
@@ -436,67 +427,3 @@ function InfoCell({
   );
 }
 
-function PendingOfferCard({ offer }: { offer: PendingOffer }) {
-  const isAwaitingPayment = offer.status === "pending_payment";
-  const tone = isAwaitingPayment
-    ? "border-cream-300 bg-cream-100"
-    : "border-sage-200 bg-sage-50";
-  const eyebrow = isAwaitingPayment
-    ? "Pagamento pendente"
-    : "Nova indicação médica";
-  const ctaLabel = isAwaitingPayment
-    ? "Ir para pagamento →"
-    : "Revisar e aceitar →";
-  const ctaHref =
-    isAwaitingPayment && offer.invoiceUrl
-      ? offer.invoiceUrl
-      : `/paciente/oferta/${offer.appointmentId}`;
-  const isExternal = isAwaitingPayment && !!offer.invoiceUrl;
-
-  return (
-    <div
-      className={`rounded-2xl border p-5 sm:p-6 flex flex-wrap items-start justify-between gap-4 ${tone}`}
-    >
-      <div className="min-w-0 flex-1">
-        <p className="text-[0.78rem] uppercase tracking-[0.18em] text-sage-700 font-medium mb-1.5">
-          {eyebrow}
-        </p>
-        <h3 className="font-serif text-[1.3rem] text-ink-800 leading-tight">
-          {offer.planName}
-        </h3>
-        {offer.planMedication && (
-          <p className="mt-0.5 text-sm text-ink-500">{offer.planMedication}</p>
-        )}
-        <p className="mt-2 text-sm text-ink-600">
-          Indicado por {offer.doctorName} · {brl(offer.pricePixCents)} à vista
-        </p>
-        {isAwaitingPayment ? (
-          <p className="mt-1 text-xs text-ink-500">
-            Você já aceitou o plano. Finalize o pagamento pra liberar o envio.
-          </p>
-        ) : (
-          <p className="mt-1 text-xs text-ink-500">
-            Abra a indicação pra revisar a prescrição, aceitar e prosseguir.
-          </p>
-        )}
-      </div>
-      {isExternal ? (
-        <a
-          href={ctaHref}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center rounded-xl bg-ink-900 hover:bg-ink-800 text-white text-sm font-semibold px-5 py-2.5 transition-colors shadow-sm whitespace-nowrap"
-        >
-          {ctaLabel}
-        </a>
-      ) : (
-        <Link
-          href={ctaHref}
-          className="inline-flex items-center rounded-xl bg-ink-900 hover:bg-ink-800 text-white text-sm font-semibold px-5 py-2.5 transition-colors shadow-sm whitespace-nowrap"
-        >
-          {ctaLabel}
-        </Link>
-      )}
-    </div>
-  );
-}

@@ -23,6 +23,7 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { isAsaasRefundsEnabled } from "@/lib/refunds";
 import { RefundForm } from "./_RefundForm";
+import { formatCurrencyBRL, formatDateTimeBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 
@@ -61,21 +62,12 @@ type ProcessedRow = {
 
 function brl(cents: number | null | undefined): string {
   if (cents == null) return "—";
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 function fmtDateTime(iso: string | null): string {
   if (!iso) return "—";
-  return new Date(iso).toLocaleString("pt-BR", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return formatDateTimeBR(iso);
 }
 
 function reasonLabel(status: string, cancelledReason: string | null): string {

@@ -20,20 +20,18 @@ import {
 } from "@/lib/doctor-finance";
 import { ProofLink } from "./ProofLink";
 import { BillingDocumentBlock } from "./BillingDocumentBlock";
+import { formatCurrencyBRL, formatDateBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 function brl(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 function fmtDate(iso: string | null): string | null {
   if (!iso) return null;
-  return new Date(iso).toLocaleDateString("pt-BR", {
+  return formatDateBR(iso, {
     day: "2-digit",
     month: "short",
     year: "numeric",
@@ -43,8 +41,8 @@ function fmtDate(iso: string | null): string | null {
 function fmtPeriod(period: string): string {
   if (!/^\d{4}-\d{2}$/.test(period)) return period;
   const [y, m] = period.split("-").map((s) => Number(s));
-  const d = new Date(y, m - 1, 1);
-  return d.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+  const d = new Date(Date.UTC(y, m - 1, 1));
+  return formatDateBR(d, { month: "long", year: "numeric", timeZone: "UTC" });
 }
 
 const STATUS_META: Record<

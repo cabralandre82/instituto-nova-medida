@@ -28,8 +28,14 @@ import type { AddressInput } from "@/lib/patient-address";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/**
+ * Body aceito. PR-011 / audit [6.1]:
+ *   - `acceptance_text` foi **removido** do contrato público. O texto é
+ *     re-renderizado server-side; qualquer string enviada é ignorada.
+ *   - `terms_version` é opcional; se omitida usamos a vigente.
+ */
 type Body = {
-  acceptance_text?: unknown;
+  terms_version?: unknown;
   address?: unknown;
 };
 
@@ -69,8 +75,8 @@ export async function POST(req: Request, { params }: RouteParams) {
     );
   }
 
-  const acceptanceText =
-    typeof body.acceptance_text === "string" ? body.acceptance_text : "";
+  const termsVersion =
+    typeof body.terms_version === "string" ? body.terms_version : undefined;
   const address = parseAddress(body.address);
 
   if (!address) {
@@ -99,7 +105,7 @@ export async function POST(req: Request, { params }: RouteParams) {
     userId: user.id,
     customerId,
     input: {
-      acceptance_text: acceptanceText,
+      terms_version: termsVersion,
       address,
       user_agent: userAgent,
       ip_address: ipAddress,

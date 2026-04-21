@@ -72,23 +72,14 @@ type FfRow = {
   payment_paid_at: string | null;
 };
 
+import { formatCurrencyBRL, formatDateTimeBR } from "@/lib/datetime-br";
+
 function brl(cents: number | null | undefined): string {
-  if (cents == null) return "—";
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return cents == null ? "—" : formatCurrencyBRL(cents);
 }
 
 function fmtDateTime(iso: string | null): string {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleString("pt-BR", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return iso ? formatDateTimeBR(iso) : "—";
 }
 
 function formatCpf(d: string): string {
@@ -413,7 +404,7 @@ function TimelineItem({
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <span className={`font-medium ${textClass}`}>{label}</span>
           <span className="text-xs text-ink-500 font-mono">
-            {when ? new Date(when).toLocaleString("pt-BR") : "—"}
+            {when ? formatDateTimeBR(when) : "—"}
           </span>
         </div>
         {hint && <p className="text-xs text-ink-500 mt-0.5">{hint}</p>}

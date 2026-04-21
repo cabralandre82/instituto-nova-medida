@@ -14,6 +14,7 @@ import { Footer } from "@/components/Footer";
 import { Quiz, type QuizAnswers } from "@/components/Quiz";
 import { CaptureForm } from "@/components/CaptureForm";
 import { Success } from "@/components/Success";
+import { NoticeBanner } from "@/components/NoticeBanner";
 
 type Stage = "idle" | "quiz" | "capture" | "success";
 
@@ -27,6 +28,7 @@ export default function Home() {
   return (
     <main className="relative">
       <Header onCta={startQuiz} />
+      <NoticeBanner />
 
       <Hero onCta={startQuiz} />
       <Identification />

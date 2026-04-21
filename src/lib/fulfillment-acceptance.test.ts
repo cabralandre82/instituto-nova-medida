@@ -1,12 +1,12 @@
 /**
- * Testes da orquestração de aceite de fulfillment (D-044 · 2.C).
+ * Testes da orquestração de aceite de fulfillment (D-044 · 2.C · PR-011).
  *
  * Usa createSupabaseMock pra simular o Supabase sem banco real,
  * com o mesmo padrão de enqueue-respostas dos outros testes do
  * `src/lib/`.
  *
  * Cobre:
- *   - payload inválido (texto curto);
+ *   - payload inválido (versão de termo desconhecida — PR-011);
  *   - not_found;
  *   - forbidden (nenhum dos proprietários bate);
  *   - invalid_state (cancelled, shipped, etc.);
@@ -16,29 +16,18 @@
  *   - happy path (aceite grava customer + acceptance + fulfillment);
  *   - unique collision (23505) → já-aceito idempotente;
  *   - falha de DB no UPDATE final → retorna db_error mas aceite
- *     gravado (idempotência na próxima tentativa).
+ *     gravado (idempotência na próxima tentativa);
+ *   - texto gravado é sempre server-authoritative (PR-011 / audit [6.1]).
  */
 
 import { describe, it, expect } from "vitest";
 import { createSupabaseMock } from "../test/mocks/supabase";
 import { acceptFulfillment } from "./fulfillment-acceptance";
-import { renderAcceptanceTerms } from "./acceptance-terms";
+import { ACCEPTANCE_TERMS_VERSION } from "./acceptance-terms";
 
 // ────────────────────────────────────────────────────────────────────────
 // Fixtures
 // ────────────────────────────────────────────────────────────────────────
-
-const ACCEPTANCE_TEXT = renderAcceptanceTerms({
-  patient_name: "Maria da Silva",
-  patient_cpf: "123.456.789-00",
-  plan_name: "Tirzepatida 90 dias",
-  plan_medication: "Tirzepatida 2,5 a 7,5 mg/sem",
-  plan_cycle_days: 90,
-  price_formatted: "R$ 1.797,00",
-  doctor_name: "Dra. Joana Almeida",
-  doctor_crm: "123456/SP",
-  prescription_url: "https://memed.com.br/prescription/abc",
-});
 
 const VALID_ADDRESS = {
   zipcode: "01310-100",
@@ -62,13 +51,33 @@ const FULL_FF_ROW = {
     memed_prescription_url: "https://memed.com.br/prescription/abc",
     status: "completed",
   },
-  plan: { id: "plan-1", slug: "tirzepatida-90", active: true },
-  customer: { id: "cust-1", name: "Maria da Silva", user_id: "user-1" },
+  plan: {
+    id: "plan-1",
+    slug: "tirzepatida-90",
+    name: "Tirzepatida 90 dias",
+    medication: "Tirzepatida 2,5 a 7,5 mg/sem",
+    cycle_days: 90,
+    price_pix_cents: 179700,
+    active: true,
+  },
+  customer: {
+    id: "cust-1",
+    name: "Maria da Silva",
+    cpf: "12345678900",
+    user_id: "user-1",
+  },
+  doctor: {
+    id: "doc-1",
+    full_name: "Dra. Joana Almeida",
+    display_name: null,
+    crm_number: "123456",
+    crm_uf: "SP",
+  },
 };
 
 function validInput() {
   return {
-    acceptance_text: ACCEPTANCE_TEXT,
+    terms_version: ACCEPTANCE_TERMS_VERSION,
     address: { ...VALID_ADDRESS },
     user_agent: "vitest",
     ip_address: "127.0.0.1",
@@ -78,18 +87,38 @@ function validInput() {
 // ────────────────────────────────────────────────────────────────────────
 
 describe("acceptFulfillment · validações rápidas", () => {
-  it("rejeita texto de aceite muito curto (payload corrompido)", async () => {
+  it("rejeita terms_version desconhecida (client stale ou adulterado)", async () => {
     const supa = createSupabaseMock();
     const res = await acceptFulfillment(supa.client as never, {
       fulfillmentId: "ff-1",
       userId: "user-1",
-      input: { acceptance_text: "ok", address: VALID_ADDRESS },
+      input: {
+        terms_version: "v99-fake",
+        address: VALID_ADDRESS,
+      },
     });
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.code).toBe("invalid_payload");
-    // não deve ter chamado o banco
+    // não deve ter chamado o banco — fail fast antes de qualquer query
     expect(supa.calls).toHaveLength(0);
+  });
+
+  it("aceita quando terms_version é omitida — usa a vigente", async () => {
+    const supa = createSupabaseMock();
+    supa.enqueue("fulfillments", { data: FULL_FF_ROW, error: null });
+    supa.enqueue("customers", { data: null, error: null });
+    supa.enqueue("plan_acceptances", { data: { id: "acc-1" }, error: null });
+    supa.enqueue("fulfillments", { data: null, error: null });
+
+    const res = await acceptFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      userId: "user-1",
+      input: {
+        address: { ...VALID_ADDRESS },
+      },
+    });
+    expect(res.ok).toBe(true);
   });
 
   it("retorna not_found quando fulfillment não existe", async () => {
@@ -280,7 +309,7 @@ describe("acceptFulfillment · endereço", () => {
       fulfillmentId: "ff-1",
       userId: "user-1",
       input: {
-        acceptance_text: ACCEPTANCE_TEXT,
+        terms_version: ACCEPTANCE_TERMS_VERSION,
         address: {
           zipcode: "xx",
           street: "",
@@ -343,6 +372,86 @@ describe("acceptFulfillment · happy path", () => {
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.snapshot.recipient_name).toBe("Maria da Silva");
+  });
+
+  it("PR-011 · grava acceptance_text renderizado server-side com dados do banco", async () => {
+    const supa = createSupabaseMock();
+    supa.enqueue("fulfillments", { data: FULL_FF_ROW, error: null });
+    supa.enqueue("customers", { data: null, error: null });
+    supa.enqueue("plan_acceptances", { data: { id: "acc-1" }, error: null });
+    supa.enqueue("fulfillments", { data: null, error: null });
+
+    const res = await acceptFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      userId: "user-1",
+      input: validInput(),
+    });
+    expect(res.ok).toBe(true);
+
+    // Identifica a chamada insert em plan_acceptances
+    const paInsertCall = supa.calls.find(
+      (c) => c.table === "plan_acceptances" && c.chain.includes("insert")
+    );
+    expect(paInsertCall).toBeDefined();
+    const insertArgs = paInsertCall!.args[paInsertCall!.chain.indexOf("insert")];
+    const row = insertArgs[0] as Record<string, unknown>;
+
+    // Texto **renderizado pelo servidor** com dados do banco.
+    // Verifica marcadores que só existem no template + dados reais.
+    const text = row.acceptance_text as string;
+    expect(text).toContain("TERMO DE CONSENTIMENTO");
+    expect(text).toContain("Maria da Silva");
+    expect(text).toContain("123.456.789-00"); // CPF formatado pelo servidor
+    expect(text).toContain("Tirzepatida 90 dias");
+    // Intl.NumberFormat pt-BR usa NBSP entre "R$" e valor. Regex
+    // tolerante pra não depender do whitespace exato.
+    expect(text).toMatch(/R\$\s+1\.797,00/);
+    expect(text).toContain("123456/SP"); // CRM formatado
+    expect(text).toContain("Dra. Joana Almeida");
+    expect(text).toContain("https://memed.com.br/prescription/abc");
+    expect(text).not.toMatch(/\{\w+\}/); // sem placeholders sobrando
+    expect(text.length).toBeGreaterThan(1500);
+
+    // Versão declarada é persistida.
+    expect(row.terms_version).toBe(ACCEPTANCE_TERMS_VERSION);
+
+    // Hash é sha256 do texto + contexto.
+    expect(row.acceptance_hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("PR-011 · texto gravado ignora qualquer acceptance_text hipotético do cliente", async () => {
+    // Cenário adversário: mesmo que o cliente tentasse injetar um campo
+    // acceptance_text (agora não mais no tipo público), o servidor
+    // renderiza a partir do banco e grava o texto server-authoritative.
+    const supa = createSupabaseMock();
+    supa.enqueue("fulfillments", { data: FULL_FF_ROW, error: null });
+    supa.enqueue("customers", { data: null, error: null });
+    supa.enqueue("plan_acceptances", { data: { id: "acc-1" }, error: null });
+    supa.enqueue("fulfillments", { data: null, error: null });
+
+    // Simulando cliente malicioso que injeta um campo desconhecido
+    // — o servidor deve ignorá-lo e renderizar a partir do banco.
+    const adversarial = {
+      ...validInput(),
+      acceptance_text: "EU ACEITO PAGAR R$ 1,00 E GANHAR 1 MILHÃO.",
+    } as unknown as Parameters<typeof acceptFulfillment>[1]["input"];
+
+    const res = await acceptFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      userId: "user-1",
+      input: adversarial,
+    });
+    expect(res.ok).toBe(true);
+
+    const paInsertCall = supa.calls.find(
+      (c) => c.table === "plan_acceptances" && c.chain.includes("insert")
+    );
+    const row = paInsertCall!.args[paInsertCall!.chain.indexOf("insert")][0] as Record<string, unknown>;
+    const text = row.acceptance_text as string;
+
+    expect(text).not.toContain("GANHAR 1 MILHÃO");
+    expect(text).toContain("TERMO DE CONSENTIMENTO");
+    expect(text).toMatch(/R\$\s+1\.797,00/);
   });
 
   it("hash muda se paciente editar endereço (regressão: CEP diferente → hash diferente)", async () => {

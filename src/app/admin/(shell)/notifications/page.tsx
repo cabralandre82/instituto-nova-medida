@@ -22,6 +22,7 @@ import Link from "next/link";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { NotificationRetryButton } from "./_NotificationRetryButton";
 import { NotificationFilters } from "./_NotificationFilters";
+import { formatDateBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 
@@ -84,7 +85,7 @@ const KIND_LABEL: Record<string, string> = {
 
 function fmtDateTime(iso: string | null): string {
   if (!iso) return "—";
-  return new Date(iso).toLocaleString("pt-BR", {
+  return formatDateBR(iso, {
     day: "2-digit",
     month: "2-digit",
     hour: "2-digit",

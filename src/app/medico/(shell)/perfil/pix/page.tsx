@@ -21,13 +21,14 @@ import {
 } from "@/lib/doctor-payment-methods";
 import { PixForm } from "./PixForm";
 import { HistoryItem } from "./HistoryItem";
+import { formatDateBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
-  return new Date(iso).toLocaleDateString("pt-BR", {
+  return formatDateBR(iso, {
     day: "2-digit",
     month: "short",
     year: "numeric",

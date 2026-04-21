@@ -1,5 +1,5 @@
 /**
- * src/lib/fulfillment-acceptance.ts — D-044 · onda 2.C
+ * src/lib/fulfillment-acceptance.ts — D-044 · onda 2.C · refatorado em PR-011.
  *
  * Fonte única de verdade pro ato do paciente "aceitar formalmente
  * o plano indicado pela médica e informar endereço de entrega".
@@ -9,7 +9,8 @@
  *     do fulfillment);
  *   - validação de estado (só aceita `pending_acceptance`);
  *   - validação e normalização de endereço (`patient-address.ts`);
- *   - render do termo jurídico com dados reais (`acceptance-terms.ts`);
+ *   - **renderização server-side** do termo jurídico a partir da versão
+ *     declarada + dados reais buscados no banco (PR-011 / audit [6.1]);
  *   - hash determinístico do aceite (`fulfillments.computeAcceptanceHash`);
  *   - persistência idempotente:
  *       (i) upsert de endereço em `customers`,
@@ -19,6 +20,11 @@
  *   - idempotência via `plan_acceptances.fulfillment_id UNIQUE`:
  *     chamada repetida devolve `already_accepted` com o acceptanceId
  *     existente.
+ *
+ * Segurança (PR-011 / audit [6.1]):
+ *   **Nunca** confia em `acceptance_text` enviado pelo cliente. O texto
+ *   é re-renderizado a partir de `terms_version` + dados do banco,
+ *   garantindo que a prova legal só reflete o que o servidor emitiu.
  *
  * A função é server-only (SupabaseClient com service_role) mas
  * testável com `createSupabaseMock`.
@@ -42,6 +48,13 @@ import {
   validateAddress,
   type AddressInput,
 } from "./patient-address";
+import {
+  ACCEPTANCE_TERMS_VERSION,
+  formatDoctorCrm,
+  isKnownAcceptanceTermsVersion,
+  renderAcceptanceTerms,
+} from "./acceptance-terms";
+import { formatCurrencyBRL } from "./datetime-br";
 
 // ────────────────────────────────────────────────────────────────────────
 // Tipos
@@ -49,12 +62,19 @@ import {
 
 export type AcceptFulfillmentInput = {
   /**
-   * Texto JÁ renderizado com os dados reais (ver
-   * `renderAcceptanceTerms`). Não renderizamos aqui pra evitar
-   * double-render e porque a tela de oferta precisa exibir
-   * exatamente a mesma string que será gravada.
+   * Versão do termo que o cliente afirma ter lido. O servidor re-renderiza
+   * o texto a partir dessa versão + dados do banco, e é **esse** texto
+   * server-authoritative que vai pra hash e pra `acceptance_text`.
+   *
+   * Se omitido, usa a versão vigente (`ACCEPTANCE_TERMS_VERSION`). Se
+   * preenchido com versão desconhecida, a função retorna `invalid_payload`
+   * — nunca renderizamos template fantasma.
+   *
+   * Introduzido no PR-011 / audit [6.1]. O campo antigo `acceptance_text`
+   * foi removido para evitar que o cliente injete texto adulterado e
+   * comprometa a prova legal.
    */
-  acceptance_text: string;
+  terms_version?: string;
   address: AddressInput;
   user_agent?: string | null;
   ip_address?: string | null;
@@ -90,8 +110,12 @@ export type AcceptFulfillmentResult =
 
 /**
  * Row consolidada que a função precisa carregar pra decidir/gravar.
- * Inclui joins com appointment, plan e customer — numa única query
- * pra reduzir round-trips.
+ * Inclui joins com appointment, plan, customer e doctor — numa única
+ * query pra reduzir round-trips.
+ *
+ * Expandido no PR-011: precisamos de campos adicionais (plan.name/
+ * medication/cycle_days/price_pix_cents, customer.cpf, doctor.*) para
+ * renderizar o termo server-side.
  */
 type FulfillmentWithJoins = {
   id: string;
@@ -108,14 +132,36 @@ type FulfillmentWithJoins = {
   plan: {
     id: string;
     slug: string;
+    name: string;
+    medication: string | null;
+    cycle_days: number;
+    price_pix_cents: number;
     active: boolean;
   } | null;
   customer: {
     id: string;
     name: string;
+    cpf: string;
     user_id: string | null;
   } | null;
+  doctor: {
+    id: string;
+    full_name: string;
+    display_name: string | null;
+    crm_number: string;
+    crm_uf: string;
+  } | null;
 };
+
+function formatCpfForTerms(raw: string): string {
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length !== 11) return raw;
+  return `${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6, 9)}-${digits.slice(9)}`;
+}
+
+function brlFromCents(cents: number): string {
+  return formatCurrencyBRL(cents);
+}
 
 // ────────────────────────────────────────────────────────────────────────
 // Orquestração principal
@@ -140,16 +186,15 @@ export async function acceptFulfillment(
     now?: Date;
   }
 ): Promise<AcceptFulfillmentResult> {
-  // 1. Validação de payload básico
-  if (
-    !params.input.acceptance_text ||
-    params.input.acceptance_text.trim().length < 200
-  ) {
+  // 1. Validação de versão dos termos.
+  // PR-011 / audit [6.1]: o servidor escolhe o template; o cliente só
+  // declara qual versão leu (ou omite e ficamos com a vigente).
+  const termsVersion = params.input.terms_version ?? ACCEPTANCE_TERMS_VERSION;
+  if (!isKnownAcceptanceTermsVersion(termsVersion)) {
     return {
       ok: false,
       code: "invalid_payload",
-      message:
-        "O texto do aceite é inválido. Recarregue a página e tente novamente.",
+      message: `Versão de termo desconhecida ("${termsVersion}"). Recarregue a página e tente novamente.`,
     };
   }
 
@@ -159,8 +204,9 @@ export async function acceptFulfillment(
     .select(
       `id, status, customer_id, appointment_id, plan_id, doctor_id,
        appointment:appointments!inner(id, memed_prescription_url, status),
-       plan:plans!inner(id, slug, active),
-       customer:customers!inner(id, name, user_id)`
+       plan:plans!inner(id, slug, name, medication, cycle_days, price_pix_cents, active),
+       customer:customers!inner(id, name, cpf, user_id),
+       doctor:doctors!inner(id, full_name, display_name, crm_number, crm_uf)`
     )
     .eq("id", params.fulfillmentId)
     .maybeSingle();
@@ -267,11 +313,11 @@ export async function acceptFulfillment(
   }
 
   // 5. Dados auxiliares obrigatórios
-  if (!ff.plan || !ff.customer || !ff.appointment) {
+  if (!ff.plan || !ff.customer || !ff.appointment || !ff.doctor) {
     return {
       ok: false,
       code: "db_error",
-      message: "Dados de plano, paciente ou consulta ausentes.",
+      message: "Dados de plano, paciente, consulta ou médica ausentes.",
     };
   }
   if (!ff.plan.active) {
@@ -302,9 +348,39 @@ export async function acceptFulfillment(
   }
   const shipping = addrResult.snapshot;
 
-  // 7. Hash do aceite
+  // 7. Renderiza o termo **no servidor** a partir da versão declarada
+  //    + dados do banco (PR-011 / audit [6.1]). Qualquer divergência com
+  //    o que o cliente renderizou só sinaliza que o cliente está stale;
+  //    a prova legal é o que o servidor escreve.
+  let acceptanceText: string;
+  try {
+    acceptanceText = renderAcceptanceTerms(
+      {
+        patient_name: ff.customer.name,
+        patient_cpf: formatCpfForTerms(ff.customer.cpf),
+        plan_name: ff.plan.name,
+        plan_medication: ff.plan.medication ?? ff.plan.name,
+        plan_cycle_days: ff.plan.cycle_days,
+        price_formatted: brlFromCents(ff.plan.price_pix_cents),
+        doctor_name: ff.doctor.display_name ?? ff.doctor.full_name,
+        doctor_crm: formatDoctorCrm(ff.doctor.crm_number, ff.doctor.crm_uf),
+        prescription_url: ff.appointment.memed_prescription_url,
+      },
+      termsVersion
+    );
+  } catch (err) {
+    console.error("[fulfillment-acceptance] render terms failed:", err);
+    return {
+      ok: false,
+      code: "db_error",
+      message:
+        "Não foi possível montar o termo de aceite. Fale com o Instituto.",
+    };
+  }
+
+  // 8. Hash do aceite sobre o texto server-authoritative.
   const acceptanceHash = computeAcceptanceHash({
-    acceptanceText: params.input.acceptance_text,
+    acceptanceText,
     planSlug: ff.plan.slug,
     prescriptionUrl: ff.appointment.memed_prescription_url,
     appointmentId: ff.appointment_id,
@@ -313,7 +389,7 @@ export async function acceptFulfillment(
 
   const now = (params.now ?? new Date()).toISOString();
 
-  // 8. Upsert endereço no customer (cache do "último endereço")
+  // 9. Upsert endereço no customer (cache do "último endereço")
   //    — falha aqui não bloqueia o aceite; é conveniência.
   const customerPatch = snapshotToCustomerPatch(shipping);
   const cUpd = await supabase
@@ -326,10 +402,10 @@ export async function acceptFulfillment(
     console.error("[fulfillment-acceptance] customer update falhou:", cUpd.error);
   }
 
-  // 9. INSERT em plan_acceptances (imutável por trigger)
-  //    Race condition: 2 chamadas paralelas. O UNIQUE em
-  //    `fulfillment_id` garante que só uma vence; a outra pega
-  //    violação e re-lê.
+  // 10. INSERT em plan_acceptances (imutável por trigger)
+  //     Race condition: 2 chamadas paralelas. O UNIQUE em
+  //     `fulfillment_id` garante que só uma vence; a outra pega
+  //     violação e re-lê.
   const accIns = await supabase
     .from("plan_acceptances")
     .insert({
@@ -338,8 +414,9 @@ export async function acceptFulfillment(
       customer_id: ff.customer_id,
       plan_id: ff.plan_id,
       accepted_at: now,
-      acceptance_text: params.input.acceptance_text,
+      acceptance_text: acceptanceText,
       acceptance_hash: acceptanceHash,
+      terms_version: termsVersion,
       shipping_snapshot: shipping,
       user_id: params.userId,
       ip_address: params.input.ip_address ?? null,
@@ -440,5 +517,6 @@ function normalizeFfRow(raw: Record<string, unknown>): FulfillmentWithJoins {
     appointment: unwrap<FulfillmentWithJoins["appointment"]>(raw.appointment),
     plan: unwrap<FulfillmentWithJoins["plan"]>(raw.plan),
     customer: unwrap<FulfillmentWithJoins["customer"]>(raw.customer),
+    doctor: unwrap<FulfillmentWithJoins["doctor"]>(raw.doctor),
   };
 }

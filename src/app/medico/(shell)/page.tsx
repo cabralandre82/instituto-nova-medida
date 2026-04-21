@@ -15,6 +15,12 @@ import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { countPendingBillingDocuments } from "@/lib/doctor-finance";
 import { getActivePaymentMethod } from "@/lib/doctor-payment-methods";
+import {
+  formatCurrencyBRL,
+  formatDateBR,
+  formatTimeBR,
+  formatWeekdayLongBR,
+} from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -131,10 +137,7 @@ async function loadDashboard(doctorId: string): Promise<DashboardData> {
 }
 
 function brl(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 function formatNextLabel(scheduledAt: string, minutesAway: number): string {
@@ -142,9 +145,9 @@ function formatNextLabel(scheduledAt: string, minutesAway: number): string {
   const date = new Date(scheduledAt);
   const today = new Date();
   const sameDay = date.toDateString() === today.toDateString();
-  const time = date.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+  const time = formatTimeBR(date);
   if (sameDay) return `hoje às ${time}`;
-  const day = date.toLocaleDateString("pt-BR", { day: "2-digit", month: "short" });
+  const day = formatDateBR(date, { day: "2-digit", month: "short" });
   return `${day} · ${time}`;
 }
 
@@ -170,13 +173,7 @@ export default async function DoctorDashboard() {
         <h1 className="font-serif text-[2rem] sm:text-[2.4rem] leading-tight text-ink-800">
           {greeting}
         </h1>
-        <p className="mt-2 text-ink-500">
-          {new Date().toLocaleDateString("pt-BR", {
-            weekday: "long",
-            day: "numeric",
-            month: "long",
-          })}
-        </p>
+        <p className="mt-2 text-ink-500">{formatWeekdayLongBR(new Date())}</p>
       </header>
 
       {!pix && (

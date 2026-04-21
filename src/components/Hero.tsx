@@ -21,24 +21,11 @@ export function Hero({ onCta }: { onCta: () => void }) {
 
       <div className="relative mx-auto max-w-7xl px-5 sm:px-8 grid lg:grid-cols-12 gap-10 lg:gap-16 items-center">
         <div className="lg:col-span-7">
-          <motion.div
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
-            className="inline-flex items-center gap-2 rounded-full border border-ink-100 bg-cream-50/80 backdrop-blur px-3 py-1.5 text-[0.78rem] text-ink-500"
-          >
-            <span className="relative flex h-1.5 w-1.5">
-              <span className="absolute inset-0 rounded-full bg-sage-500 animate-ping opacity-60" />
-              <span className="relative h-1.5 w-1.5 rounded-full bg-sage-500" />
-            </span>
-            Avaliações abertas hoje na sua região
-          </motion.div>
-
           <motion.h1
             initial={{ opacity: 0, y: 18 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.8, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
-            className="font-serif-display mt-6 text-[2.6rem] sm:text-[3.8rem] lg:text-[4.6rem] leading-[1.02] text-ink-900 text-balance"
+            className="font-serif-display text-[2.6rem] sm:text-[3.8rem] lg:text-[4.6rem] leading-[1.02] text-ink-900 text-balance"
           >
             Se fosse só{" "}
             <span className="italic text-sage-700">disciplina</span>,

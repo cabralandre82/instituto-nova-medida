@@ -22,6 +22,7 @@ import { Footer } from "@/components/Footer";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { verifyPatientToken } from "@/lib/patient-tokens";
 import { JoinRoomButton } from "./JoinRoomButton";
+import { formatDateBR, formatTimeBR } from "@/lib/datetime-br";
 
 export const metadata: Metadata = {
   title: "Sua consulta · Instituto Nova Medida",
@@ -90,20 +91,14 @@ async function load(appointmentId: string, sp: SearchParams): Promise<LoadResult
 }
 
 function fmtDateTime(iso: string): { date: string; time: string } {
-  const d = new Date(iso);
   return {
-    date: d.toLocaleDateString("pt-BR", {
+    date: formatDateBR(iso, {
       weekday: "long",
       day: "2-digit",
       month: "long",
       year: "numeric",
-      timeZone: "America/Sao_Paulo",
     }),
-    time: d.toLocaleTimeString("pt-BR", {
-      hour: "2-digit",
-      minute: "2-digit",
-      timeZone: "America/Sao_Paulo",
-    }),
+    time: formatTimeBR(iso),
   };
 }
 

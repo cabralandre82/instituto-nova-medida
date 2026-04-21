@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { formatDateBR } from "@/lib/datetime-br";
 
 export type CheckoutPlan = {
   id: string;
@@ -133,13 +134,12 @@ export type CheckoutFormProps = {
 export function CheckoutForm({ plan, slot }: CheckoutFormProps) {
   const reserveMode = Boolean(slot);
   const slotDisplay = slot
-    ? new Date(slot.startsAt).toLocaleString("pt-BR", {
+    ? formatDateBR(slot.startsAt, {
         weekday: "long",
         day: "2-digit",
         month: "long",
         hour: "2-digit",
         minute: "2-digit",
-        timeZone: "America/Sao_Paulo",
       })
     : null;
   const router = useRouter();
@@ -172,7 +172,9 @@ export function CheckoutForm({ plan, slot }: CheckoutFormProps) {
       : plan.price_pix_cents;
   }, [form.paymentMethod, plan]);
 
-  // Auto-preencher endereço quando o CEP estiver completo (ViaCEP)
+  // Auto-preencher endereço quando o CEP estiver completo.
+  // PR-035 · audit [22.1]: chamamos nosso proxy `/api/cep/[cep]`, que
+  // valida schema + charset server-side antes de devolver o payload.
   useEffect(() => {
     const cep = form.zipcode.replace(/\D/g, "");
     if (cep.length !== 8) return;
@@ -183,27 +185,34 @@ export function CheckoutForm({ plan, slot }: CheckoutFormProps) {
 
     (async () => {
       try {
-        const res = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
-        const data = (await res.json()) as {
-          erro?: boolean;
-          logradouro?: string;
-          bairro?: string;
-          localidade?: string;
-          uf?: string;
-        };
+        const res = await fetch(`/api/cep/${cep}`);
+        const data = (await res.json().catch(() => null)) as
+          | {
+              ok: boolean;
+              code?: string;
+              message?: string;
+              street?: string;
+              district?: string;
+              city?: string;
+              state?: string;
+            }
+          | null;
         if (cancelled) return;
-        if (data.erro) {
-          setCepError("CEP não encontrado");
+        if (!data || !res.ok || !data.ok) {
+          setCepError(
+            data?.code === "not_found"
+              ? "CEP não encontrado"
+              : data?.message ?? "Falha ao consultar CEP"
+          );
           return;
         }
         setForm((f) => ({
           ...f,
-          street: data.logradouro || f.street,
-          district: data.bairro || f.district,
-          city: data.localidade || f.city,
-          state: data.uf || f.state,
+          street: data.street || f.street,
+          district: data.district || f.district,
+          city: data.city || f.city,
+          state: data.state || f.state,
         }));
-        // Foca no campo "número" pra fluir mais rápido
         setTimeout(() => numberRef.current?.focus(), 50);
       } catch {
         if (!cancelled) setCepError("Falha ao consultar CEP");

@@ -8,6 +8,7 @@ const NAV = [
   { href: "/paciente", label: "Visão geral", exact: true },
   { href: "/paciente/consultas", label: "Minhas consultas" },
   { href: "/paciente/renovar", label: "Renovar tratamento" },
+  { href: "/paciente/meus-dados", label: "Meus dados (LGPD)" },
 ];
 
 export function PatientNav() {

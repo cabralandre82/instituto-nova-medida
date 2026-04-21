@@ -14,9 +14,12 @@
  *   - CEP dispara busca ViaCEP automática quando chega a 8 dígitos.
  *   - Termo fica visível em <article> com scroll próprio; checkbox
  *     só libera o botão depois que o paciente marcar.
- *   - `acceptanceText` é PASSADO exatamente como o server renderizou
- *     — o mesmo texto que vai virar hash. Jamais re-renderizar no
- *     client.
+ *
+ * Segurança (PR-011 / audit [6.1]):
+ *   - `acceptanceText` é exibido apenas para leitura e **não** é
+ *     enviado no submit. O servidor re-renderiza o texto a partir
+ *     dos dados do banco e da `terms_version` declarada, garantindo
+ *     que a prova legal nunca depende de string do cliente.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -97,7 +100,9 @@ export function OfferForm({
   const [serverError, setServerError] = useState<string | null>(null);
   const numberRef = useRef<HTMLInputElement>(null);
 
-  // ViaCEP auto-complete
+  // Auto-complete de endereço via nosso proxy `/api/cep/[cep]`.
+  // PR-035 · audit [22.1]: ViaCEP não é mais chamado direto do browser —
+  // passa pelo servidor, que valida charset + tamanho antes de responder.
   useEffect(() => {
     const cep = form.zipcode.replace(/\D/g, "");
     if (cep.length !== 8) return;
@@ -108,25 +113,33 @@ export function OfferForm({
 
     (async () => {
       try {
-        const res = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
-        const data = (await res.json()) as {
-          erro?: boolean;
-          logradouro?: string;
-          bairro?: string;
-          localidade?: string;
-          uf?: string;
-        };
+        const res = await fetch(`/api/cep/${cep}`);
+        const data = (await res.json().catch(() => null)) as
+          | {
+              ok: boolean;
+              code?: string;
+              message?: string;
+              street?: string;
+              district?: string;
+              city?: string;
+              state?: string;
+            }
+          | null;
         if (cancelled) return;
-        if (data.erro) {
-          setCepError("CEP não encontrado");
+        if (!data || !res.ok || !data.ok) {
+          setCepError(
+            data?.code === "not_found"
+              ? "CEP não encontrado"
+              : data?.message ?? "Falha ao consultar CEP"
+          );
           return;
         }
         setForm((f) => ({
           ...f,
-          street: data.logradouro ?? f.street,
-          district: data.bairro ?? f.district,
-          city: data.localidade ?? f.city,
-          state: (data.uf ?? f.state).toUpperCase(),
+          street: data.street ?? f.street,
+          district: data.district ?? f.district,
+          city: data.city ?? f.city,
+          state: (data.state ?? f.state).toUpperCase(),
         }));
         setTimeout(() => numberRef.current?.focus(), 50);
       } catch {
@@ -171,7 +184,8 @@ export function OfferForm({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            acceptance_text: acceptanceText,
+            // PR-011: só a versão; o servidor re-renderiza o texto.
+            terms_version: acceptanceTermsVersion,
             address: {
               recipient_name: form.recipient_name,
               zipcode: form.zipcode,

@@ -12,9 +12,11 @@ const NAV = [
   { href: "/admin/reliability", label: "Confiabilidade" },
   { href: "/admin/payouts", label: "Repasses" },
   { href: "/admin/refunds", label: "Estornos" },
+  { href: "/admin/lgpd-requests", label: "LGPD" },
   { href: "/admin/notifications", label: "Notificações" },
   { href: "/admin/financeiro", label: "Financeiro" },
   { href: "/admin/health", label: "Saúde" },
+  { href: "/admin/errors", label: "Erros" },
 ];
 
 export function AdminNav() {

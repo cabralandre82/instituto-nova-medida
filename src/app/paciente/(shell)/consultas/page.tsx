@@ -10,24 +10,16 @@ import {
   labelForAppointmentStatus,
   listPastAppointments,
 } from "@/lib/patient-treatment";
+import { formatDateLongBR, formatTimeBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 function fmtDateTime(iso: string): string {
-  return new Date(iso).toLocaleDateString("pt-BR", {
-    day: "2-digit",
-    month: "long",
-    year: "numeric",
-    timeZone: "America/Sao_Paulo",
-  });
+  return formatDateLongBR(iso);
 }
 function fmtTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString("pt-BR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "America/Sao_Paulo",
-  });
+  return formatTimeBR(iso);
 }
 
 export default async function ConsultasPage() {

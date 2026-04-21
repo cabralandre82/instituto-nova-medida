@@ -22,11 +22,12 @@
 
 import type { Metadata } from "next";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { Logo } from "@/components/Logo";
 import { Footer } from "@/components/Footer";
 import { getSupabaseAnon } from "@/lib/supabase";
 import { CheckoutForm, type CheckoutPlan } from "@/components/CheckoutForm";
+import { isLegacyPurchaseEnabled } from "@/lib/legacy-purchase-gate";
 
 export const dynamic = "force-dynamic";
 
@@ -66,6 +67,14 @@ async function loadPlan(slug: string): Promise<CheckoutPlan | null> {
 }
 
 export default async function CheckoutPage({ params }: PageProps) {
+  // PR-020 / audit [1.1]: rota legada é gatekept — em produção o fluxo
+  // canônico de compra é consulta grátis → aceite em /paciente/oferta →
+  // pagamento (D-044). Permitir checkout direto deixa paciente comprar
+  // medicação sem passar por médica, violando CFM 2.314/2022.
+  if (!isLegacyPurchaseEnabled()) {
+    redirect("/?aviso=consulta_primeiro");
+  }
+
   const { plano } = await params;
   const plan = await loadPlan(plano);
 

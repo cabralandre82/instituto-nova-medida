@@ -40,18 +40,28 @@ export type RecordedCall = {
 
 type Queued = MockResponse;
 
+export type RecordedRpcCall = {
+  fn: string;
+  params: unknown;
+};
+
 export type SupabaseMock = {
   client: {
     from: (table: string) => unknown;
+    rpc: (fn: string, params?: unknown) => Promise<MockResponse>;
   };
   enqueue: (table: string, response: MockResponse) => void;
+  enqueueRpc: (fn: string, response: MockResponse) => void;
   calls: RecordedCall[];
+  rpcCalls: RecordedRpcCall[];
   reset: () => void;
 };
 
 export function createSupabaseMock(): SupabaseMock {
   const responses = new Map<string, Queued[]>();
+  const rpcResponses = new Map<string, Queued[]>();
   const calls: RecordedCall[] = [];
+  const rpcCalls: RecordedRpcCall[] = [];
 
   function nextResponse(table: string, recorded: RecordedCall): Queued {
     calls.push(recorded);
@@ -121,16 +131,31 @@ export function createSupabaseMock(): SupabaseMock {
   return {
     client: {
       from: vi.fn((table: string) => makeBuilder(table)),
+      rpc: vi.fn(async (fn: string, params?: unknown) => {
+        rpcCalls.push({ fn, params });
+        const queue = rpcResponses.get(fn) ?? [];
+        const next = queue.shift();
+        if (!next) return { data: null, error: null };
+        return next;
+      }),
     },
     enqueue(table, response) {
       const queue = responses.get(table) ?? [];
       queue.push(response);
       responses.set(table, queue);
     },
+    enqueueRpc(fn, response) {
+      const queue = rpcResponses.get(fn) ?? [];
+      queue.push(response);
+      rpcResponses.set(fn, queue);
+    },
     calls,
+    rpcCalls,
     reset() {
       responses.clear();
+      rpcResponses.clear();
       calls.length = 0;
+      rpcCalls.length = 0;
     },
   };
 }

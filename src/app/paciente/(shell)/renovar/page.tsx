@@ -23,15 +23,13 @@ import Link from "next/link";
 import { requirePatient } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getRenewalInfo, labelForRenewalStatus } from "@/lib/patient-treatment";
+import { formatCurrencyBRL, formatDateBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 function brl(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 const WHATSAPP_NUMBER = "5521998851851"; // mesmo da equipe operacional
@@ -98,7 +96,7 @@ export default async function RenovarPage() {
                 Iniciado em
               </dt>
               <dd className="mt-1 text-ink-800">
-                {new Date(active.paidAt).toLocaleDateString("pt-BR")}
+                {formatDateBR(active.paidAt)}
               </dd>
             </div>
             <div>
@@ -106,7 +104,7 @@ export default async function RenovarPage() {
                 Termina em
               </dt>
               <dd className="mt-1 text-ink-800">
-                {new Date(active.cycleEndsAt).toLocaleDateString("pt-BR")}
+                {formatDateBR(active.cycleEndsAt)}
               </dd>
             </div>
             <div>

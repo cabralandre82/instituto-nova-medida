@@ -18,13 +18,14 @@
 
 import Link from "next/link";
 import { runHealthCheck, type HealthStatus } from "@/lib/system-health";
+import { formatDateBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 
 type SearchParams = { ping?: string };
 
 function fmtDateTime(iso: string): string {
-  return new Date(iso).toLocaleString("pt-BR", {
+  return formatDateBR(iso, {
     day: "2-digit",
     month: "2-digit",
     hour: "2-digit",

@@ -18,6 +18,7 @@ import {
   searchCustomers,
   type PatientSearchHit,
 } from "@/lib/patient-search";
+import { formatDateBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 
@@ -176,7 +177,7 @@ export default async function AdminPacientesPage({
                     {maskCpf(h.cpf)}
                   </td>
                   <td className="px-4 py-3 text-sm text-ink-500 hidden lg:table-cell">
-                    {new Date(h.createdAt).toLocaleDateString("pt-BR")}
+                    {formatDateBR(h.createdAt)}
                   </td>
                 </tr>
               ))}

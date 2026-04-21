@@ -16,7 +16,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 export type CronJob =
   | "recalc_earnings_availability"
   | "generate_monthly_payouts"
-  | "notify_pending_documents";
+  | "notify_pending_documents"
+  | "auto_deliver_fulfillments"
+  | "nudge_reconsulta"
+  | "admin_digest"
+  | "retention_anonymize";
 
 export async function startCronRun(
   supabase: SupabaseClient,

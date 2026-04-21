@@ -37,6 +37,20 @@ export const ACCEPTANCE_TERMS_VERSION = "v1-2026-04" as const;
 export type AcceptanceTermsVersion = typeof ACCEPTANCE_TERMS_VERSION;
 
 /**
+ * Versões já publicadas, em ordem cronológica.
+ * Nunca remover uma versão deste array — só adicionar novas.
+ */
+export const KNOWN_ACCEPTANCE_TERMS_VERSIONS: readonly string[] = [
+  "v1-2026-04",
+] as const;
+
+export function isKnownAcceptanceTermsVersion(
+  v: string
+): v is AcceptanceTermsVersion {
+  return KNOWN_ACCEPTANCE_TERMS_VERSIONS.includes(v);
+}
+
+/**
  * Parâmetros injetados no template no momento de renderização.
  *
  * `price_formatted` vem pronto do chamador (R$ 1.797,00) porque a
@@ -100,6 +114,24 @@ Ao registrar a concordância por meio eletrônico neste termo, o(a) PACIENTE dec
 // ────────────────────────────────────────────────────────────────────────
 
 /**
+ * Retorna o template bruto de uma versão publicada.
+ *
+ * Lança se a versão não existir (protege contra input malicioso que
+ * tente renderizar com template fantasma). Versões novas vão sendo
+ * adicionadas ao switch — versões antigas nunca saem.
+ */
+export function getTermsTemplateForVersion(version: string): string {
+  switch (version) {
+    case "v1-2026-04":
+      return V1_TEMPLATE;
+    default:
+      throw new Error(
+        `getTermsTemplateForVersion: versão desconhecida "${version}".`
+      );
+  }
+}
+
+/**
  * Renderiza o termo com os dados reais da contratação.
  *
  * Valida que **todos** os placeholders foram substituídos —
@@ -107,9 +139,18 @@ Ao registrar a concordância por meio eletrônico neste termo, o(a) PACIENTE dec
  * explode em tempo de desenvolvimento pra evitar que um aceite
  * seja registrado com placeholders não-resolvidos (hash inútil e
  * prova legal viciada).
+ *
+ * Aceita uma versão explícita para permitir re-renderização histórica
+ * (verificação post-hoc de integridade de rows antigas em
+ * `plan_acceptances`). Quando omitida, usa a versão vigente.
  */
-export function renderAcceptanceTerms(params: AcceptanceTermsParams): string {
-  const text = V1_TEMPLATE.replace(
+export function renderAcceptanceTerms(
+  params: AcceptanceTermsParams,
+  version: string = ACCEPTANCE_TERMS_VERSION
+): string {
+  const template = getTermsTemplateForVersion(version);
+
+  const text = template.replace(
     /\{(\w+)\}/g,
     (match, key: keyof AcceptanceTermsParams) => {
       const value = params[key];

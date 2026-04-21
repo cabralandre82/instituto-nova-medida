@@ -28,26 +28,14 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { recalculateEarningsAvailability } from "@/lib/earnings-availability";
 import { startCronRun, finishCronRun } from "@/lib/cron-runs";
+import { assertCronRequest } from "@/lib/cron-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function isAuthorized(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true;
-  const auth = req.headers.get("authorization") || "";
-  if (auth === `Bearer ${secret}`) return true;
-  if (req.headers.get("x-cron-secret") === secret) return true;
-  return false;
-}
-
 export async function GET(req: NextRequest) {
-  if (!isAuthorized(req)) {
-    return NextResponse.json(
-      { ok: false, error: "unauthorized" },
-      { status: 401 }
-    );
-  }
+  const unauth = assertCronRequest(req);
+  if (unauth) return unauth;
 
   const supabase = getSupabaseAdmin();
   const startedAtMs = Date.now();

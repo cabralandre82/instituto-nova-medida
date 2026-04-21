@@ -2,6 +2,7 @@
 
 import { useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
+import { formatCurrencyBRL, formatDateBR } from "@/lib/datetime-br";
 
 type Document = {
   uploadedAt: string | null;
@@ -18,15 +19,12 @@ type Props = {
 };
 
 function brl(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 function fmtDate(iso: string | null): string | null {
   if (!iso) return null;
-  return new Date(iso).toLocaleDateString("pt-BR", {
+  return formatDateBR(iso, {
     day: "2-digit",
     month: "short",
     year: "numeric",

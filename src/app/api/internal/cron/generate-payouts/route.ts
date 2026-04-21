@@ -25,20 +25,12 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { generateMonthlyPayouts } from "@/lib/monthly-payouts";
 import { startCronRun, finishCronRun } from "@/lib/cron-runs";
+import { assertCronRequest } from "@/lib/cron-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const PERIOD_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
-
-function isAuthorized(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true;
-  const auth = req.headers.get("authorization") || "";
-  if (auth === `Bearer ${secret}`) return true;
-  if (req.headers.get("x-cron-secret") === secret) return true;
-  return false;
-}
 
 function parsePeriod(req: NextRequest): string | undefined {
   const raw = req.nextUrl.searchParams.get("period");
@@ -48,12 +40,8 @@ function parsePeriod(req: NextRequest): string | undefined {
 }
 
 export async function GET(req: NextRequest) {
-  if (!isAuthorized(req)) {
-    return NextResponse.json(
-      { ok: false, error: "unauthorized" },
-      { status: 401 }
-    );
-  }
+  const unauth = assertCronRequest(req);
+  if (unauth) return unauth;
 
   const supabase = getSupabaseAdmin();
   const referencePeriod = parsePeriod(req);

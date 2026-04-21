@@ -30,6 +30,11 @@ import {
 } from "@/lib/acceptance-terms";
 import { customerToAddressInput } from "@/lib/patient-address";
 import { OfferForm } from "./OfferForm";
+import {
+  formatCurrencyBRL,
+  formatDateBR,
+  formatDateTimeBR,
+} from "@/lib/datetime-br";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,10 +47,7 @@ export const metadata = {
 type Params = { params: Promise<{ appointment_id: string }> };
 
 function brl(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 export default async function OfferPage({ params }: Params) {
@@ -326,7 +328,7 @@ export default async function OfferPage({ params }: Params) {
           <Info label="Indicado por" value={doctorName} hint={`CRM ${doctorCrm}`} />
           <Info
             label="Consulta"
-            value={new Date(appt.scheduled_at).toLocaleDateString("pt-BR", {
+            value={formatDateBR(appt.scheduled_at, {
               day: "2-digit",
               month: "long",
               year: "numeric",
@@ -426,9 +428,7 @@ function AwaitingPayment({
         </h1>
         <p className="mt-2 text-ink-500">
           Seu aceite formal foi registrado
-          {acceptedAt
-            ? ` em ${new Date(acceptedAt).toLocaleString("pt-BR")}`
-            : ""}
+          {acceptedAt ? ` em ${formatDateTimeBR(acceptedAt)}` : ""}
           . Agora é só concluir o pagamento de {" "}
           <strong>{brl(amountCents)}</strong>.
         </p>

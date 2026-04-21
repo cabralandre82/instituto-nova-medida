@@ -16,6 +16,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { sendMedicaDocumentoPendente } from "@/lib/wa-templates";
+import { formatCurrencyBRL } from "@/lib/datetime-br";
 
 /** Só cobra NF se o PIX saiu há pelo menos 7 dias. */
 export const REMINDER_AFTER_DAYS = 7;
@@ -62,10 +63,7 @@ function formatPeriodBR(period: string): string {
 }
 
 function brl(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 type PayoutRow = {

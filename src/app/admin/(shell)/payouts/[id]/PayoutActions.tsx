@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { formatCurrencyBRL } from "@/lib/datetime-br";
 
 type Status = "draft" | "approved" | "pix_sent" | "confirmed" | "cancelled" | "failed";
 
@@ -147,7 +148,7 @@ export function PayoutActions({
               >
                 {submitting === "pay"
                   ? "Marcando..."
-                  : `PIX enviado (${(amountCents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })})`}
+                  : `PIX enviado (${formatCurrencyBRL(amountCents)})`}
               </button>
             </>
           )}

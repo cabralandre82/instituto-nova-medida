@@ -88,22 +88,14 @@ const GROUPS: Array<{
   },
 ];
 
+import { formatCurrencyBRL, formatDateTimeShortBR } from "@/lib/datetime-br";
+
 function brl(cents: number | null | undefined): string {
-  if (cents == null) return "—";
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return cents == null ? "—" : formatCurrencyBRL(cents);
 }
 
 function fmtDate(iso: string | null): string {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleString("pt-BR", {
-    day: "2-digit",
-    month: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return iso ? formatDateTimeShortBR(iso) : "—";
 }
 
 async function loadByStatuses(

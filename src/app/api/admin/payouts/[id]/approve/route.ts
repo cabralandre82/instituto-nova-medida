@@ -12,11 +12,15 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { requireAdmin } from "@/lib/auth";
 import { canTransition, loadPayoutOrFail } from "@/lib/payouts";
+import {
+  getAuditContextFromRequest,
+  logAdminAction,
+} from "@/lib/admin-audit-log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const admin = await requireAdmin();
   const { id } = await params;
   const supabase = getSupabaseAdmin();
@@ -43,5 +47,17 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     console.error("[payouts/approve]", error);
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
+
+  await logAdminAction(supabase, {
+    actorUserId: admin.id,
+    actorEmail: admin.email,
+    action: "payout.approve",
+    entityType: "payout",
+    entityId: id,
+    before: { status: r.payout.status },
+    after: { status: "approved" },
+    metadata: getAuditContextFromRequest(req),
+  });
+
   return NextResponse.json({ ok: true });
 }

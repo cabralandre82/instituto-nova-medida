@@ -31,18 +31,13 @@ import {
   RELIABILITY_HARD_BLOCK,
 } from "@/lib/reliability";
 import { ReliabilityActions } from "./_Actions";
+import { formatDateTimeBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 
 function fmtDateTime(iso: string | null | undefined): string {
   if (!iso) return "—";
-  return new Date(iso).toLocaleString("pt-BR", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return formatDateTimeBR(iso);
 }
 
 function kindLabel(kind: string): string {

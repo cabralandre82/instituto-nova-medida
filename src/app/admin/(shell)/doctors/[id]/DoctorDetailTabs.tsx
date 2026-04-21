@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { formatDateBR } from "@/lib/datetime-br";
 
 type Doctor = {
   id: string;
@@ -411,11 +412,9 @@ function CompensationPanel({
                     R$ {(r.plantao_hour_cents / 100).toFixed(2)}/h plantão
                   </div>
                   <div className="text-xs text-ink-400">
-                    {new Date(r.effective_from).toLocaleDateString("pt-BR")}
+                    {formatDateBR(r.effective_from)}
                     {" → "}
-                    {r.effective_to
-                      ? new Date(r.effective_to).toLocaleDateString("pt-BR")
-                      : "ativa"}
+                    {r.effective_to ? formatDateBR(r.effective_to) : "ativa"}
                   </div>
                 </div>
                 {r.reason && <div className="text-xs text-ink-500 mt-1">{r.reason}</div>}

@@ -22,21 +22,13 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { processDuePending } from "@/lib/notifications";
+import { assertCronRequest } from "@/lib/cron-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 200;
-
-function isAuthorized(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true;
-  const auth = req.headers.get("authorization") || "";
-  if (auth === `Bearer ${secret}`) return true;
-  if (req.headers.get("x-cron-secret") === secret) return true;
-  return false;
-}
 
 function parseLimit(req: NextRequest): number {
   const raw = req.nextUrl.searchParams.get("limit");
@@ -47,9 +39,8 @@ function parseLimit(req: NextRequest): number {
 }
 
 export async function GET(req: NextRequest) {
-  if (!isAuthorized(req)) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  }
+  const unauth = assertCronRequest(req);
+  if (unauth) return unauth;
 
   const limit = parseLimit(req);
   const report = await processDuePending(limit);

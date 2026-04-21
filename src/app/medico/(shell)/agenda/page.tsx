@@ -12,6 +12,7 @@ import Link from "next/link";
 import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { JoinButton } from "./JoinButton";
+import { formatDateBR, formatTimeBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -73,7 +74,7 @@ async function loadAppointments(doctorId: string): Promise<{
 }
 
 function fmtDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("pt-BR", {
+  return formatDateBR(iso, {
     weekday: "short",
     day: "2-digit",
     month: "short",
@@ -81,10 +82,7 @@ function fmtDate(iso: string): string {
 }
 
 function fmtTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString("pt-BR", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return formatTimeBR(iso);
 }
 
 function statusLabel(

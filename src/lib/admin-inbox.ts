@@ -49,6 +49,8 @@ export const SLA_HOURS = {
   refund_stale: 48,
   /** reconciliação de appointments (D-035) */
   reconcile_stuck: 2,
+  /** lgpd_requests pendentes: Art. 19 §1º dá 15 dias corridos */
+  lgpd_pending: 15 * 24,
 } as const;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -70,7 +72,8 @@ export type InboxCategory =
   | "reliability_warn"
   | "finance_critical"
   | "finance_warning"
-  | "doctor_pending";
+  | "doctor_pending"
+  | "lgpd_pending";
 
 export type InboxItem = {
   /** Chave única estável (categoria). Usada como React key e id de notificação. */
@@ -243,6 +246,7 @@ export async function loadAdminInbox(
     notifFailed,
     reconcile,
     doctorPending,
+    lgpdPending,
   ] = await Promise.all([
     countWithOldest(
       supabase
@@ -318,6 +322,15 @@ export async function loadAdminInbox(
         .select("created_at", { count: "exact" })
         .in("status", ["invited", "pending"]),
       "created_at",
+      now
+    ),
+    countWithOldest(
+      supabase
+        .from("lgpd_requests")
+        .select("requested_at", { count: "exact" })
+        .eq("kind", "anonymize")
+        .eq("status", "pending"),
+      "requested_at",
       now
     ),
   ]);
@@ -420,6 +433,16 @@ export async function loadAdminInbox(
       age: doctorPending.oldestAgeHours,
       sla: null, // é pendência, não SLA temporal
       href: "/admin/doctors",
+    },
+    {
+      category: "lgpd_pending",
+      title: "Solicitações LGPD a atender",
+      description:
+        "Pacientes pediram anonimização pelo self-service. Prazo legal: 15 dias corridos (Art. 19 §1º).",
+      count: lgpdPending.count,
+      age: lgpdPending.oldestAgeHours,
+      sla: SLA_HOURS.lgpd_pending,
+      href: "/admin/lgpd-requests",
     },
   ];
 

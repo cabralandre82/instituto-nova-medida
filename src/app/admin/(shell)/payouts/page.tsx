@@ -11,6 +11,7 @@
 
 import Link from "next/link";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { formatCurrencyBRL } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 
@@ -30,10 +31,7 @@ type Payout = {
 };
 
 function brl(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 const STATUS = {

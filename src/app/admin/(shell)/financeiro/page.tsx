@@ -1,327 +1,119 @@
 /**
- * /admin/financeiro — Dashboard de conciliação (D-037).
+ * /admin/financeiro — Dashboard financeiro unificado (D-045 · 3.F).
  *
- * Roda os checks de reconciliação on-demand (no request) e agrupa por
- * categoria, ordenando CRÍTICO primeiro. Cada item tem:
- *   - headline
- *   - detalhes estruturados (ids, valores, idade)
- *   - hint de ação pro admin
+ * Consolida em uma tela as 4 perguntas que o operador solo faz sempre:
  *
- * Recomendação operacional: acessar toda sexta antes de fechar o mês
- * e sempre que o dashboard principal mostrar o alerta "N críticas".
+ *   1. Quanto entrou este mês? (MTD receita, delta vs. mesmo período
+ *      do mês anterior, série diária 30d).
+ *   2. Quanto saiu? (payouts confirmed no mês, refunds processados).
+ *   3. O que está preso? (payouts draft/approved, refunds pendentes).
+ *   4. De onde vem a receita? (breakdown por plano).
  *
- * Sem cron automático nesta versão — Sprint 5 pode adicionar se o
- * volume justificar.
+ * O cruzamento contábil (antes nesta rota) virou
+ * `/admin/financeiro/conciliacao`, linkado no topo.
  */
 
-import { runReconciliation, KIND_LABELS } from "@/lib/reconciliation";
-import type { DiscrepancyKind } from "@/lib/reconciliation";
+import Link from "next/link";
+import { getSupabaseAdmin } from "@/lib/supabase";
+import {
+  loadFinancialDashboard,
+  type DailyPoint,
+  type FinancialDashboard,
+  type PlanBreakdownRow,
+} from "@/lib/financial-dashboard";
+import { formatCurrencyBRL, formatDateBR, formatTimeBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
-function brl(cents: number | null | undefined): string {
-  if (cents == null || typeof cents !== "number") return "—";
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+// ────────────────────────────────────────────────────────────────────────
+// Helpers de formatação
+// ────────────────────────────────────────────────────────────────────────
+
+function brl(cents: number): string {
+  return formatCurrencyBRL(cents);
 }
 
-function fmtDateTime(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleString("pt-BR", {
+function pct(n: number): string {
+  return `${(n * 100).toFixed(0)}%`;
+}
+
+function monthLabel(iso: string): string {
+  return formatDateBR(iso, { month: "long", year: "numeric" }).toLowerCase();
+}
+
+function dayLabel(iso: string): string {
+  return formatDateBR(`${iso}T12:00:00.000Z`, {
     day: "2-digit",
     month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
   });
 }
 
-function isIso(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value)
-  );
-}
+// ────────────────────────────────────────────────────────────────────────
+// Sparkline SVG inline — zero dependência, responsivo
+// ────────────────────────────────────────────────────────────────────────
 
-function renderDetailValue(key: string, value: string | number | null) {
-  if (value === null || value === "") return <span className="text-ink-400">—</span>;
-
-  if (
-    typeof value === "number" &&
-    (key.endsWith("_cents") || key === "diff_cents")
-  ) {
-    const formatted = brl(value);
-    const isNeg = value < 0;
+function Sparkline({
+  series,
+  height = 48,
+}: {
+  series: DailyPoint[];
+  height?: number;
+}) {
+  if (series.length < 2) {
     return (
-      <span
-        className={`font-mono ${
-          isNeg ? "text-terracotta-700" : "text-ink-800"
-        }`}
-      >
-        {formatted}
-      </span>
+      <div className="text-xs text-ink-400">Dados insuficientes pra plotar.</div>
     );
   }
+  const max = Math.max(...series.map((p) => p.totalCents), 1);
+  const w = 100; // viewBox x (escala com width:100%)
+  const points = series
+    .map((p, i) => {
+      const x = (i / (series.length - 1)) * w;
+      const y = height - (p.totalCents / max) * (height - 4) - 2;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(" ");
+  const areaPoints = `0,${height} ${points} ${w},${height}`;
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${height}`}
+      preserveAspectRatio="none"
+      width="100%"
+      height={height}
+      aria-hidden="true"
+    >
+      <polygon points={areaPoints} fill="currentColor" opacity={0.1} />
+      <polyline
+        points={points}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.2}
+      />
+    </svg>
+  );
+}
 
-  if (isIso(value)) {
-    return <span className="font-mono text-ink-700">{fmtDateTime(value)}</span>;
+// ────────────────────────────────────────────────────────────────────────
+// UI helpers
+// ────────────────────────────────────────────────────────────────────────
+
+function DeltaBadge({ pct }: { pct: number | null }) {
+  if (pct === null) {
+    return (
+      <span className="text-xs text-ink-500">sem base pra comparar</span>
+    );
   }
-
+  const positive = pct >= 0;
+  const cls = positive
+    ? "text-sage-700 bg-sage-50 border-sage-200"
+    : "text-terracotta-700 bg-terracotta-50 border-terracotta-200";
   return (
-    <span className="font-mono text-ink-700 break-all">{String(value)}</span>
-  );
-}
-
-function detailLabel(key: string): string {
-  const map: Record<string, string> = {
-    doctor_id: "Médica (id)",
-    doctor_name: "Médica",
-    payment_id: "Payment",
-    payment_amount_cents: "Valor pago",
-    clawback_sum_cents: "Clawback atual",
-    policy_applied_at: "Policy aplicada",
-    reference_period: "Competência",
-    amount_cents: "Valor",
-    payout_amount_cents: "Valor do payout",
-    earnings_sum_cents: "Soma das earnings",
-    diff_cents: "Diferença",
-    payout_earnings_count: "Earnings (registrado)",
-    actual_earnings_count: "Earnings (real)",
-    payout_status: "Status payout",
-    unpaid_earnings_count: "Earnings não-pagas",
-    paid_at: "Pago em",
-    scheduled_at: "Agendado",
-    ended_at: "Terminou",
-    earned_at: "Ganho em",
-    available_at: "Disponível em",
-    days_open: "Dias aberto",
-    cancelled_reason: "Motivo",
-    description: "Descrição",
-    type: "Tipo",
-    status: "Status",
-  };
-  return map[key] ?? key;
-}
-
-export default async function FinanceiroPage() {
-  const report = await runReconciliation();
-
-  const bySeverity = {
-    critical: report.discrepancies.filter((d) => d.severity === "critical"),
-    warning: report.discrepancies.filter((d) => d.severity === "warning"),
-  };
-
-  const groupByKind = (list: typeof report.discrepancies) => {
-    const map = new Map<DiscrepancyKind, typeof list>();
-    for (const d of list) {
-      const cur = map.get(d.kind) ?? [];
-      cur.push(d);
-      map.set(d.kind, cur);
-    }
-    return map;
-  };
-
-  const critGroups = groupByKind(bySeverity.critical);
-  const warnGroups = groupByKind(bySeverity.warning);
-
-  const totalIssues = report.totalCritical + report.totalWarning;
-
-  return (
-    <div>
-      <header className="mb-6">
-        <p className="text-[0.78rem] uppercase tracking-[0.18em] text-sage-700 font-medium mb-2">
-          Financeiro
-        </p>
-        <h1 className="font-serif text-[1.85rem] sm:text-[2.2rem] leading-tight text-ink-800">
-          Conciliação
-        </h1>
-        <p className="mt-1 text-ink-500 max-w-2xl">
-          Cruza payments ↔ earnings ↔ payouts em busca de divergências.
-          Roda agora (snapshot de {fmtDateTime(report.runAt)}). Rodar
-          toda sexta antes do fechamento mensal é uma boa rotina.
-        </p>
-      </header>
-
-      {/* Resumo */}
-      <section className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
-        <Card
-          label="Críticas"
-          value={String(report.totalCritical)}
-          hint={
-            report.totalCritical > 0
-              ? "ação imediata"
-              : "nada crítico"
-          }
-          tone={report.totalCritical > 0 ? "terracotta" : "sage"}
-        />
-        <Card
-          label="Warnings"
-          value={String(report.totalWarning)}
-          hint={
-            report.totalWarning > 0
-              ? "revisar em breve"
-              : "tudo no prazo"
-          }
-          tone={report.totalWarning > 0 ? "terracotta" : "ink"}
-        />
-        <Card
-          label="Checks rodados"
-          value="6"
-          hint={
-            report.truncated.length > 0
-              ? `${report.truncated.length} truncado(s) em 100`
-              : "nenhum truncado"
-          }
-          tone={report.truncated.length > 0 ? "terracotta" : "ink"}
-        />
-        <Card
-          label="Rodado em"
-          value={new Date(report.runAt).toLocaleTimeString("pt-BR", {
-            hour: "2-digit",
-            minute: "2-digit",
-          })}
-          hint="recarregue a página pra rodar de novo"
-          tone="ink"
-        />
-      </section>
-
-      {totalIssues === 0 ? (
-        <section className="rounded-2xl bg-sage-50 border border-sage-200 p-10 text-center">
-          <h2 className="font-serif text-[1.4rem] text-sage-800 mb-2">
-            Nada pra reconciliar
-          </h2>
-          <p className="text-sage-700 max-w-md mx-auto">
-            Nenhuma divergência detectada entre payments, earnings e
-            payouts. Os 6 checks rodaram e tudo bateu. Volte aqui na
-            próxima sexta.
-          </p>
-        </section>
-      ) : (
-        <>
-          {report.totalCritical > 0 && (
-            <section className="mb-10">
-              <h2 className="font-serif text-[1.3rem] text-terracotta-800 mb-4">
-                Críticas ({report.totalCritical})
-              </h2>
-              <div className="space-y-6">
-                {Array.from(critGroups.entries()).map(([kind, items]) => (
-                  <DiscrepancyGroup
-                    key={kind}
-                    kind={kind}
-                    items={items}
-                    truncated={report.truncated.includes(kind)}
-                  />
-                ))}
-              </div>
-            </section>
-          )}
-
-          {report.totalWarning > 0 && (
-            <section>
-              <h2 className="font-serif text-[1.3rem] text-ink-800 mb-4">
-                Warnings ({report.totalWarning})
-              </h2>
-              <div className="space-y-6">
-                {Array.from(warnGroups.entries()).map(([kind, items]) => (
-                  <DiscrepancyGroup
-                    key={kind}
-                    kind={kind}
-                    items={items}
-                    truncated={report.truncated.includes(kind)}
-                  />
-                ))}
-              </div>
-            </section>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-function DiscrepancyGroup({
-  kind,
-  items,
-  truncated,
-}: {
-  kind: DiscrepancyKind;
-  items: Awaited<ReturnType<typeof runReconciliation>>["discrepancies"];
-  truncated: boolean;
-}) {
-  const meta = KIND_LABELS[kind];
-  const borderCls =
-    meta.severity === "critical"
-      ? "border-terracotta-200"
-      : "border-ink-200";
-  const headerCls =
-    meta.severity === "critical"
-      ? "bg-terracotta-50 border-b border-terracotta-200"
-      : "bg-cream-50 border-b border-ink-100";
-  const badgeCls =
-    meta.severity === "critical"
-      ? "bg-terracotta-100 text-terracotta-800 border-terracotta-300"
-      : "bg-cream-100 text-ink-700 border-ink-200";
-
-  return (
-    <article className={`rounded-2xl bg-white border ${borderCls} overflow-hidden`}>
-      <header className={`px-5 py-3 ${headerCls}`}>
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h3 className="font-serif text-[1.1rem] text-ink-800">
-            {meta.label}
-          </h3>
-          <span
-            className={`inline-flex items-center text-[0.68rem] font-medium uppercase tracking-[0.1em] px-2 py-0.5 rounded-full border ${badgeCls}`}
-          >
-            {items.length} {items.length === 1 ? "caso" : "casos"}
-          </span>
-          {truncated && (
-            <span className="text-xs text-terracotta-700 font-medium">
-              · truncado em 100
-            </span>
-          )}
-        </div>
-        <p className="mt-1 text-sm text-ink-600">{meta.description}</p>
-      </header>
-
-      <ul className="divide-y divide-ink-100">
-        {items.map((item, idx) => (
-          <li key={`${item.kind}-${item.primaryId}-${idx}`} className="px-5 py-4">
-            <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
-              <p className="text-sm text-ink-800 font-medium">
-                {item.headline}
-              </p>
-              <span className="text-[0.7rem] font-mono text-ink-400">
-                {fmtDateTime(item.observedAt)}
-              </span>
-            </div>
-            <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1.5 text-xs mb-3">
-              {Object.entries(item.details).map(([k, v]) => (
-                <div key={k} className="flex flex-col">
-                  <dt className="text-[0.65rem] uppercase tracking-[0.12em] text-ink-400 font-medium">
-                    {detailLabel(k)}
-                  </dt>
-                  <dd>{renderDetailValue(k, v)}</dd>
-                </div>
-              ))}
-              <div className="flex flex-col sm:col-span-2 lg:col-span-1">
-                <dt className="text-[0.65rem] uppercase tracking-[0.12em] text-ink-400 font-medium">
-                  {item.primaryType}
-                </dt>
-                <dd className="font-mono text-xs text-ink-500 break-all">
-                  {item.primaryId}
-                </dd>
-              </div>
-            </dl>
-            <p className="text-xs text-ink-600 bg-cream-50 border border-ink-100 rounded-lg px-3 py-2">
-              <span className="font-medium text-ink-800">Ação: </span>
-              {item.actionHint}
-            </p>
-          </li>
-        ))}
-      </ul>
-    </article>
+    <span
+      className={`inline-flex items-center text-[0.72rem] font-medium px-2 py-0.5 rounded-full border ${cls}`}
+    >
+      {positive ? "↑" : "↓"} {Math.abs(pct)}% vs. mesmo período do mês anterior
+    </span>
   );
 }
 
@@ -330,31 +122,260 @@ function Card({
   value,
   hint,
   tone,
+  children,
 }: {
   label: string;
   value: string;
-  hint: string;
-  tone: "sage" | "terracotta" | "ink";
+  hint?: string;
+  tone: "sage" | "terracotta" | "ink" | "cream";
+  children?: React.ReactNode;
 }) {
   const toneClasses = {
-    sage: "border-sage-200 bg-sage-50",
-    terracotta: "border-terracotta-200 bg-terracotta-50",
-    ink: "border-ink-100 bg-white",
-  }[tone];
-  const valueClasses = {
-    sage: "text-sage-800",
-    terracotta: "text-terracotta-700",
-    ink: "text-ink-800",
+    sage: "border-sage-200 bg-sage-50 text-sage-800",
+    terracotta: "border-terracotta-200 bg-terracotta-50 text-terracotta-700",
+    ink: "border-ink-100 bg-white text-ink-800",
+    cream: "border-cream-300 bg-cream-100 text-ink-800",
   }[tone];
   return (
-    <div className={`rounded-2xl border p-4 ${toneClasses}`}>
+    <div className={`rounded-2xl border p-5 ${toneClasses}`}>
       <p className="text-[0.72rem] uppercase tracking-[0.14em] text-ink-500 font-medium mb-2">
         {label}
       </p>
-      <p className={`font-serif text-[1.6rem] leading-none ${valueClasses}`}>
-        {value}
-      </p>
-      <p className="mt-2 text-xs text-ink-500">{hint}</p>
+      <p className="font-serif text-[1.6rem] leading-none">{value}</p>
+      {hint && <p className="mt-2 text-xs text-ink-500">{hint}</p>}
+      {children}
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Seções
+// ────────────────────────────────────────────────────────────────────────
+
+function RevenueHero({ d }: { d: FinancialDashboard }) {
+  return (
+    <section className="rounded-2xl border border-ink-100 bg-white p-6 mb-6">
+      <div className="flex flex-wrap items-baseline justify-between gap-3 mb-2">
+        <div>
+          <p className="text-[0.72rem] uppercase tracking-[0.14em] text-ink-500 font-medium">
+            Receita MTD · {monthLabel(d.window.currentMonthStart)}
+          </p>
+          <p className="font-serif text-[2.2rem] leading-none text-ink-900 mt-1">
+            {brl(d.revenue.mtd.totalCents)}
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <DeltaBadge pct={d.revenue.deltaPct} />
+            <span className="text-xs text-ink-500">
+              · {d.revenue.mtd.count} pagamento{d.revenue.mtd.count === 1 ? "" : "s"}
+            </span>
+          </div>
+        </div>
+        <div className="text-right">
+          <p className="text-xs text-ink-500 mb-1">
+            Últimos {d.window.rangeDays} dias
+          </p>
+          <div className="w-44 sm:w-64 text-sage-700">
+            <Sparkline series={d.dailySeries} />
+          </div>
+          <p className="text-[0.68rem] text-ink-400 mt-1">
+            {dayLabel(d.window.seriesStart)} → {dayLabel(d.dailySeries[d.dailySeries.length - 1]?.date ?? d.window.seriesStart)}
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CashFlow({ d }: { d: FinancialDashboard }) {
+  const net = d.outflow.netMtd;
+  const netTone: "sage" | "terracotta" = net >= 0 ? "sage" : "terracotta";
+  return (
+    <section className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+      <Card
+        label="Saída: repasses médicas (MTD)"
+        value={brl(d.outflow.payoutsMtd.totalCents)}
+        hint={`${d.outflow.payoutsMtd.count} payout${d.outflow.payoutsMtd.count === 1 ? "" : "s"} confirmado${d.outflow.payoutsMtd.count === 1 ? "" : "s"}`}
+        tone="ink"
+      />
+      <Card
+        label="Refunds processados (MTD)"
+        value={String(d.outflow.refundsMtd.count)}
+        hint={
+          d.outflow.refundsMtd.count === 0
+            ? "nenhum refund neste mês"
+            : "valor depende do payment original"
+        }
+        tone="ink"
+      />
+      <Card
+        label={net >= 0 ? "Líquido (MTD)" : "Déficit (MTD)"}
+        value={brl(net)}
+        hint={
+          net >= 0
+            ? "receita − repasses confirmadas"
+            : "saídas excedem receita no mês"
+        }
+        tone={netTone}
+      />
+    </section>
+  );
+}
+
+function PendingBlock({ d }: { d: FinancialDashboard }) {
+  const anyPending =
+    d.pending.payoutsDraft.count > 0 ||
+    d.pending.payoutsApproved.count > 0 ||
+    d.pending.refundsRequired.count > 0;
+
+  return (
+    <section className="mb-6">
+      <div className="flex items-baseline justify-between mb-3">
+        <h2 className="font-serif text-[1.3rem] text-ink-800">Pendências financeiras</h2>
+        {!anyPending && (
+          <span className="text-xs text-sage-700">nada a resolver agora</span>
+        )}
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <Card
+          label="Payouts em draft"
+          value={brl(d.pending.payoutsDraft.totalCents)}
+          hint={`${d.pending.payoutsDraft.count} lote${d.pending.payoutsDraft.count === 1 ? "" : "s"} aguardando revisão`}
+          tone={d.pending.payoutsDraft.count > 0 ? "cream" : "ink"}
+        >
+          {d.pending.payoutsDraft.count > 0 && (
+            <Link
+              href="/admin/payouts"
+              className="mt-3 inline-flex text-xs font-medium text-ink-700 hover:text-ink-900 underline underline-offset-2"
+            >
+              Revisar →
+            </Link>
+          )}
+        </Card>
+        <Card
+          label="Payouts aprovados"
+          value={brl(d.pending.payoutsApproved.totalCents)}
+          hint={`${d.pending.payoutsApproved.count} aguardando PIX`}
+          tone={d.pending.payoutsApproved.count > 0 ? "cream" : "ink"}
+        >
+          {d.pending.payoutsApproved.count > 0 && (
+            <Link
+              href="/admin/payouts?status=approved"
+              className="mt-3 inline-flex text-xs font-medium text-ink-700 hover:text-ink-900 underline underline-offset-2"
+            >
+              Enviar PIX →
+            </Link>
+          )}
+        </Card>
+        <Card
+          label="Refunds pendentes"
+          value={String(d.pending.refundsRequired.count)}
+          hint={
+            d.pending.refundsRequired.count === 0
+              ? "tudo processado"
+              : "no-show gerou direito a estorno"
+          }
+          tone={d.pending.refundsRequired.count > 0 ? "terracotta" : "ink"}
+        >
+          {d.pending.refundsRequired.count > 0 && (
+            <Link
+              href="/admin/refunds"
+              className="mt-3 inline-flex text-xs font-medium text-terracotta-700 hover:text-terracotta-900 underline underline-offset-2"
+            >
+              Processar →
+            </Link>
+          )}
+        </Card>
+      </div>
+    </section>
+  );
+}
+
+function PlanBreakdown({ rows }: { rows: PlanBreakdownRow[] }) {
+  if (rows.length === 0) {
+    return (
+      <section className="mb-6 rounded-2xl border border-ink-100 bg-white p-6">
+        <h2 className="font-serif text-[1.3rem] text-ink-800 mb-1">Receita por plano</h2>
+        <p className="text-sm text-ink-500">
+          Nenhum pagamento confirmado este mês ainda.
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="mb-6 rounded-2xl border border-ink-100 bg-white overflow-hidden">
+      <div className="px-5 py-4 border-b border-ink-100">
+        <h2 className="font-serif text-[1.3rem] text-ink-800">Receita por plano (MTD)</h2>
+      </div>
+      <ul className="divide-y divide-ink-100">
+        {rows.map((r) => (
+          <li
+            key={r.planId ?? `__no_plan__`}
+            className="px-5 py-3 flex items-center gap-4"
+          >
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-ink-800 truncate">
+                {r.planName}
+              </p>
+              <div className="mt-1 h-1.5 rounded-full bg-ink-50 overflow-hidden">
+                <div
+                  className="h-full bg-sage-500"
+                  style={{ width: `${Math.max(2, r.share * 100).toFixed(1)}%` }}
+                />
+              </div>
+            </div>
+            <div className="text-right shrink-0">
+              <p className="font-mono text-sm text-ink-800">
+                {brl(r.totalCents)}
+              </p>
+              <p className="text-[0.72rem] text-ink-500">
+                {r.count} · {pct(r.share)}
+              </p>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Page
+// ────────────────────────────────────────────────────────────────────────
+
+export default async function FinanceiroPage() {
+  const supabase = getSupabaseAdmin();
+  const dashboard = await loadFinancialDashboard(supabase);
+
+  return (
+    <div>
+      <header className="mb-6">
+        <div className="flex flex-wrap items-baseline justify-between gap-3">
+          <div>
+            <p className="text-[0.78rem] uppercase tracking-[0.18em] text-sage-700 font-medium mb-2">
+              Financeiro
+            </p>
+            <h1 className="font-serif text-[1.85rem] sm:text-[2.2rem] leading-tight text-ink-800">
+              Visão do mês
+            </h1>
+          </div>
+          <Link
+            href="/admin/financeiro/conciliacao"
+            className="inline-flex items-center text-sm font-medium text-ink-700 hover:text-ink-900 underline underline-offset-2"
+          >
+            Rodar conciliação contábil →
+          </Link>
+        </div>
+        <p className="mt-2 text-ink-500 max-w-2xl">
+          Receita confirmada, saídas, pendências e mix de planos —
+          atualizado a cada request (snapshot de {formatTimeBR(dashboard.generatedAt)}).
+        </p>
+      </header>
+
+      <RevenueHero d={dashboard} />
+      <CashFlow d={dashboard} />
+      <PendingBlock d={dashboard} />
+      <PlanBreakdown rows={dashboard.revenue.byPlan} />
     </div>
   );
 }

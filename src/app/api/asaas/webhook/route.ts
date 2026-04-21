@@ -14,6 +14,13 @@ import {
   promoteFulfillmentAfterPayment,
 } from "@/lib/fulfillment-promote";
 import { sendText } from "@/lib/whatsapp";
+import { decidePaymentTimestampUpdate } from "@/lib/payment-updates";
+import {
+  classifyPaymentEvent,
+  shouldActivateAppointment,
+  shouldCreateEarning,
+  shouldReverseEarning,
+} from "@/lib/payment-event-category";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -117,6 +124,18 @@ export async function POST(req: Request) {
     if (asaasPaymentId && body.payment) {
       const payment = body.payment;
 
+      // Busca estado atual pra decidir idempotência dos timestamps contábeis.
+      // PR-013 / audit [5.1]: `paid_at` e `refunded_at` são first-write-wins.
+      // O Asaas manda PAYMENT_CONFIRMED → PAYMENT_RECEIVED → PAYMENT_UPDATED
+      // em sequência; sobrescrever a cada um destruía a reconciliação contábil.
+      // Redundância: trigger `payments_immutable_timestamps` (migration
+      // 20260428000000) impede sobrescrita no nível do banco.
+      const { data: existing } = await supabase
+        .from("payments")
+        .select("id, paid_at, refunded_at")
+        .eq("asaas_payment_id", asaasPaymentId)
+        .maybeSingle();
+
       const updates: Record<string, unknown> = {
         status: payment.status,
         asaas_raw: payment as unknown as Record<string, unknown>,
@@ -127,19 +146,25 @@ export async function POST(req: Request) {
       if (payment.dueDate) updates.due_date = payment.dueDate;
       if (payment.billingType) updates.billing_type = payment.billingType;
 
-      // Marca timestamp de pagamento/estorno quando aplicável
-      if (
-        payment.status === "RECEIVED" ||
-        payment.status === "CONFIRMED" ||
-        payment.status === "RECEIVED_IN_CASH"
-      ) {
-        updates.paid_at = new Date().toISOString();
+      const tsDecision = decidePaymentTimestampUpdate(
+        payment.status,
+        existing ?? null
+      );
+      if (tsDecision.paid_at) updates.paid_at = tsDecision.paid_at;
+      if (tsDecision.refunded_at) updates.refunded_at = tsDecision.refunded_at;
+      if (tsDecision.paid_at_skipped) {
+        console.log("[asaas-webhook] paid_at já fixado, ignorando:", {
+          asaasPaymentId,
+          paid_at: tsDecision.paid_at_skipped,
+          event: body.event,
+        });
       }
-      if (
-        payment.status === "REFUNDED" ||
-        payment.status === "REFUND_IN_PROGRESS"
-      ) {
-        updates.refunded_at = new Date().toISOString();
+      if (tsDecision.refunded_at_skipped) {
+        console.log("[asaas-webhook] refunded_at já fixado, ignorando:", {
+          asaasPaymentId,
+          refunded_at: tsDecision.refunded_at_skipped,
+          event: body.event,
+        });
       }
 
       const { data: updatedPayment, error: updateErr } = await supabase
@@ -256,24 +281,24 @@ async function handleEarningsLifecycle(
   // consulta direta. Sair silenciosamente.
   if (!appt) return;
 
-  const isReceived =
-    event === "PAYMENT_RECEIVED" ||
-    event === "PAYMENT_CONFIRMED" ||
-    event === "PAYMENT_RECEIVED_IN_CASH" ||
-    paymentStatus === "RECEIVED" ||
-    paymentStatus === "CONFIRMED" ||
-    paymentStatus === "RECEIVED_IN_CASH";
+  // Classificação de eventos Asaas (PR-014 · D-050).
+  //
+  // `confirmed` = cartão aprovado MAS dinheiro não liquidado. Dispara UX
+  //   (ativa appointment, provisiona sala, notifica paciente) para que
+  //   o paciente veja "pago" imediatamente, mas NÃO cria earning — se
+  //   der chargeback, o Instituto evita perda (médica não recebeu antes).
+  //
+  // `received` = dinheiro liquidado. Dispara UX (caso PIX/boleto tenham
+  //   pulado o CONFIRMED) E cria earning da médica. Este é o único sinal
+  //   financeiro autêntico para créditos.
+  //
+  // `reversed` = estorno/chargeback. Dispara clawback (earning negativo).
+  const category = classifyPaymentEvent(event, paymentStatus);
 
-  const isReversed =
-    event === "PAYMENT_REFUNDED" ||
-    event === "PAYMENT_REFUND_IN_PROGRESS" ||
-    event === "PAYMENT_CHARGEBACK_REQUESTED" ||
-    event === "PAYMENT_CHARGEBACK_DISPUTE" ||
-    paymentStatus === "REFUNDED" ||
-    paymentStatus === "CHARGEBACK_REQUESTED";
-
-  if (isReceived) {
-    // 1) Ativa appointment se ainda estiver em pending_payment
+  if (shouldActivateAppointment(category)) {
+    // 1) Ativa appointment se ainda estiver em pending_payment (idempotente).
+    //    Dispara em CONFIRMED ou RECEIVED — o paciente não sabe o que é
+    //    "compensação financeira", ele quer ver a consulta confirmada.
     const activation = await activateAppointmentAfterPayment(
       appt.id as string,
       internalPaymentId
@@ -281,10 +306,12 @@ async function handleEarningsLifecycle(
     if (!activation.ok) {
       console.error("[asaas-webhook] activate falhou:", activation.error);
     } else if (activation.wasActivated) {
-      console.log("[asaas-webhook] appointment ativado:", appt.id);
+      console.log("[asaas-webhook] appointment ativado:", appt.id, {
+        category,
+      });
     }
 
-    // 2) Provisiona sala Daily (best-effort, idempotente)
+    // 2) Provisiona sala Daily (best-effort, idempotente).
     const alreadyHasRoom = Boolean(
       (appt as { video_room_url?: string | null }).video_room_url
     );
@@ -292,7 +319,6 @@ async function handleEarningsLifecycle(
       try {
         const customerName =
           (appt as { customers?: { name?: string } }).customers?.name ?? "Paciente";
-        // Carrega doctor display_name + consultation_minutes
         const { data: doctorRow } = await supabase
           .from("doctors")
           .select("full_name, display_name, consultation_minutes")
@@ -332,31 +358,46 @@ async function handleEarningsLifecycle(
           appt.id
         );
       } catch (e) {
-        // Não bloqueia o webhook — admin pode reprovisionar via UI/API depois.
         console.error("[asaas-webhook] provisionConsultationRoom falhou:", e);
       }
     }
 
-    // 3) Cria earning pra médica
-    const customerName =
-      (appt as { customers?: { name?: string } }).customers?.name ?? "paciente";
-    const result = await createConsultationEarning(supabase, {
-      paymentId: internalPaymentId,
-      doctorId: appt.doctor_id as string,
-      appointmentId: appt.id as string,
-      appointmentKind: (appt.kind as "scheduled" | "on_demand" | undefined) ?? "scheduled",
-      description: `Consulta · ${customerName}`,
-    });
-    if (!result.ok) {
-      console.error("[asaas-webhook] earning falhou:", result.error);
-    } else if (result.created) {
-      console.log("[asaas-webhook] earning criado:", result.earningId);
+    // 3) Cria earning pra médica — APENAS se dinheiro foi efetivamente
+    //    liquidado (PR-014). CONFIRMED não dispara earning: o cartão
+    //    ainda tem janela aberta pra chargeback (até D+30 em crédito).
+    //    Se a médica sacasse earning nesse intervalo e o paciente
+    //    estornasse depois, viraria prejuízo operacional do Instituto.
+    //
+    //    Para PIX/boleto o webhook pula direto para PAYMENT_RECEIVED,
+    //    sem atraso. Para cartão, o earning cria no segundo webhook
+    //    (PAYMENT_RECEIVED após compensação no adquirente).
+    if (shouldCreateEarning(category)) {
+      const customerName =
+        (appt as { customers?: { name?: string } }).customers?.name ?? "paciente";
+      const result = await createConsultationEarning(supabase, {
+        paymentId: internalPaymentId,
+        doctorId: appt.doctor_id as string,
+        appointmentId: appt.id as string,
+        appointmentKind:
+          (appt.kind as "scheduled" | "on_demand" | undefined) ?? "scheduled",
+        description: `Consulta · ${customerName}`,
+      });
+      if (!result.ok) {
+        console.error("[asaas-webhook] earning falhou:", result.error);
+      } else if (result.created) {
+        console.log("[asaas-webhook] earning criado:", result.earningId);
+      }
+    } else {
+      // category === "confirmed": log explícito pra observabilidade.
+      console.log("[asaas-webhook] earning postergado (CONFIRMED sem RECEIVED):", {
+        appointment_id: appt.id,
+        payment_id: internalPaymentId,
+      });
     }
 
-    // 4) Enfileira notificações WhatsApp (D-031).
-    //    - Confirmação imediata (disparo em ~1 min pelo cron wa-reminders).
-    //    - 4 lembretes temporais agendados pro futuro (T-24h, T-1h, T-15min, T+10min).
-    //    Todos idempotentes — webhook Asaas pode chegar em duplicata sem efeito colateral.
+    // 4) Enfileira notificações WhatsApp (D-031). Idempotente no
+    //    provider — webhook Asaas pode chegar em duplicata (CONFIRMED
+    //    seguido de RECEIVED) sem efeito colateral.
     try {
       const immediateId = await enqueueImmediate(appt.id as string, "confirmacao");
       const reminders = await scheduleRemindersForAppointment(appt.id as string);
@@ -374,7 +415,7 @@ async function handleEarningsLifecycle(
     return;
   }
 
-  if (isReversed) {
+  if (shouldReverseEarning(category)) {
     const reason =
       event === "PAYMENT_CHARGEBACK_REQUESTED" || event === "PAYMENT_CHARGEBACK_DISPUTE"
         ? "Chargeback"
@@ -460,15 +501,13 @@ async function handleFulfillmentLifecycle(
   internalPaymentId: string,
   asaasPaymentId: string | null
 ): Promise<void> {
-  const isReceived =
-    event === "PAYMENT_RECEIVED" ||
-    event === "PAYMENT_CONFIRMED" ||
-    event === "PAYMENT_RECEIVED_IN_CASH" ||
-    paymentStatus === "RECEIVED" ||
-    paymentStatus === "CONFIRMED" ||
-    paymentStatus === "RECEIVED_IN_CASH";
-
-  if (!isReceived) return;
+  // Promoção de fulfillment (D-044 · 2.D) dispara em CONFIRMED ou RECEIVED.
+  // Ao contrário de earnings, aqui a UX é priorizada: o paciente precisa
+  // ver "pagamento confirmado, estamos preparando sua medicação" assim
+  // que o cartão é aprovado. Se chargeback acontecer depois, o webhook
+  // PAYMENT_CHARGEBACK_* reverte o estado do fulfillment via fluxo próprio.
+  const category = classifyPaymentEvent(event, paymentStatus);
+  if (!shouldActivateAppointment(category)) return;
 
   const result = await promoteFulfillmentAfterPayment(supabase, {
     paymentId: internalPaymentId,

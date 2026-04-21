@@ -18,6 +18,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ActiveFulfillment } from "@/lib/patient-treatment";
+import { EditShippingDrawer } from "./_EditShippingDrawer";
+import { formatDateBR } from "@/lib/datetime-br";
 
 type Props = {
   fulfillment: ActiveFulfillment;
@@ -68,7 +70,7 @@ function eyebrowFor(status: ActiveFulfillment["status"]): string {
 
 function fmtDate(iso: string | null): string | null {
   if (!iso) return null;
-  return new Date(iso).toLocaleDateString("pt-BR", {
+  return formatDateBR(iso, {
     day: "2-digit",
     month: "2-digit",
     year: "numeric",
@@ -79,9 +81,11 @@ export function ActiveFulfillmentCard({ fulfillment: f }: Props) {
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editingShipping, setEditingShipping] = useState(false);
 
   const currentIdx = stepIndex(f.status);
   const canConfirm = f.status === "shipped";
+  const canEditShipping = f.status === "paid";
 
   async function confirmDelivery() {
     setSubmitting(true);
@@ -217,10 +221,38 @@ export function ActiveFulfillmentCard({ fulfillment: f }: Props) {
         </p>
       )}
 
-      {!canConfirm && f.status === "paid" && (
-        <p className="text-xs text-ink-500">
-          A gente vai acionar a farmácia nas próximas horas úteis.
-        </p>
+      {!canConfirm && f.status === "paid" && !editingShipping && (
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <p className="text-xs text-ink-500">
+            A gente vai acionar a farmácia nas próximas horas úteis.
+          </p>
+          {canEditShipping && (
+            <button
+              type="button"
+              onClick={() => setEditingShipping(true)}
+              className="text-xs text-ink-600 hover:text-ink-900 underline underline-offset-2"
+            >
+              Editar endereço de entrega
+            </button>
+          )}
+        </div>
+      )}
+
+      {editingShipping && canEditShipping && (
+        <EditShippingDrawer
+          fulfillmentId={f.fulfillmentId}
+          defaultAddress={{
+            recipient_name: f.shippingRecipientName,
+            zipcode: f.shippingZipcode,
+            street: f.shippingStreet,
+            number: f.shippingNumber,
+            complement: f.shippingComplement,
+            district: f.shippingDistrict,
+            city: f.shippingCity,
+            state: f.shippingState,
+          }}
+          onClose={() => setEditingShipping(false)}
+        />
       )}
     </div>
   );

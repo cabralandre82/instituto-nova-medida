@@ -13,12 +13,13 @@
 
 import type { Metadata } from "next";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { Logo } from "@/components/Logo";
 import { Footer } from "@/components/Footer";
 import { CheckoutForm, type CheckoutPlan } from "@/components/CheckoutForm";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getPrimaryDoctor, listAvailableSlots } from "@/lib/scheduling";
+import { isLegacyPurchaseEnabled } from "@/lib/legacy-purchase-gate";
 import { SlotPicker } from "./SlotPicker";
 
 type PageProps = {
@@ -54,6 +55,13 @@ async function loadPlan(slug: string): Promise<CheckoutPlan | null> {
 }
 
 export default async function AgendarPage({ params, searchParams }: PageProps) {
+  // PR-020 / audit [1.1]: rota legada é gatekept — em produção o fluxo
+  // canônico é consulta gratuita primeiro (D-044), não agendamento
+  // pago direto. Ver src/lib/legacy-purchase-gate.ts.
+  if (!isLegacyPurchaseEnabled()) {
+    redirect("/?aviso=consulta_primeiro");
+  }
+
   const { plano } = await params;
   const sp = await searchParams;
 

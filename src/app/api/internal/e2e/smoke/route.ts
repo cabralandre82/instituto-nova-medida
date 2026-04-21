@@ -39,26 +39,14 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { runHealthCheck } from "@/lib/system-health";
+import { assertCronRequest } from "@/lib/cron-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function isAuthorized(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true; // dev / local
-  const auth = req.headers.get("authorization") || "";
-  if (auth === `Bearer ${secret}`) return true;
-  if (req.headers.get("x-cron-secret") === secret) return true;
-  return false;
-}
-
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  if (!isAuthorized(req)) {
-    return NextResponse.json(
-      { ok: false, error: "unauthorized" },
-      { status: 401 }
-    );
-  }
+  const unauth = assertCronRequest(req);
+  if (unauth) return unauth;
 
   const pingExternal = req.nextUrl.searchParams.get("ping") === "1";
 

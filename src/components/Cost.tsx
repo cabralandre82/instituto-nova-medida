@@ -81,16 +81,6 @@ export function Cost({ onCta }: { onCta: () => void }) {
             </svg>
           </button>
         </motion.div>
-
-        <motion.p
-          initial={{ opacity: 0 }}
-          whileInView={{ opacity: 1 }}
-          viewport={{ once: true }}
-          transition={{ duration: 0.7, delay: 0.45 }}
-          className="mt-8 text-[0.9rem] text-cream-100/70 leading-snug max-w-xl"
-        >
-          Mais de 1.200 pessoas já passaram por essa avaliação nas últimas semanas.
-        </motion.p>
       </div>
     </section>
   );

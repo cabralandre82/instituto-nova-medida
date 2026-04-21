@@ -25,12 +25,16 @@ import {
   searchCustomers,
   normalizeQuery,
 } from "@/lib/patient-search";
+import {
+  getAccessContextFromRequest,
+  logPatientAccess,
+} from "@/lib/patient-access-log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
-  await requireAdmin();
+  const admin = await requireAdmin();
 
   const url = new URL(req.url);
   const q = normalizeQuery(url.searchParams.get("q"));
@@ -48,6 +52,25 @@ export async function GET(req: Request) {
   try {
     const supabase = getSupabaseAdmin();
     const hits = await searchCustomers(supabase, q, { limit });
+
+    // PR-032 · D-051: registra cada busca com termo + contagem de
+    // resultados. customer_id=null porque a busca não aponta pra um
+    // paciente específico (o clique numa ficha é logado separadamente).
+    // failSoft: busca não pode ser bloqueada por indisponibilidade do
+    // log.
+    await logPatientAccess(supabase, {
+      adminUserId: admin.id,
+      adminEmail: admin.email,
+      customerId: null,
+      action: "search",
+      metadata: {
+        ...getAccessContextFromRequest(req),
+        query: q,
+        strategy,
+        hits: hits.length,
+      },
+    });
+
     return NextResponse.json({
       ok: true,
       strategy,

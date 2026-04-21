@@ -13,6 +13,7 @@ import {
   type PixKeyType,
 } from "@/lib/doctor-payment-methods";
 import { ProfileForm } from "./ProfileForm";
+import { formatDateLongBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -163,24 +164,12 @@ export default async function DoctorProfilePage() {
             </span>
             {doctor.activated_at && (
               <p className="mt-3 text-xs text-ink-500">
-                Ativada em{" "}
-                {new Date(doctor.activated_at).toLocaleDateString("pt-BR", {
-                  day: "2-digit",
-                  month: "long",
-                  year: "numeric",
-                })}
-                .
+                Ativada em {formatDateLongBR(doctor.activated_at)}.
               </p>
             )}
             {!doctor.activated_at && doctor.invited_at && (
               <p className="mt-3 text-xs text-ink-500">
-                Convite enviado em{" "}
-                {new Date(doctor.invited_at).toLocaleDateString("pt-BR", {
-                  day: "2-digit",
-                  month: "long",
-                  year: "numeric",
-                })}
-                .
+                Convite enviado em {formatDateLongBR(doctor.invited_at)}.
               </p>
             )}
           </div>

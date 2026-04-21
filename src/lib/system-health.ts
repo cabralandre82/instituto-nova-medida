@@ -98,6 +98,14 @@ const CRON_PAYOUTS_ERROR_DAYS = 70;
 const CRON_NOTIFY_DOCS_WARN_HOURS = 36;
 const CRON_NOTIFY_DOCS_ERROR_DAYS = 7;
 
+/**
+ * Cron retention-anonymize (semanal): domingo 04:00 UTC.
+ *   > 10d  = warning (1 execução perdida — investigar)
+ *   > 21d  = erro    (> 3 execuções perdidas — retenção LGPD em risco)
+ */
+const CRON_RETENTION_WARN_DAYS = 10;
+const CRON_RETENTION_ERROR_DAYS = 21;
+
 const DEFAULT_TIMEOUT_MS = 5000;
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -191,6 +199,17 @@ export async function runHealthCheck(
           "notify_pending_documents",
           CRON_NOTIFY_DOCS_WARN_HOURS * 60 * 60 * 1000,
           CRON_NOTIFY_DOCS_ERROR_DAYS * 24 * 60 * 60 * 1000
+        ),
+      timeoutMs
+    ),
+    withTimeout(
+      "cron_retention_anonymize",
+      "Cron · anonimização por retenção (LGPD Art. 16)",
+      () =>
+        checkCronFreshness(
+          "retention_anonymize",
+          CRON_RETENTION_WARN_DAYS * 24 * 60 * 60 * 1000,
+          CRON_RETENTION_ERROR_DAYS * 24 * 60 * 60 * 1000
         ),
       timeoutMs
     ),

@@ -20,9 +20,11 @@
  * Segurança:
  *   - Vercel Cron adiciona automaticamente o header
  *     `Authorization: Bearer ${CRON_SECRET}` se a env var estiver
- *     definida. Validamos aqui.
- *   - Em dev / ausência de CRON_SECRET: a rota responde 200 pra
- *     qualquer chamada (pra facilitar debug local via curl).
+ *     definida. Validamos aqui via `assertCronRequest` (lib/cron-auth).
+ *   - Em produção exigimos `CRON_SECRET` — ausência = 503 misconfigured
+ *     (fail-fast, PR-026 / audit 2026-04-20).
+ *   - Em dev sem CRON_SECRET: a rota responde 200 pra qualquer chamada
+ *     (facilita debug local via curl).
  *
  * Docs: D-030 em docs/DECISIONS.md.
  */
@@ -30,6 +32,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { enqueueImmediate } from "@/lib/notifications";
+import { assertCronRequest } from "@/lib/cron-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,20 +45,6 @@ type ExpiredRow = {
   payment_id: string | null;
   expired_at: string;
 };
-
-function isAuthorized(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) {
-    // Dev mode: sem CRON_SECRET não há autorização a validar.
-    return true;
-  }
-  const auth = req.headers.get("authorization") || "";
-  // Vercel Cron envia "Bearer <CRON_SECRET>".
-  // Aceitamos também "x-cron-secret: <CRON_SECRET>" pra debug manual.
-  if (auth === `Bearer ${secret}`) return true;
-  if (req.headers.get("x-cron-secret") === secret) return true;
-  return false;
-}
 
 async function runSweep(): Promise<
   | { ok: true; expired_count: number; rows: ExpiredRow[] }
@@ -73,9 +62,8 @@ async function runSweep(): Promise<
 }
 
 export async function GET(req: NextRequest) {
-  if (!isAuthorized(req)) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  }
+  const unauth = assertCronRequest(req);
+  if (unauth) return unauth;
 
   const result = await runSweep();
 

@@ -12,6 +12,10 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { requireAdmin } from "@/lib/auth";
 import { canTransition, loadPayoutOrFail } from "@/lib/payouts";
+import {
+  getAuditContextFromRequest,
+  logAdminAction,
+} from "@/lib/admin-audit-log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,7 +23,7 @@ export const dynamic = "force-dynamic";
 type Body = { reason?: string };
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  await requireAdmin();
+  const admin = await requireAdmin();
   const { id } = await params;
   const body = (await req.json().catch(() => ({}))) as Body;
 
@@ -61,6 +65,23 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     console.error("[payouts/cancel] earnings:", earnErr);
     return NextResponse.json({ ok: false, error: earnErr.message }, { status: 500 });
   }
+
+  await logAdminAction(supabase, {
+    actorUserId: admin.id,
+    actorEmail: admin.email,
+    action: "payout.cancel",
+    entityType: "payout",
+    entityId: id,
+    before: { status: r.payout.status },
+    after: {
+      status: "cancelled",
+      earnings_unlinked: count ?? 0,
+    },
+    metadata: {
+      ...getAuditContextFromRequest(req),
+      reason,
+    },
+  });
 
   return NextResponse.json({ ok: true, earnings_unlinked: count ?? 0 });
 }

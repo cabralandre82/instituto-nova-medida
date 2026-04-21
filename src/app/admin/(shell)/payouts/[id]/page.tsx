@@ -11,6 +11,11 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { PayoutActions } from "./PayoutActions";
 import { ProofPanel } from "./ProofPanel";
 import { BillingDocumentAdminPanel } from "./BillingDocumentAdminPanel";
+import {
+  formatCurrencyBRL,
+  formatDateBR,
+  formatDateTimeBR,
+} from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
 
@@ -65,10 +70,7 @@ type BillingDocument = {
 };
 
 function brl(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  return formatCurrencyBRL(cents);
 }
 
 const STATUS = {
@@ -198,7 +200,7 @@ export default async function PayoutDetailPage({
                   {earnings.map((e) => (
                     <tr key={e.id} className="hover:bg-cream-50">
                       <td className="px-6 py-3 text-sm text-ink-600 font-mono">
-                        {new Date(e.earned_at).toLocaleDateString("pt-BR")}
+                        {formatDateBR(e.earned_at)}
                       </td>
                       <td className="px-6 py-3 text-sm">
                         <div className="text-ink-800">
@@ -238,18 +240,18 @@ export default async function PayoutDetailPage({
             <ul className="space-y-2 text-sm text-ink-600">
               <li>
                 <strong className="text-ink-800">Criado:</strong>{" "}
-                {new Date(payout.created_at).toLocaleString("pt-BR")}
+                {formatDateTimeBR(payout.created_at)}
               </li>
               {payout.approved_at && (
                 <li>
                   <strong className="text-ink-800">Aprovado:</strong>{" "}
-                  {new Date(payout.approved_at).toLocaleString("pt-BR")}
+                  {formatDateTimeBR(payout.approved_at)}
                 </li>
               )}
               {payout.pix_sent_at && (
                 <li>
                   <strong className="text-ink-800">PIX enviado:</strong>{" "}
-                  {new Date(payout.pix_sent_at).toLocaleString("pt-BR")}
+                  {formatDateTimeBR(payout.pix_sent_at)}
                   {payout.pix_transaction_id && (
                     <span className="ml-2 font-mono text-xs text-ink-400">
                       tx: {payout.pix_transaction_id}
@@ -260,7 +262,7 @@ export default async function PayoutDetailPage({
               {payout.confirmed_at && (
                 <li>
                   <strong className="text-ink-800">Confirmado:</strong>{" "}
-                  {new Date(payout.confirmed_at).toLocaleString("pt-BR")}
+                  {formatDateTimeBR(payout.confirmed_at)}
                 </li>
               )}
             </ul>

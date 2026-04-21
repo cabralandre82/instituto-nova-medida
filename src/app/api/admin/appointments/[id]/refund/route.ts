@@ -39,6 +39,11 @@ import {
   type RefundMethod,
   type RefundResult,
 } from "@/lib/refunds";
+import { getSupabaseAdmin } from "@/lib/supabase";
+import {
+  getAuditContextFromRequest,
+  logAdminAction,
+} from "@/lib/admin-audit-log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -142,6 +147,27 @@ export async function POST(
       },
       { status: httpStatusFromRefundResult(result) }
     );
+  }
+
+  // PR-031: audita refund só quando efetivamente processado agora
+  // (evita poluir o log com alreadyProcessed, que é no-op idempotente).
+  if (!result.alreadyProcessed) {
+    await logAdminAction(getSupabaseAdmin(), {
+      actorUserId: admin.id,
+      actorEmail: admin.email,
+      action: "refund.mark_processed",
+      entityType: "appointment",
+      entityId: result.appointmentId,
+      after: {
+        method: result.method,
+        processed_at: result.processedAt,
+        external_ref: result.externalRef ?? null,
+      },
+      metadata: {
+        ...getAuditContextFromRequest(req),
+        notes: body.notes ?? null,
+      },
+    });
   }
 
   return NextResponse.json({

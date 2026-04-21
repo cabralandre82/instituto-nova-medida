@@ -19,6 +19,11 @@
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import { unpauseDoctor } from "@/lib/reliability";
+import { getSupabaseAdmin } from "@/lib/supabase";
+import {
+  getAuditContextFromRequest,
+  logAdminAction,
+} from "@/lib/admin-audit-log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -53,6 +58,20 @@ export async function POST(
       { ok: false, code: result.code, error: result.message },
       { status: result.code === "doctor_not_found" ? 404 : 500 }
     );
+  }
+
+  if (result.wasPaused) {
+    await logAdminAction(getSupabaseAdmin(), {
+      actorUserId: admin.id,
+      actorEmail: admin.email,
+      action: "doctor.reliability_unpause",
+      entityType: "doctor",
+      entityId: id,
+      metadata: {
+        ...getAuditContextFromRequest(req),
+        notes: body.notes ?? null,
+      },
+    });
   }
 
   return NextResponse.json({

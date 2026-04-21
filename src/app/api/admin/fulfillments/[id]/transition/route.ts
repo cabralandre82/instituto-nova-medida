@@ -39,6 +39,10 @@ import {
   composeShippedMessage,
 } from "@/lib/fulfillment-messages";
 import { sendText } from "@/lib/whatsapp";
+import {
+  getAuditContextFromRequest,
+  logAdminAction,
+} from "@/lib/admin-audit-log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -131,6 +135,24 @@ export async function POST(req: Request, { params }: RouteParams) {
       notificationSent: false,
     });
   }
+
+  // PR-031: registra a ação na trilha de auditoria (best-effort).
+  // Captura a transição mesmo antes do WhatsApp pra que o rastro
+  // exista se a notificação causar exceção logo depois.
+  await logAdminAction(supabase, {
+    actorUserId: admin.id,
+    actorEmail: admin.email,
+    action: "fulfillment.transition",
+    entityType: "fulfillment",
+    entityId: fulfillmentId,
+    before: { status: result.from },
+    after: { status: result.to },
+    metadata: {
+      ...getAuditContextFromRequest(req),
+      trackingNote: input.trackingNote,
+      cancelledReason: input.cancelledReason,
+    },
+  });
 
   // Carrega dados pra WA (customer nome/phone + plan nome)
   const ctxRes = await supabase
