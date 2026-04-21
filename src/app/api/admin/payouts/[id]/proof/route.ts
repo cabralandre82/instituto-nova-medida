@@ -27,6 +27,9 @@ import {
   isStoragePath,
   removeFromStorage,
 } from "@/lib/payout-proofs";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/payouts/[id]/proof" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,7 +47,7 @@ async function loadPayoutPath(payoutId: string): Promise<
     .eq("id", payoutId)
     .maybeSingle();
   if (error) {
-    console.error("[admin/payouts/proof] load:", error);
+    log.error("load", { err: error, payout_id: payoutId });
     return { ok: false, status: 500, error: error.message };
   }
   if (!data) return { ok: false, status: 404, error: "payout_not_found" };
@@ -122,7 +125,7 @@ export async function POST(req: Request, { params }: RouteParams) {
     cacheControl: "private, max-age=0",
   });
   if (uploadErr) {
-    console.error("[admin/payouts/proof] upload:", uploadErr);
+    log.error("upload", { err: uploadErr, payout_id: payoutId });
     return NextResponse.json(
       { ok: false, error: "upload_failed", message: uploadErr.message },
       { status: 500 }
@@ -138,7 +141,7 @@ export async function POST(req: Request, { params }: RouteParams) {
     })
     .eq("id", payoutId);
   if (updErr) {
-    console.error("[admin/payouts/proof] update payout:", updErr);
+    log.error("update payout", { err: updErr, payout_id: payoutId });
     // Best-effort cleanup: tira o arquivo recém-subido pra não ficar órfão
     await supabase.storage.from(BUCKET).remove([newPath]);
     return NextResponse.json(
@@ -152,9 +155,11 @@ export async function POST(req: Request, { params }: RouteParams) {
     await removeFromStorage(previousPath);
   }
 
-  console.log(
-    `[admin/payouts/proof] uploaded by ${admin.email} payout=${payoutId} path=${newPath}`
-  );
+  log.info("uploaded", {
+    admin_email: admin.email,
+    payout_id: payoutId,
+    path: newPath,
+  });
 
   return NextResponse.json({ ok: true, path: newPath });
 }
@@ -227,15 +232,13 @@ export async function DELETE(_req: Request, { params }: RouteParams) {
     })
     .eq("id", payoutId);
   if (updErr) {
-    console.error("[admin/payouts/proof] DELETE update:", updErr);
+    log.error("DELETE update", { err: updErr, payout_id: payoutId });
     return NextResponse.json(
       { ok: false, error: "db_update_failed", message: updErr.message },
       { status: 500 }
     );
   }
 
-  console.log(
-    `[admin/payouts/proof] deleted by ${admin.email} payout=${payoutId}`
-  );
+  log.info("deleted", { admin_email: admin.email, payout_id: payoutId });
   return NextResponse.json({ ok: true });
 }

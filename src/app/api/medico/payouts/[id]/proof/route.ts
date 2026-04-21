@@ -11,6 +11,9 @@ import { NextResponse } from "next/server";
 import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSignedUrl, isStoragePath } from "@/lib/payout-proofs";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/medico/payouts/[id]/proof" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,7 +32,7 @@ export async function GET(_req: Request, { params }: RouteParams) {
     .maybeSingle();
 
   if (error) {
-    console.error("[medico/payouts/proof] load:", error);
+    log.error("load", { err: error, payout_id: payoutId });
     return NextResponse.json(
       { ok: false, error: "load_failed" },
       { status: 500 }

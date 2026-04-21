@@ -6,7 +6,7 @@
  *     `503 misconfigured` em runtime (fail-fast explícito). Nunca faz
  *     "fallback silencioso para aberto" em prod.
  *   - Em dev (`NODE_ENV !== "production"`) sem secret configurada, permite
- *     a chamada (com `console.warn` uma única vez por processo, pra não
+ *     a chamada (com `log.warn` uma única vez por processo, pra não
  *     poluir terminal mas deixar o operador ciente).
  *   - Aceita tanto `Authorization: Bearer <secret>` (padrão Vercel Cron)
  *     quanto `x-cron-secret: <secret>` (debug manual via curl).

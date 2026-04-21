@@ -24,6 +24,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { isAsaasRefundsEnabled } from "@/lib/refunds";
 import { RefundForm } from "./_RefundForm";
 import { formatCurrencyBRL, formatDateTimeBR } from "@/lib/datetime-br";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/admin/refunds" });
 
 export const dynamic = "force-dynamic";
 
@@ -93,7 +96,7 @@ async function loadPending(): Promise<PendingRow[]> {
     .order("scheduled_at", { ascending: false })
     .limit(100);
   if (error) {
-    console.error("[admin/refunds] loadPending:", error);
+    log.error("loadPending", { err: error });
     return [];
   }
   return (data ?? []) as unknown as PendingRow[];
@@ -110,7 +113,7 @@ async function loadProcessed(): Promise<ProcessedRow[]> {
     .order("refund_processed_at", { ascending: false })
     .limit(50);
   if (error) {
-    console.error("[admin/refunds] loadProcessed:", error);
+    log.error("loadProcessed", { err: error });
     return [];
   }
   return (data ?? []) as unknown as ProcessedRow[];

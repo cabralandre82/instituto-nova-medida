@@ -21,6 +21,9 @@
 import { NextResponse } from "next/server";
 import type { EmailOtpType } from "@supabase/supabase-js";
 import { getSupabaseRouteHandler } from "@/lib/supabase-server";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/auth/callback" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,7 +70,7 @@ export async function GET(req: Request) {
       type: type as EmailOtpType,
     });
     if (error) {
-      console.error("[auth/callback] verifyOtp:", error);
+      log.error("verifyOtp", { err: error });
       const reason = error.message?.toLowerCase().includes("expired")
         ? "expired"
         : "callback";
@@ -79,7 +82,7 @@ export async function GET(req: Request) {
   if (code) {
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (error) {
-      console.error("[auth/callback] exchangeCodeForSession:", error);
+      log.error("exchangeCodeForSession", { err: error });
       const reason = error.message?.toLowerCase().includes("expired")
         ? "expired"
         : "callback";

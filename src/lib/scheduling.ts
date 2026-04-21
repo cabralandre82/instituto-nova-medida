@@ -25,6 +25,9 @@
  */
 
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "scheduling" });
 
 export const DEFAULT_TZ = "America/Sao_Paulo";
 
@@ -78,7 +81,7 @@ export async function getPrimaryDoctor(): Promise<DoctorMinimal | null> {
     .limit(1)
     .maybeSingle();
   if (error) {
-    console.error("[scheduling] getPrimaryDoctor:", error);
+    log.error("getPrimaryDoctor", { err: error });
     return null;
   }
   return data ?? null;
@@ -94,7 +97,7 @@ export async function getDoctorAvailability(doctorId: string): Promise<DoctorAva
     .eq("active", true)
     .in("type", ["agendada", "scheduled"]);
   if (error) {
-    console.error("[scheduling] getDoctorAvailability:", error);
+    log.error("getDoctorAvailability", { err: error });
     return [];
   }
   return (data ?? []) as DoctorAvailabilityRow[];
@@ -118,7 +121,7 @@ async function loadBookedSlotMs(
     .gte("scheduled_at", fromUTC.toISOString())
     .lt("scheduled_at", toUTC.toISOString());
   if (error) {
-    console.error("[scheduling] loadBookedSlotMs:", error);
+    log.error("loadBookedSlotMs", { err: error });
     return new Set();
   }
 
@@ -364,7 +367,7 @@ export async function bookPendingSlot(input: {
     if (error.code === "22023") {
       return { ok: false, error: "validation_failed", message: msg };
     }
-    console.error("[scheduling] bookPendingSlot:", error);
+    log.error("bookPendingSlot", { err: error });
     return { ok: false, error: "internal", message: msg };
   }
   if (!data || typeof data !== "string") {
@@ -389,7 +392,7 @@ export async function activateAppointmentAfterPayment(
     p_payment_id: paymentId,
   });
   if (error) {
-    console.error("[scheduling] activate:", error);
+    log.error("activate", { err: error });
     return { ok: false, error: error.message };
   }
   const row = Array.isArray(data) ? data[0] : data;

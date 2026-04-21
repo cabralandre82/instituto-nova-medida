@@ -17,6 +17,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { sendMedicaDocumentoPendente } from "@/lib/wa-templates";
 import { formatCurrencyBRL } from "@/lib/datetime-br";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "notify-pending-documents" });
 
 /** Só cobra NF se o PIX saiu há pelo menos 7 dias. */
 export const REMINDER_AFTER_DAYS = 7;
@@ -131,7 +134,7 @@ export async function notifyPendingDocuments(
   if (error) {
     result.ok = false;
     result.errors += 1;
-    console.error("[notify-pending-documents] load:", error);
+    log.error("load", { err: error });
     return result;
   }
 
@@ -242,7 +245,7 @@ export async function notifyPendingDocuments(
     } catch (e) {
       result.errors += 1;
       result.ok = false;
-      console.error("[notify-pending-documents] send falhou:", e);
+      log.error("send falhou", { err: e, payout_id: row.id });
       result.details.push({
         payoutId: row.id,
         doctorId: row.doctor_id,

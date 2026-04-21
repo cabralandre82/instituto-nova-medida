@@ -50,6 +50,9 @@
  */
 
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "reconciliation" });
 
 const HARD_LIMIT_PER_CHECK = 100;
 const COMPLETED_MIN_AGE_HOURS = 1;
@@ -133,7 +136,7 @@ export async function runReconciliation(): Promise<ReconciliationReport> {
     return b.observedAt.localeCompare(a.observedAt);
   });
 
-  console.log("[reconciliation] report:", {
+  log.info("report", {
     run_ms: Date.now() - start,
     critical,
     warning,
@@ -211,7 +214,7 @@ async function findConsultationsWithoutEarning(): Promise<CheckResult> {
     .limit(HARD_LIMIT_PER_CHECK + 1);
 
   if (error) {
-    console.error("[reconciliation] check1 select:", error);
+    log.error("check1 select", { err: error });
     return { kind: "consultation_without_earning", items: [], truncated: false };
   }
 
@@ -306,7 +309,7 @@ async function findNoShowsWithoutClawback(): Promise<CheckResult> {
     .limit(HARD_LIMIT_PER_CHECK + 1);
 
   if (error) {
-    console.error("[reconciliation] check2 select:", error);
+    log.error("check2 select", { err: error });
     return {
       kind: "no_show_doctor_without_clawback",
       items: [],
@@ -421,7 +424,7 @@ async function findPaidPayoutsWithUnpaidEarnings(): Promise<CheckResult> {
     .limit(HARD_LIMIT_PER_CHECK + 1);
 
   if (error) {
-    console.error("[reconciliation] check3 select:", error);
+    log.error("check3 select", { err: error });
     return {
       kind: "payout_paid_earnings_not_paid",
       items: [],
@@ -526,7 +529,7 @@ async function findPayoutAmountDrift(): Promise<CheckResult> {
     .limit(HARD_LIMIT_PER_CHECK + 1);
 
   if (error) {
-    console.error("[reconciliation] check4 select:", error);
+    log.error("check4 select", { err: error });
     return { kind: "payout_amount_drift", items: [], truncated: false };
   }
 
@@ -628,7 +631,7 @@ async function findStaleAvailableEarnings(): Promise<CheckResult> {
     .limit(HARD_LIMIT_PER_CHECK + 1);
 
   if (error) {
-    console.error("[reconciliation] check5 select:", error);
+    log.error("check5 select", { err: error });
     return { kind: "earning_available_stale", items: [], truncated: false };
   }
 
@@ -703,7 +706,7 @@ async function findStaleRefundRequired(): Promise<CheckResult> {
     .limit(HARD_LIMIT_PER_CHECK + 1);
 
   if (error) {
-    console.error("[reconciliation] check6 select:", error);
+    log.error("check6 select", { err: error });
     return { kind: "refund_required_stale", items: [], truncated: false };
   }
 

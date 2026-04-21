@@ -12,6 +12,9 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { requireAdmin } from "@/lib/auth";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/doctors/[id]/compensation" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -80,7 +83,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     .eq("doctor_id", doctorId)
     .is("effective_to", null);
   if (closeErr) {
-    console.error("[compensation] close:", closeErr);
+    log.error("close", { err: closeErr, doctor_id: doctorId });
     return NextResponse.json({ ok: false, error: closeErr.message }, { status: 500 });
   }
 
@@ -102,7 +105,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     .select("id")
     .single();
   if (insErr || !rule) {
-    console.error("[compensation] insert:", insErr);
+    log.error("insert", { err: insErr, doctor_id: doctorId });
     return NextResponse.json({ ok: false, error: insErr?.message ?? "Falha" }, { status: 500 });
   }
 

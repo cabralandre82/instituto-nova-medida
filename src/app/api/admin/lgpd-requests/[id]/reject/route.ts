@@ -22,6 +22,9 @@ import {
   getAccessContextFromRequest,
   logPatientAccess,
 } from "@/lib/patient-access-log";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/lgpd-requests/[id]/reject" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -89,10 +92,7 @@ export async function POST(
       { failHard: false }
     );
     if (!auditRes.ok) {
-      console.error(
-        "[admin/lgpd-requests/reject] audit log falhou:",
-        auditRes.error
-      );
+      log.error("audit log falhou", { err: auditRes.error, request_id: id });
     }
 
     // PR-032 · D-051: trilha separada por customer_id.
@@ -111,7 +111,7 @@ export async function POST(
     return NextResponse.json({ ok: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown_error";
-    console.error("[admin/lgpd-requests/reject] failed", err);
+    log.error("failed", { err, request_id: id });
     return NextResponse.json(
       { ok: false, error: "internal_error", message },
       { status: 500 }

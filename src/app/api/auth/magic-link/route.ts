@@ -15,6 +15,9 @@
 
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/auth/magic-link" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -85,7 +88,7 @@ export async function POST(req: Request) {
     perPage: 200,
   });
   if (listErr) {
-    console.error("[magic-link] listUsers:", listErr);
+    log.error("listUsers", { err: listErr });
     return NextResponse.json({ ok: true });
   }
 
@@ -112,7 +115,7 @@ export async function POST(req: Request) {
   });
 
   if (linkErr) {
-    console.error("[magic-link] signInWithOtp:", linkErr);
+    log.error("signInWithOtp", { err: linkErr });
     // Mesmo assim retorna ok=true pra UI mostrar a tela de "verifique caixa"
     return NextResponse.json({ ok: true });
   }

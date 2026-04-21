@@ -39,6 +39,9 @@ import {
   evaluateAndMaybeAutoPause,
   type ReliabilityEventKind,
 } from "@/lib/reliability";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "no-show-policy" });
 
 export type NoShowFinalStatus =
   | "no_show_patient"
@@ -116,7 +119,7 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
     .maybeSingle();
 
   if (loadErr) {
-    console.error("[no-show-policy] load appointment:", loadErr);
+    log.error("load appointment", { err: loadErr, appointment_id: input.appointmentId });
     return {
       appointmentId: input.appointmentId,
       action: "appointment_not_found",
@@ -133,11 +136,10 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
 
   // Guard idempotência — não processar duas vezes o mesmo appointment.
   if (row.no_show_policy_applied_at) {
-    console.log(
-      "[no-show-policy] já aplicado, noop:",
-      row.id,
-      row.no_show_policy_applied_at
-    );
+    log.info("já aplicado, noop", {
+      appointment_id: row.id,
+      applied_at: row.no_show_policy_applied_at,
+    });
     return { appointmentId: row.id, action: "already_applied" };
   }
 
@@ -154,7 +156,7 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
 
     const notifId = await enqueueImmediate(row.id, "no_show_patient");
 
-    console.log("[no-show-policy]", {
+    log.info("applied", {
       source,
       appointment_id: row.id,
       action: "patient_notified_only",
@@ -190,7 +192,7 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
     );
     const notifId = await enqueueImmediate(row.id, "no_show_doctor");
 
-    console.warn("[no-show-policy] sem payment_id — só reliability:", {
+    log.warn("sem payment_id — só reliability", {
       source,
       appointment_id: row.id,
       active_events: reliabilityNoPayment.activeEvents,
@@ -221,11 +223,10 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
 
   const clawbackCount = clawbackResult.ok ? clawbackResult.clawbacks : 0;
   if (!clawbackResult.ok) {
-    console.error(
-      "[no-show-policy] clawback falhou:",
-      row.id,
-      clawbackResult.error
-    );
+    log.error("clawback falhou", {
+      appointment_id: row.id,
+      err: clawbackResult.error,
+    });
   }
 
   // Marca o appointment independentemente do clawback — o guard é crítico
@@ -247,7 +248,7 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
 
   const notifId = await enqueueImmediate(row.id, "no_show_doctor");
 
-  console.log("[no-show-policy]", {
+  log.info("applied", {
     source,
     appointment_id: row.id,
     action: "clawback_and_refund_flagged",
@@ -295,7 +296,7 @@ async function registerReliabilityIncident(
     kind,
   });
   if (!rec.ok) {
-    console.error("[no-show-policy] recordReliabilityEvent falhou:", rec);
+    log.error("recordReliabilityEvent falhou", { result: rec });
     return { activeEvents: null, autoPaused: false };
   }
 
@@ -323,7 +324,7 @@ async function bumpDoctorReliability(doctorId: string): Promise<number | null> {
     .maybeSingle();
 
   if (loadErr || !current) {
-    console.error("[no-show-policy] load doctor reliability:", loadErr);
+    log.error("load doctor reliability", { err: loadErr, doctor_id: doctorId });
     return null;
   }
 
@@ -340,7 +341,7 @@ async function bumpDoctorReliability(doctorId: string): Promise<number | null> {
     .eq("id", doctorId);
 
   if (upErr) {
-    console.error("[no-show-policy] bump reliability:", upErr);
+    log.error("bump reliability", { err: upErr, doctor_id: doctorId });
     return null;
   }
   return newTotal;

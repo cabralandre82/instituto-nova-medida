@@ -12,6 +12,9 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { requireAdmin } from "@/lib/auth";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/doctors/[id]/availability" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -66,7 +69,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     .select("id")
     .single();
   if (error || !data) {
-    console.error("[availability] insert:", error);
+    log.error("insert", { err: error, doctor_id: doctorId });
     return NextResponse.json({ ok: false, error: error?.message ?? "Falha" }, { status: 500 });
   }
   return NextResponse.json({ ok: true, id: data.id });
@@ -87,7 +90,7 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
     .eq("id", slotId)
     .eq("doctor_id", doctorId);
   if (error) {
-    console.error("[availability] delete:", error);
+    log.error("delete", { err: error, doctor_id: doctorId, slot_id: slotId });
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
   return NextResponse.json({ ok: true });

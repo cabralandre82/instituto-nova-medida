@@ -22,6 +22,9 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { requireAdmin } from "@/lib/auth";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/notifications/[id]/retry" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,7 +51,7 @@ export async function POST(
     .maybeSingle();
 
   if (loadErr) {
-    console.error("[admin/notifications/retry] load:", loadErr);
+    log.error("load", { err: loadErr, notification_id: id });
     return NextResponse.json(
       { ok: false, error: loadErr.message },
       { status: 500 }
@@ -87,7 +90,7 @@ export async function POST(
     .eq("id", row.id);
 
   if (upErr) {
-    console.error("[admin/notifications/retry] update:", upErr);
+    log.error("update", { err: upErr, notification_id: id });
     return NextResponse.json(
       { ok: false, error: upErr.message },
       { status: 500 }

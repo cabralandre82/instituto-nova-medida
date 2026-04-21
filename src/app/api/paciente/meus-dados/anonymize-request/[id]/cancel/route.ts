@@ -16,6 +16,9 @@ import { NextResponse } from "next/server";
 import { requirePatient } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { cancelLgpdRequest } from "@/lib/patient-lgpd-requests";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/paciente/meus-dados/anonymize-request/[id]/cancel" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,10 +51,7 @@ export async function POST(
     return NextResponse.json({ ok: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown_error";
-    console.error(
-      "[paciente/meus-dados/anonymize-request/cancel] failed",
-      err
-    );
+    log.error("failed", { err, request_id: id });
     return NextResponse.json(
       { ok: false, error: "internal_error", message },
       { status: 500 }

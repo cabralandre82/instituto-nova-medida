@@ -21,6 +21,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { getPrimaryDoctor, listAvailableSlots } from "@/lib/scheduling";
 import { isLegacyPurchaseEnabled } from "@/lib/legacy-purchase-gate";
 import { SlotPicker } from "./SlotPicker";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/agendar/[plano]" });
 
 type PageProps = {
   params: Promise<{ plano: string }>;
@@ -48,7 +51,7 @@ async function loadPlan(slug: string): Promise<CheckoutPlan | null> {
     .eq("active", true)
     .maybeSingle();
   if (error) {
-    console.error("[agendar/page] plan:", error);
+    log.error("plan", { err: error });
     return null;
   }
   return (data as CheckoutPlan) ?? null;

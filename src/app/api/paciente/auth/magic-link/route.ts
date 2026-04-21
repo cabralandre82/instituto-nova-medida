@@ -18,6 +18,9 @@
 
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/paciente/auth/magic-link" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -96,7 +99,7 @@ export async function POST(req: Request) {
     perPage: 200,
   });
   if (listErr) {
-    console.error("[paciente/magic-link] listUsers:", listErr);
+    log.error("listUsers", { err: listErr });
     return NextResponse.json({ ok: true });
   }
   let target = list.users.find((u) => u.email?.toLowerCase() === email);
@@ -109,7 +112,7 @@ export async function POST(req: Request) {
       app_metadata: { role: "patient" },
     });
     if (createErr || !created.user) {
-      console.error("[paciente/magic-link] createUser:", createErr);
+      log.error("createUser", { err: createErr });
       return NextResponse.json({ ok: true });
     }
     target = created.user;
@@ -138,7 +141,7 @@ export async function POST(req: Request) {
         },
       );
       if (upErr) {
-        console.error("[paciente/magic-link] upgrade role:", upErr);
+        log.error("upgrade role", { err: upErr });
         return NextResponse.json({ ok: true });
       }
     }
@@ -160,7 +163,7 @@ export async function POST(req: Request) {
     },
   });
   if (linkErr) {
-    console.error("[paciente/magic-link] signInWithOtp:", linkErr);
+    log.error("signInWithOtp", { err: linkErr });
   }
 
   return NextResponse.json({ ok: true });

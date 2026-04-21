@@ -23,6 +23,9 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { verifyPatientToken } from "@/lib/patient-tokens";
 import { getVideoProvider, provisionConsultationRoom } from "@/lib/video";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/paciente/appointments/[id]/join" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -80,7 +83,7 @@ export async function POST(req: Request, { params }: RouteParams) {
     .maybeSingle();
 
   if (apptErr) {
-    console.error("[paciente/join] load:", apptErr);
+    log.error("load", { err: apptErr, appointment_id: appointmentId });
     return NextResponse.json({ ok: false, error: "lookup_failed" }, { status: 500 });
   }
   if (!appt) {
@@ -172,7 +175,7 @@ export async function POST(req: Request, { params }: RouteParams) {
         })
         .eq("id", appointmentId);
     } catch (e) {
-      console.error("[paciente/join] provision falhou:", e);
+      log.error("provision falhou", { err: e, appointment_id: appointmentId });
       return NextResponse.json(
         {
           ok: false,
@@ -200,7 +203,7 @@ export async function POST(req: Request, { params }: RouteParams) {
       });
       patientToken = tokens.patientToken;
     } catch (e) {
-      console.error("[paciente/join] token-only falhou:", e);
+      log.error("token-only falhou", { err: e, appointment_id: appointmentId });
       return NextResponse.json(
         { ok: false, error: "token_failed" },
         { status: 503 }

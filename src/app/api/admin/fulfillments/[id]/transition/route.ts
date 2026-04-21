@@ -43,6 +43,9 @@ import {
   getAuditContextFromRequest,
   logAdminAction,
 } from "@/lib/admin-audit-log";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/fulfillments/[id]/transition" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -163,7 +166,7 @@ export async function POST(req: Request, { params }: RouteParams) {
 
   let notificationSent = false;
   if (ctxRes.error) {
-    console.error("[admin/fulfillments/transition] ctx load:", ctxRes.error);
+    log.error("ctx load", { err: ctxRes.error, fulfillment_id: fulfillmentId });
   } else if (ctxRes.data) {
     const ctx = ctxRes.data as {
       customer_name: string;
@@ -212,20 +215,20 @@ export async function POST(req: Request, { params }: RouteParams) {
         });
         if (waRes.ok) {
           notificationSent = true;
-          console.log("[admin/fulfillments/transition] WA enviado:", {
+          log.info("WA enviado", {
             fulfillment_id: fulfillmentId,
             to,
             message_id: waRes.messageId,
           });
         } else {
-          console.warn("[admin/fulfillments/transition] WA falhou:", {
+          log.warn("WA falhou", {
             fulfillment_id: fulfillmentId,
             to,
             error: waRes.message,
           });
         }
       } catch (e) {
-        console.error("[admin/fulfillments/transition] WA exception:", e);
+        log.error("WA exception", { err: e, fulfillment_id: fulfillmentId });
       }
     }
   }

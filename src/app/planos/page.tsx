@@ -3,6 +3,9 @@ import Link from "next/link";
 import { Logo } from "@/components/Logo";
 import { Footer } from "@/components/Footer";
 import { getSupabaseAnon } from "@/lib/supabase";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/planos" });
 
 export const metadata: Metadata = {
   title: "Planos de tratamento · Instituto Nova Medida",
@@ -41,12 +44,12 @@ async function loadPlans(): Promise<Plan[]> {
       .order("sort_order", { ascending: true });
 
     if (error) {
-      console.error("[planos] supabase error:", error);
+      log.error("supabase error", { err: error });
       return [];
     }
     return (data ?? []) as Plan[];
   } catch (err) {
-    console.error("[planos] load exception:", err);
+    log.error("load exception", { err });
     return [];
   }
 }

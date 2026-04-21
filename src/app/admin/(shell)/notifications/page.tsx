@@ -23,6 +23,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { NotificationRetryButton } from "./_NotificationRetryButton";
 import { NotificationFilters } from "./_NotificationFilters";
 import { formatDateBR } from "@/lib/datetime-br";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/admin/notifications" });
 
 export const dynamic = "force-dynamic";
 
@@ -165,7 +168,7 @@ async function loadRows({
     .range(from, to);
 
   if (error) {
-    console.error("[admin/notifications] load:", error);
+    log.error("load", { err: error });
     return { rows: [], total: 0 };
   }
   return {

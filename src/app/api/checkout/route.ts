@@ -7,6 +7,9 @@ import {
   type AsaasBillingType,
 } from "@/lib/asaas";
 import { sanitizeShortText, TEXT_PATTERNS } from "@/lib/text-sanitize";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/checkout" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -181,7 +184,7 @@ export async function POST(req: Request) {
     .maybeSingle();
 
   if (planErr) {
-    console.error("[checkout] plano lookup error:", planErr);
+    log.error("plano lookup error", { err: planErr });
     return NextResponse.json(
       { ok: false, error: "Erro ao consultar plano" },
       { status: 500 }
@@ -208,7 +211,7 @@ export async function POST(req: Request) {
     .maybeSingle();
 
   if (custLookupErr) {
-    console.error("[checkout] customer lookup error:", custLookupErr);
+    log.error("customer lookup error", { err: custLookupErr });
     return NextResponse.json(
       { ok: false, error: "Erro ao consultar cliente" },
       { status: 500 }
@@ -263,7 +266,7 @@ export async function POST(req: Request) {
       .single();
 
     if (insertErr || !newCust) {
-      console.error("[checkout] customer insert error:", insertErr);
+      log.error("customer insert error", { err: insertErr });
       return NextResponse.json(
         { ok: false, error: "Erro ao registrar cliente" },
         { status: 500 }
@@ -284,7 +287,7 @@ export async function POST(req: Request) {
     });
 
     if (!created.ok) {
-      console.error("[checkout] asaas createCustomer falhou:", created);
+      log.error("asaas createCustomer falhou", { err: created });
       return NextResponse.json(
         {
           ok: false,
@@ -329,7 +332,7 @@ export async function POST(req: Request) {
     .single();
 
   if (payInsertErr || !localPayment) {
-    console.error("[checkout] payment insert error:", payInsertErr);
+    log.error("payment insert error", { err: payInsertErr });
     return NextResponse.json(
       { ok: false, error: "Erro ao registrar cobrança" },
       { status: 500 }
@@ -349,7 +352,7 @@ export async function POST(req: Request) {
   });
 
   if (!created.ok) {
-    console.error("[checkout] asaas createPayment falhou:", created);
+    log.error("asaas createPayment falhou", { err: created });
     await supabase
       .from("payments")
       .update({
@@ -383,7 +386,7 @@ export async function POST(req: Request) {
     })
     .eq("id", localPayment.id);
 
-  console.log("[checkout] sucesso:", {
+  log.info("sucesso", {
     paymentId: localPayment.id,
     asaasPaymentId: created.data.id,
     status: created.data.status,

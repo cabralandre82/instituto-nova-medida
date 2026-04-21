@@ -142,17 +142,14 @@ describe("runReconciliation", () => {
       });
     }
 
-    // Silencia console.error pra não poluir saída do teste.
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
+    // Os erros são despachados via logger canônico (PR-039), que é silencioso
+    // em test por default. O ponto do teste é "não propaga exceção" + "report
+    // vazio" — a instrumentação de logs é coberta em logger.test.ts.
     const report = await runReconciliation();
 
     expect(report).toBeDefined();
     expect(report.totalCritical).toBe(0);
     expect(report.totalWarning).toBe(0);
-    expect(errSpy).toHaveBeenCalled();
-
-    errSpy.mockRestore();
   });
 });
 

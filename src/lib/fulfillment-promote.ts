@@ -34,6 +34,9 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "fulfillment-promote" });
 
 // ────────────────────────────────────────────────────────────────────────
 // Tipos
@@ -227,10 +230,7 @@ export async function promoteFulfillmentAfterPayment(
       .update({ payment_id: localPaymentId })
       .eq("id", ff.id);
     if (linkUpd.error) {
-      console.error(
-        "[promoteFulfillmentAfterPayment] link retroativo falhou:",
-        linkUpd.error
-      );
+      log.error("link retroativo falhou", { err: linkUpd.error });
       // Seguimos mesmo assim — o update de status pode salvar tudo.
     }
   }

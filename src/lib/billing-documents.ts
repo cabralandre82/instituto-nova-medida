@@ -14,6 +14,9 @@
 
 import { getSupabaseAdmin } from "@/lib/supabase";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "billing-documents" });
 
 export const BUCKET = "billing-documents";
 
@@ -77,7 +80,7 @@ export async function createSignedUrl(
     .from(BUCKET)
     .createSignedUrl(storagePath, expiresInSeconds, { download: false });
   if (error || !data?.signedUrl) {
-    console.error("[billing-documents] createSignedUrl:", error);
+    log.error("createSignedUrl", { err: error });
     return null;
   }
   return data.signedUrl;
@@ -90,7 +93,7 @@ export async function removeFromStorage(
   const { error } = await supabase.storage.from(BUCKET).remove([storagePath]);
   if (error) {
     if ((error as { statusCode?: string }).statusCode === "404") return { ok: true };
-    console.error("[billing-documents] remove:", error);
+    log.error("remove", { err: error });
     return { ok: false, error: error.message };
   }
   return { ok: true };

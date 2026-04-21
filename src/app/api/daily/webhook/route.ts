@@ -51,6 +51,9 @@ import {
   reconcileAppointmentFromMeetings,
   buildMeetingSummaryFromWebhookEvents,
 } from "@/lib/reconcile";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/daily/webhook" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -61,7 +64,7 @@ export async function POST(req: Request) {
     try {
       return getVideoProvider();
     } catch (e) {
-      console.error("[daily-webhook] provider não configurado:", e);
+      log.error("provider não configurado", { err: e });
       return null;
     }
   })();
@@ -80,14 +83,14 @@ export async function POST(req: Request) {
   } catch (e) {
     // loadDailyConfig() pode lançar se DAILY_API_KEY/DOMAIN não estão
     // setadas — devolvemos 503 explicitamente em vez de crashar com 500.
-    console.error("[daily-webhook] config ausente:", e);
+    log.error("config ausente", { err: e });
     return NextResponse.json(
       { ok: false, error: "video_provider_unconfigured" },
       { status: 503 }
     );
   }
   if (!validation.ok) {
-    console.warn("[daily-webhook] validação falhou:", validation.reason);
+    log.warn("validação falhou", { reason: validation.reason });
     return NextResponse.json(
       { ok: false, error: "unauthorized", reason: validation.reason },
       { status: 401 }
@@ -118,7 +121,7 @@ export async function POST(req: Request) {
     bodyType.startsWith("recording.")
   );
   if (!isRealEvent || bodyTest === "test") {
-    console.log("[daily-webhook] verification ping recebido", { bodyType, bodyTest });
+    log.info("verification ping recebido", { bodyType, bodyTest });
     return NextResponse.json({ ok: true, pong: true });
   }
 
@@ -159,16 +162,16 @@ export async function POST(req: Request) {
     if (storeErr) {
       // Conflict = já recebemos antes (ux_daily_events_id_type). 200 + flag.
       if (storeErr.code === "23505") {
-        console.log("[daily-webhook] evento duplicado:", event.eventId, event.type);
+        log.info("evento duplicado", { event_id: event.eventId, type: event.type });
         return NextResponse.json({ ok: true, duplicate: true });
       }
-      console.error("[daily-webhook] persist raw falhou:", storeErr);
+      log.error("persist raw falhou", { err: storeErr });
       // Continuamos mesmo assim — não bloqueia processamento.
     } else {
       storedEventId = stored?.id ?? null;
     }
   } catch (e) {
-    console.error("[daily-webhook] persist raw exception:", e);
+    log.error("persist raw exception", { err: e });
   }
 
   // 3) Sem appointment vinculado, paramos por aqui (evento órfão).
@@ -182,12 +185,10 @@ export async function POST(req: Request) {
         })
         .eq("id", storedEventId);
     }
-    console.log(
-      "[daily-webhook] evento sem appointment:",
-      event.type,
-      "room=",
-      event.roomName
-    );
+    log.info("evento sem appointment", {
+      type: event.type,
+      room: event.roomName,
+    });
     return NextResponse.json({ ok: true, orphan: true });
   }
 
@@ -202,7 +203,7 @@ export async function POST(req: Request) {
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error("[daily-webhook] processamento falhou:", msg);
+    log.error("processamento falhou", { err: e, appointment_id: appointmentId });
     if (storedEventId) {
       await supabase
         .from("daily_events")
@@ -252,7 +253,7 @@ async function processEvent(appointmentId: string, event: NormalizedVideoEvent) 
     }
     if (Object.keys(updates).length > 0) {
       await supabase.from("appointments").update(updates).eq("id", appointmentId);
-      console.log("[daily-webhook] appointment iniciado:", appointmentId, updates);
+      log.info("appointment iniciado", { appointment_id: appointmentId, updates });
     }
     return;
   }
@@ -273,7 +274,7 @@ async function processEvent(appointmentId: string, event: NormalizedVideoEvent) 
       meetings: [summary],
       source: "daily_webhook",
     });
-    console.log("[daily-webhook] reconcile:", {
+    log.info("reconcile", {
       appointment_id: appointmentId,
       action: result.action,
       doctor_joined: result.doctorJoined,

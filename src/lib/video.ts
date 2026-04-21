@@ -27,6 +27,9 @@ import {
   fetchWithTimeout,
   PROVIDER_TIMEOUTS,
 } from "./fetch-timeout";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "video" });
 
 const DAILY_API_BASE = "https://api.daily.co/v1";
 
@@ -540,7 +543,7 @@ class DailyProvider implements VideoProvider {
 
     // Caminho 3: dev sem secret configurado (libera, loga)
     if (!cfg.webhookSecret) {
-      console.warn("[daily] webhook sem DAILY_WEBHOOK_SECRET — aceitando em modo dev");
+      log.warn("webhook sem DAILY_WEBHOOK_SECRET — aceitando em modo dev");
       return { ok: true, rawBody };
     }
 
@@ -555,11 +558,11 @@ class DailyProvider implements VideoProvider {
       const t = typeof parsed?.type === "string" ? parsed.type : "";
       const isRealEvent = t.startsWith("meeting.") || t.startsWith("participant.") || t.startsWith("recording.");
       if (!isRealEvent) {
-        console.warn("[daily] webhook sem assinatura — tratando como verification ping");
+        log.warn("webhook sem assinatura — tratando como verification ping");
         return { ok: true, rawBody, testPing: true };
       }
     } catch {
-      console.warn("[daily] webhook sem assinatura e body inválido — tratando como verification ping");
+      log.warn("webhook sem assinatura e body inválido — tratando como verification ping");
       return { ok: true, rawBody, testPing: true };
     }
 

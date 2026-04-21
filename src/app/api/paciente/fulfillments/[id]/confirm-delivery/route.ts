@@ -24,6 +24,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { transitionFulfillment } from "@/lib/fulfillment-transitions";
 import { composeDeliveredMessage } from "@/lib/fulfillment-messages";
 import { sendText } from "@/lib/whatsapp";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/paciente/fulfillments/[id]/confirm-delivery" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,7 +50,7 @@ export async function POST(_req: Request, { params }: RouteParams) {
     .maybeSingle();
 
   if (ownRes.error) {
-    console.error("[paciente/confirm-delivery] ownership check:", ownRes.error);
+    log.error("ownership check", { err: ownRes.error, fulfillment_id: fulfillmentId });
     return NextResponse.json(
       {
         ok: false,
@@ -118,7 +121,7 @@ export async function POST(_req: Request, { params }: RouteParams) {
       .maybeSingle();
 
     if (ctxRes.error) {
-      console.error("[paciente/confirm-delivery] ctx load:", ctxRes.error);
+      log.error("ctx load", { err: ctxRes.error, fulfillment_id: fulfillmentId });
     } else if (ctxRes.data) {
       const ctx = ctxRes.data as {
         customer_name: string;
@@ -137,13 +140,13 @@ export async function POST(_req: Request, { params }: RouteParams) {
           if (waRes.ok) {
             notificationSent = true;
           } else {
-            console.warn("[paciente/confirm-delivery] WA falhou:", {
+            log.warn("WA falhou", {
               fulfillment_id: fulfillmentId,
               error: waRes.message,
             });
           }
         } catch (e) {
-          console.error("[paciente/confirm-delivery] WA exception:", e);
+          log.error("WA exception", { err: e, fulfillment_id: fulfillmentId });
         }
       }
     }

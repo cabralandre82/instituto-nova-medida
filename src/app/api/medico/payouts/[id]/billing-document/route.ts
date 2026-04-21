@@ -32,6 +32,9 @@ import {
   isStoragePath,
   removeFromStorage,
 } from "@/lib/billing-documents";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/medico/payouts/[id]/billing-document" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -62,7 +65,7 @@ async function loadPayout(payoutId: string, doctorId: string): Promise<
     .eq("id", payoutId)
     .maybeSingle();
   if (error) {
-    console.error("[medico/billing-document] load payout:", error);
+    log.error("load payout", { err: error, payout_id: payoutId });
     return { ok: false, status: 500, error: "load_failed" };
   }
   if (!payout) return { ok: false, status: 404, error: "payout_not_found" };
@@ -195,7 +198,7 @@ export async function POST(req: Request, { params }: RouteParams) {
     }
   );
   if (uploadErr) {
-    console.error("[medico/billing-document] upload:", uploadErr);
+    log.error("upload", { err: uploadErr, payout_id: payoutId });
     return NextResponse.json(
       { ok: false, error: "upload_failed", message: uploadErr.message },
       { status: 500 }
@@ -220,7 +223,7 @@ export async function POST(req: Request, { params }: RouteParams) {
       .eq("id", ctx.document.id);
     if (updErr) {
       await supabase.storage.from(BUCKET).remove([newPath]);
-      console.error("[medico/billing-document] update:", updErr);
+      log.error("update", { err: updErr, payout_id: payoutId });
       return NextResponse.json(
         { ok: false, error: "db_update_failed", message: updErr.message },
         { status: 500 }
@@ -242,7 +245,7 @@ export async function POST(req: Request, { params }: RouteParams) {
       // 23505 → corrida: outra upload chegou entre o load e o insert.
       const code = (insErr as unknown as { code?: string }).code;
       const status = code === "23505" ? 409 : 500;
-      console.error("[medico/billing-document] insert:", insErr);
+      log.error("insert", { err: insErr, payout_id: payoutId });
       return NextResponse.json(
         { ok: false, error: "db_insert_failed", message: insErr.message },
         { status }
@@ -255,9 +258,7 @@ export async function POST(req: Request, { params }: RouteParams) {
     await removeFromStorage(previousPath);
   }
 
-  console.log(
-    `[medico/billing-document] uploaded by doctor=${doctorId} payout=${payoutId} path=${newPath}`
-  );
+  log.info("uploaded", { doctor_id: doctorId, payout_id: payoutId, path: newPath });
   return NextResponse.json({ ok: true, path: newPath });
 }
 
@@ -344,15 +345,13 @@ export async function DELETE(_req: Request, { params }: RouteParams) {
     .delete()
     .eq("id", ctx.document.id);
   if (delErr) {
-    console.error("[medico/billing-document] delete row:", delErr);
+    log.error("delete row", { err: delErr, payout_id: payoutId });
     return NextResponse.json(
       { ok: false, error: "db_delete_failed", message: delErr.message },
       { status: 500 }
     );
   }
 
-  console.log(
-    `[medico/billing-document] deleted by doctor=${doctorId} payout=${payoutId}`
-  );
+  log.info("deleted", { doctor_id: doctorId, payout_id: payoutId });
   return NextResponse.json({ ok: true });
 }

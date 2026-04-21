@@ -31,6 +31,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { exportPatientData } from "@/lib/patient-lgpd";
 import { createExportAudit } from "@/lib/patient-lgpd-requests";
 import { getAuditContextFromRequest } from "@/lib/admin-audit-log";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/paciente/meus-dados/export" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -61,10 +64,10 @@ export async function GET(req: Request) {
       userAgent: typeof ctx.userAgent === "string" ? ctx.userAgent : null,
     });
     if (!auditRes.ok) {
-      console.error(
-        "[paciente/meus-dados/export] audit insert falhou (entrega continua):",
-        auditRes.message
-      );
+      log.error("audit insert falhou (entrega continua)", {
+        err: auditRes.message,
+        customer_id: customerId,
+      });
     }
 
     const filename = `meus-dados-${exportData.exported_at.slice(0, 10)}.json`;
@@ -78,7 +81,7 @@ export async function GET(req: Request) {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown_error";
-    console.error("[paciente/meus-dados/export] failed", err);
+    log.error("failed", { err });
     return NextResponse.json(
       { ok: false, error: "export_failed", message },
       { status: 500 }

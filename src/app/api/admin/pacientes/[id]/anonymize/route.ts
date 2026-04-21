@@ -38,6 +38,9 @@ import {
   getAccessContextFromRequest,
   logPatientAccess,
 } from "@/lib/patient-access-log";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/pacientes/[id]/anonymize" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -111,10 +114,10 @@ export async function POST(
       { failHard: true }
     );
     if (!auditRes.ok) {
-      console.error(
-        "[admin/pacientes/anonymize] audit log falhou — operação foi executada mas sem rastro:",
-        auditRes.error
-      );
+      log.error("audit log falhou — operação foi executada mas sem rastro", {
+        err: auditRes.error,
+        customer_id: id,
+      });
       return NextResponse.json(
         {
           ok: false,
@@ -150,7 +153,7 @@ export async function POST(
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown_error";
-    console.error("[admin/pacientes/anonymize] failed", err);
+    log.error("failed", { err, customer_id: id });
     return NextResponse.json(
       { ok: false, error: "internal_error", message },
       { status: 500 }

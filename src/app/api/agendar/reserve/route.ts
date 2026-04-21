@@ -36,6 +36,9 @@ import {
 import { signPatientToken, buildConsultationUrl } from "@/lib/patient-tokens";
 import { formatDateTimeBR } from "@/lib/datetime-br";
 import { sanitizeShortText, TEXT_PATTERNS } from "@/lib/text-sanitize";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/agendar/reserve" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -221,7 +224,7 @@ export async function POST(req: Request) {
     .eq("active", true)
     .maybeSingle();
   if (planErr) {
-    console.error("[reserve] plan lookup:", planErr);
+    log.error("plan lookup", { err: planErr });
     return NextResponse.json({ ok: false, error: "plan_lookup_failed" }, { status: 500 });
   }
   if (!plan) {
@@ -238,7 +241,7 @@ export async function POST(req: Request) {
     .eq("cpf", input.cpf)
     .maybeSingle();
   if (custLookupErr) {
-    console.error("[reserve] customer lookup:", custLookupErr);
+    log.error("customer lookup", { err: custLookupErr });
     return NextResponse.json({ ok: false, error: "customer_lookup_failed" }, { status: 500 });
   }
 
@@ -285,7 +288,7 @@ export async function POST(req: Request) {
       .select("id")
       .single();
     if (insertErr || !newCust) {
-      console.error("[reserve] customer insert:", insertErr);
+      log.error("customer insert", { err: insertErr });
       return NextResponse.json({ ok: false, error: "customer_insert_failed" }, { status: 500 });
     }
     localCustomerId = newCust.id;
@@ -301,7 +304,7 @@ export async function POST(req: Request) {
       externalReference: localCustomerId,
     });
     if (!created.ok) {
-      console.error("[reserve] asaas createCustomer:", created);
+      log.error("asaas createCustomer", { err: created });
       return NextResponse.json(
         { ok: false, error: "asaas_customer_failed", details: created.message },
         { status: 502 }
@@ -335,7 +338,7 @@ export async function POST(req: Request) {
     .select("id")
     .single();
   if (payInsertErr || !localPayment) {
-    console.error("[reserve] payment insert:", payInsertErr);
+    log.error("payment insert", { err: payInsertErr });
     return NextResponse.json({ ok: false, error: "payment_insert_failed" }, { status: 500 });
   }
 
@@ -390,7 +393,7 @@ export async function POST(req: Request) {
   });
 
   if (!created.ok) {
-    console.error("[reserve] asaas createPayment:", created);
+    log.error("asaas createPayment", { err: created });
     await supabase
       .from("payments")
       .update({
@@ -421,7 +424,7 @@ export async function POST(req: Request) {
   const patientToken = signPatientToken(appointmentId, { ttlSeconds: 14 * 24 * 3600 });
   const consultaUrl = buildConsultationUrl(appointmentId, patientToken);
 
-  console.log("[reserve] sucesso:", {
+  log.info("sucesso", {
     appointmentId,
     paymentId: localPayment.id,
     asaasPaymentId: created.data.id,

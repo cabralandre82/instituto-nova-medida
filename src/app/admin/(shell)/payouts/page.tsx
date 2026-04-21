@@ -12,6 +12,9 @@
 import Link from "next/link";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { formatCurrencyBRL } from "@/lib/datetime-br";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/admin/payouts" });
 
 export const dynamic = "force-dynamic";
 
@@ -53,7 +56,7 @@ async function loadPayouts(): Promise<Payout[]> {
     .order("created_at", { ascending: false })
     .limit(200);
   if (error) {
-    console.error("[admin/payouts]", error);
+    log.error("load", { err: error });
     return [];
   }
   return (data ?? []) as unknown as Payout[];

@@ -14,6 +14,9 @@
 import { NextResponse } from "next/server";
 import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/medico/profile" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -99,7 +102,7 @@ export async function PATCH(req: Request) {
     .maybeSingle();
 
   if (error || !data) {
-    console.error("[medico/profile] update:", error);
+    log.error("update", { err: error, doctor_id: doctorId });
     return NextResponse.json(
       { ok: false, error: "Falha ao salvar perfil." },
       { status: 500 }

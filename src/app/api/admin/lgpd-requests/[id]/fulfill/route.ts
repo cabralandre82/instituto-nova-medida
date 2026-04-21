@@ -24,6 +24,9 @@ import {
   getAccessContextFromRequest,
   logPatientAccess,
 } from "@/lib/patient-access-log";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/lgpd-requests/[id]/fulfill" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -142,7 +145,7 @@ export async function POST(
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown_error";
-    console.error("[admin/lgpd-requests/fulfill] failed", err);
+    log.error("failed", { err, request_id: id });
     return NextResponse.json(
       { ok: false, error: "internal_error", message },
       { status: 500 }

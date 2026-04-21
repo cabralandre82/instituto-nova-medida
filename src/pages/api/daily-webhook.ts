@@ -22,7 +22,10 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { parseDailyEvent, type NormalizedVideoEvent } from "@/lib/video";
 import { applyNoShowPolicy, classifyFinalStatus } from "@/lib/no-show-policy";
+import { logger } from "@/lib/logger";
 import crypto from "node:crypto";
+
+const log = logger.with({ route: "/api/daily-webhook" });
 
 export const config = {
   api: {
@@ -128,13 +131,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     rawBody = await readRawBody(req);
   } catch (e) {
-    console.error("[daily-webhook-pages] erro ao ler body:", e);
+    log.error("erro ao ler body", { err: e });
     return res.status(400).json({ ok: false, error: "read_error" });
   }
 
   const validation = validate(req, rawBody);
   if (!validation.ok) {
-    console.warn("[daily-webhook-pages] validação falhou:", validation.reason);
+    log.warn("validação falhou", { reason: validation.reason });
     return res.status(401).json({ ok: false, error: "unauthorized", reason: validation.reason });
   }
 
@@ -157,7 +160,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     bodyType.startsWith("recording.")
   );
   if (!isRealEvent || bodyTest === "test") {
-    console.log("[daily-webhook-pages] verification ping", { bodyType, bodyTest });
+    log.info("verification ping", { bodyType, bodyTest });
     return res.status(200).json({ ok: true, pong: true });
   }
 
@@ -204,7 +207,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       storedEventId = stored?.id as string | null;
     }
   } catch (e) {
-    console.error("[daily-webhook-pages] falha ao persistir raw:", e);
+    log.error("falha ao persistir raw", { err: e });
     return res.status(200).json({ ok: true, ingested: false });
   }
 
@@ -223,7 +226,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       .update({ processed_at: new Date().toISOString() })
       .eq("id", storedEventId!);
   } catch (e) {
-    console.error("[daily-webhook-pages] falha ao processar:", e);
+    log.error("falha ao processar", { err: e, appointment_id: appointmentId });
     await supabase
       .from("daily_events")
       .update({
@@ -322,9 +325,9 @@ async function processEvent(
               (updates.cancelled_reason as string | undefined) ?? null,
             source: "daily-webhook-pages",
           });
-          console.log("[daily-webhook-pages] no-show policy:", policyResult);
+          log.info("no-show policy", { result: policyResult });
         } catch (e) {
-          console.error("[daily-webhook-pages] no-show policy falhou:", e);
+          log.error("no-show policy falhou", { err: e });
         }
       }
       return;

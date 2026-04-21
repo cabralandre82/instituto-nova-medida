@@ -19,6 +19,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { transitionFulfillment } from "@/lib/fulfillment-transitions";
 import { composePatientCancelledMessage } from "@/lib/fulfillment-messages";
 import { sendText } from "@/lib/whatsapp";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/paciente/fulfillments/[id]/cancel" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -52,7 +55,7 @@ export async function POST(req: Request, { params }: RouteParams) {
     .maybeSingle();
 
   if (ownRes.error) {
-    console.error("[paciente/cancel] ownership check:", ownRes.error);
+    log.error("ownership check", { err: ownRes.error, fulfillment_id: fulfillmentId });
     return NextResponse.json(
       {
         ok: false,
@@ -139,10 +142,10 @@ export async function POST(req: Request, { params }: RouteParams) {
           if (waRes.ok) {
             notificationSent = true;
           } else {
-            console.warn("[paciente/cancel] WA falhou:", waRes.message);
+            log.warn("WA falhou", { err: waRes.message, fulfillment_id: fulfillmentId });
           }
         } catch (e) {
-          console.error("[paciente/cancel] WA exception:", e);
+          log.error("WA exception", { err: e, fulfillment_id: fulfillmentId });
         }
       }
     }

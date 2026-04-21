@@ -9,6 +9,9 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { requireAdmin } from "@/lib/auth";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/doctors/[id]" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -78,7 +81,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   const supabase = getSupabaseAdmin();
   const { error } = await supabase.from("doctors").update(update).eq("id", id);
   if (error) {
-    console.error("[PATCH /admin/doctors/[id]]", error);
+    log.error("update", { err: error, doctor_id: id });
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
   return NextResponse.json({ ok: true });

@@ -15,6 +15,9 @@ import {
   getAuditContextFromRequest,
   logAdminAction,
 } from "@/lib/admin-audit-log";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/payouts/[id]/pay" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -54,7 +57,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     .update(update)
     .eq("id", id);
   if (error) {
-    console.error("[payouts/pay]", error);
+    log.error("update failed", { err: error, payout_id: id });
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 

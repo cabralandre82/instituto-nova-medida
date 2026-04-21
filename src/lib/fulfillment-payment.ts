@@ -45,6 +45,9 @@ import {
   type AsaasEnv,
 } from "./asaas";
 import { formatCurrencyBRL } from "./datetime-br";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "fulfillment-payment" });
 
 // ────────────────────────────────────────────────────────────────────────
 // Tipos
@@ -234,10 +237,7 @@ export async function ensurePaymentForFulfillment(
           .update({ payment_id: p.id })
           .eq("id", ff.id);
         if (relinkRes.error) {
-          console.error(
-            "[ensurePaymentForFulfillment] re-link ff→payment falhou:",
-            relinkRes.error
-          );
+          log.error("re-link ff→payment falhou", { err: relinkRes.error });
         }
       }
       return {
@@ -319,7 +319,7 @@ export async function ensurePaymentForFulfillment(
       })
       .eq("id", ff.customer.id);
     if (custUpd.error) {
-      console.error("[ensurePaymentForFulfillment] customer update falhou:", custUpd.error);
+      log.error("customer update falhou", { err: custUpd.error });
     }
   }
 
@@ -428,7 +428,7 @@ export async function ensurePaymentForFulfillment(
     })
     .eq("id", localPaymentId);
   if (updPay.error) {
-    console.error("[ensurePaymentForFulfillment] update payment falhou:", updPay.error);
+    log.error("update payment falhou", { err: updPay.error });
   }
 
   // 7. Vincular fulfillment → payment
@@ -437,7 +437,7 @@ export async function ensurePaymentForFulfillment(
     .update({ payment_id: localPaymentId })
     .eq("id", ff.id);
   if (linkRes.error) {
-    console.error("[ensurePaymentForFulfillment] link ff→payment falhou:", linkRes.error);
+    log.error("link ff→payment falhou", { err: linkRes.error });
     // Não retorna erro: o payment existe, só o vínculo ficou pendente.
     // Próxima chamada da função vai carregar o fulfillment sem
     // payment_id e encontrar... nada — criaria outro. Pra evitar

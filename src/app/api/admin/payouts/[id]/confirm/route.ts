@@ -16,6 +16,9 @@ import {
   getAuditContextFromRequest,
   logAdminAction,
 } from "@/lib/admin-audit-log";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/payouts/[id]/confirm" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,7 +66,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     .update(update)
     .eq("id", id);
   if (payoutErr) {
-    console.error("[payouts/confirm] payout:", payoutErr);
+    log.error("payout", { err: payoutErr, payout_id: id });
     return NextResponse.json({ ok: false, error: payoutErr.message }, { status: 500 });
   }
 
@@ -73,7 +76,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     .update({ status: "paid", paid_at: now }, { count: "exact" })
     .eq("payout_id", id);
   if (earnErr) {
-    console.error("[payouts/confirm] earnings:", earnErr);
+    log.error("earnings", { err: earnErr, payout_id: id });
     return NextResponse.json({ ok: false, error: earnErr.message }, { status: 500 });
   }
 

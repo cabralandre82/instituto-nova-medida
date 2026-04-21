@@ -33,6 +33,9 @@
  */
 
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "reliability" });
 
 // ────────────────────────────────────────────────────────────────────────────
 // Constantes de política (D-036)
@@ -178,7 +181,7 @@ export async function recordReliabilityEvent(
         alreadyRecorded: true,
       };
     }
-    console.error("[reliability] record falhou:", error);
+    log.error("record falhou", { err: error });
     return { ok: false, code: "db_error", message: error.message };
   }
 
@@ -207,7 +210,7 @@ export async function getDoctorReliabilitySnapshot(
     .maybeSingle();
 
   if (doctorErr || !doctor) {
-    if (doctorErr) console.error("[reliability] snapshot doctor:", doctorErr);
+    if (doctorErr) log.error("snapshot doctor", { err: doctorErr });
     return null;
   }
 
@@ -223,7 +226,7 @@ export async function getDoctorReliabilitySnapshot(
     .gte("occurred_at", since);
 
   if (countErr) {
-    console.error("[reliability] snapshot count:", countErr);
+    log.error("snapshot count", { err: countErr });
     return null;
   }
 
@@ -277,7 +280,7 @@ export async function evaluateAndMaybeAutoPause(
   });
 
   if (!pauseResult.ok) {
-    console.error("[reliability] auto-pause falhou:", pauseResult);
+    log.error("auto-pause falhou", { result: pauseResult });
     return { snapshot: snap, autoPaused: false };
   }
 
@@ -301,7 +304,7 @@ export async function pauseDoctor(input: PauseInput): Promise<PauseResult> {
     .maybeSingle();
 
   if (loadErr) {
-    console.error("[reliability] pause load:", loadErr);
+    log.error("pause load", { err: loadErr });
     return { ok: false, code: "db_error", message: loadErr.message };
   }
   if (!current) {
@@ -343,11 +346,11 @@ export async function pauseDoctor(input: PauseInput): Promise<PauseResult> {
     .eq("id", input.doctorId);
 
   if (upErr) {
-    console.error("[reliability] pause update:", upErr);
+    log.error("pause update", { err: upErr });
     return { ok: false, code: "db_error", message: upErr.message };
   }
 
-  console.log("[reliability] médica pausada:", {
+  log.info("médica pausada", {
     doctor_id: input.doctorId,
     auto: input.auto,
     triggered_by: input.triggeredBy,
@@ -375,7 +378,7 @@ export async function unpauseDoctor(
     .maybeSingle();
 
   if (loadErr) {
-    console.error("[reliability] unpause load:", loadErr);
+    log.error("unpause load", { err: loadErr });
     return { ok: false, code: "db_error", message: loadErr.message };
   }
   if (!current) {
@@ -411,11 +414,11 @@ export async function unpauseDoctor(
     .eq("id", input.doctorId);
 
   if (upErr) {
-    console.error("[reliability] unpause update:", upErr);
+    log.error("unpause update", { err: upErr });
     return { ok: false, code: "db_error", message: upErr.message };
   }
 
-  console.log("[reliability] médica reativada:", {
+  log.info("médica reativada", {
     doctor_id: input.doctorId,
     unpaused_by: input.unpausedBy,
     notes: input.notes ?? null,
@@ -440,7 +443,7 @@ export async function dismissEvent(
     .maybeSingle();
 
   if (loadErr) {
-    console.error("[reliability] dismiss load:", loadErr);
+    log.error("dismiss load", { err: loadErr });
     return { ok: false, code: "db_error", message: loadErr.message };
   }
   if (!current) {
@@ -471,11 +474,11 @@ export async function dismissEvent(
     .eq("id", input.eventId);
 
   if (upErr) {
-    console.error("[reliability] dismiss update:", upErr);
+    log.error("dismiss update", { err: upErr });
     return { ok: false, code: "db_error", message: upErr.message };
   }
 
-  console.log("[reliability] evento dispensado:", {
+  log.info("evento dispensado", {
     event_id: input.eventId,
     doctor_id: row.doctor_id,
     by: input.dismissedBy,
@@ -511,7 +514,7 @@ export async function listRecentEvents(
     .limit(limit);
 
   if (error) {
-    console.error("[reliability] list events:", error);
+    log.error("list events", { err: error });
     return [];
   }
 
@@ -562,7 +565,7 @@ export async function listDoctorReliabilityOverview(): Promise<
     .order("full_name", { ascending: true });
 
   if (dErr || !doctors) {
-    console.error("[reliability] overview doctors:", dErr);
+    log.error("overview doctors", { err: dErr });
     return [];
   }
 
@@ -577,7 +580,7 @@ export async function listDoctorReliabilityOverview(): Promise<
     .gte("occurred_at", since);
 
   if (eErr) {
-    console.error("[reliability] overview events:", eErr);
+    log.error("overview events", { err: eErr });
     return [];
   }
 

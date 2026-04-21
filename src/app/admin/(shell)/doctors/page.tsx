@@ -4,6 +4,9 @@
 
 import Link from "next/link";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/admin/doctors" });
 
 export const dynamic = "force-dynamic";
 
@@ -39,7 +42,7 @@ async function loadDoctors(): Promise<Doctor[]> {
     .order("full_name", { ascending: true });
 
   if (error) {
-    console.error("[admin/doctors] load:", error);
+    log.error("load", { err: error });
     return [];
   }
   return (data ?? []) as Doctor[];

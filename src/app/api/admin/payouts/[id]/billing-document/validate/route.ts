@@ -13,6 +13,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/payouts/[id]/billing-document/validate" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -40,7 +43,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     .maybeSingle();
 
   if (loadErr) {
-    console.error("[admin/billing-document/validate] load:", loadErr);
+    log.error("load", { err: loadErr, payout_id: payoutId });
     return NextResponse.json(
       { ok: false, error: "load_failed" },
       { status: 500 }
@@ -82,16 +85,17 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     .update(update)
     .eq("id", row.id);
   if (updErr) {
-    console.error("[admin/billing-document/validate] update:", updErr);
+    log.error("update", { err: updErr, payout_id: payoutId });
     return NextResponse.json(
       { ok: false, error: "db_update_failed", message: updErr.message },
       { status: 500 }
     );
   }
 
-  console.log(
-    `[admin/billing-document/validate] ${unvalidate ? "unvalidated" : "validated"} by ${admin.email} payout=${payoutId}`
-  );
+  log.info(unvalidate ? "unvalidated" : "validated", {
+    admin_email: admin.email,
+    payout_id: payoutId,
+  });
   return NextResponse.json({
     ok: true,
     validated: !unvalidate,

@@ -27,6 +27,9 @@
 
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { refundPayment } from "@/lib/asaas";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "refunds" });
 
 export type RefundMethod = "manual" | "asaas_api";
 
@@ -114,7 +117,7 @@ export async function markRefundProcessed(
     .maybeSingle();
 
   if (loadErr) {
-    console.error("[refunds] load appointment:", loadErr);
+    log.error("load appointment", { err: loadErr, appointment_id: input.appointmentId });
     return {
       ok: false,
       appointmentId: input.appointmentId,
@@ -167,7 +170,7 @@ export async function markRefundProcessed(
     .is("refund_processed_at", null); // segunda trava de idempotência (race)
 
   if (upErr) {
-    console.error("[refunds] update appointment:", upErr);
+    log.error("update appointment", { err: upErr, appointment_id: row.id });
     return {
       ok: false,
       appointmentId: row.id,
@@ -176,7 +179,7 @@ export async function markRefundProcessed(
     };
   }
 
-  console.log("[refunds] processed:", {
+  log.info("processed", {
     appointment_id: row.id,
     method: input.method,
     external_ref: input.externalRef ?? null,
@@ -263,7 +266,7 @@ export async function processRefundViaAsaas(input: {
     .maybeSingle();
 
   if (loadErr) {
-    console.error("[refunds/asaas] load:", loadErr);
+    log.error("asaas load", { err: loadErr, appointment_id: input.appointmentId });
     return {
       ok: false,
       appointmentId: input.appointmentId,
@@ -329,7 +332,7 @@ export async function processRefundViaAsaas(input: {
   });
 
   if (!asaas.ok) {
-    console.error("[refunds/asaas] refund API falhou:", {
+    log.error("asaas refund API falhou", {
       appointment_id: row.id,
       asaas_payment_id: asaasPaymentId,
       status: asaas.status,
@@ -361,10 +364,10 @@ export async function processRefundViaAsaas(input: {
   });
 
   if (!mark.ok) {
-    console.error(
-      "[refunds/asaas] CRITICAL: Asaas aceitou mas markRefundProcessed falhou:",
-      mark
-    );
+    log.error("asaas CRITICAL: Asaas aceitou mas markRefundProcessed falhou", {
+      result: mark,
+      appointment_id: row.id,
+    });
     return {
       ok: false,
       appointmentId: row.id,
@@ -373,7 +376,7 @@ export async function processRefundViaAsaas(input: {
     };
   }
 
-  console.log("[refunds/asaas] estorno concluído:", {
+  log.info("asaas estorno concluído", {
     appointment_id: row.id,
     asaas_payment_id: asaasPaymentId,
     asaas_status: asaas.data.status,

@@ -24,6 +24,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { updateFulfillmentShipping } from "@/lib/patient-update-shipping";
 import { composeShippingUpdatedMessage } from "@/lib/fulfillment-messages";
 import { sendText } from "@/lib/whatsapp";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/paciente/fulfillments/[id]/shipping" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -69,7 +72,7 @@ export async function PUT(req: Request, { params }: RouteParams) {
     .maybeSingle();
 
   if (ownRes.error) {
-    console.error("[paciente/shipping] ownership check:", ownRes.error);
+    log.error("ownership check", { err: ownRes.error, fulfillment_id: fulfillmentId });
     return NextResponse.json(
       {
         ok: false,
@@ -104,10 +107,7 @@ export async function PUT(req: Request, { params }: RouteParams) {
     .maybeSingle();
 
   if (custRes.error || !custRes.data) {
-    console.error(
-      "[paciente/shipping] customer load:",
-      custRes.error?.message
-    );
+    log.error("customer load", { err: custRes.error, customer_id: customerId });
     return NextResponse.json(
       {
         ok: false,
@@ -185,7 +185,7 @@ export async function PUT(req: Request, { params }: RouteParams) {
           });
           if (waRes.ok) notificationSent = true;
         } catch (e) {
-          console.error("[paciente/shipping] WA exception:", e);
+          log.error("WA exception", { err: e, fulfillment_id: fulfillmentId });
         }
       }
     }

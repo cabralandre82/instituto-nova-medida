@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/wa/webhook" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,14 +35,14 @@ export function GET(req: Request) {
   const expected = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
 
   if (mode === "subscribe" && token && challenge && token === expected) {
-    console.log("[wa-webhook] verified OK");
+    log.info("verified OK");
     return new Response(challenge, {
       status: 200,
       headers: { "Content-Type": "text/plain" },
     });
   }
 
-  console.warn("[wa-webhook] verify failed", {
+  log.warn("verify failed", {
     mode,
     tokenMatch: token === expected,
     hasChallenge: !!challenge,
@@ -130,7 +133,7 @@ export async function POST(req: Request) {
           // estado.
           await applyStatusToLead(s);
 
-          console.log("[wa-webhook] status:", {
+          log.info("status", {
             id: s.id,
             status: s.status,
             recipient: s.recipient_id,
@@ -147,7 +150,7 @@ export async function POST(req: Request) {
             phone_number_id: phoneNumberId,
             payload: m as unknown as Record<string, unknown>,
           });
-          console.log("[wa-webhook] inbound message:", {
+          log.info("inbound message", {
             id: m.id,
             from: m.from,
             type: m.type,
@@ -157,7 +160,7 @@ export async function POST(req: Request) {
       }
     }
   } catch (err) {
-    console.error("[wa-webhook] internal error:", err);
+    log.error("internal error", { err });
     // Mesmo assim respondemos 200 pra Meta não ficar martelando — temos o
     // payload bruto persistido (na ordem do for) e podemos reprocessar.
   }

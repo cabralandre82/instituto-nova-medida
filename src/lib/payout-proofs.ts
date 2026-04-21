@@ -9,6 +9,9 @@
 
 import { getSupabaseAdmin } from "@/lib/supabase";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "payout-proofs" });
 
 export const BUCKET = "payouts-proofs";
 
@@ -84,7 +87,7 @@ export async function createSignedUrl(
     .from(BUCKET)
     .createSignedUrl(storagePath, expiresInSeconds, { download: false });
   if (error || !data?.signedUrl) {
-    console.error("[payout-proofs] createSignedUrl:", error);
+    log.error("createSignedUrl", { err: error });
     return null;
   }
   return data.signedUrl;
@@ -98,7 +101,7 @@ export async function removeFromStorage(storagePath: string): Promise<{ ok: bool
   const { error } = await supabase.storage.from(BUCKET).remove([storagePath]);
   if (error) {
     if ((error as { statusCode?: string }).statusCode === "404") return { ok: true };
-    console.error("[payout-proofs] remove:", error);
+    log.error("remove", { err: error });
     return { ok: false, error: error.message };
   }
   return { ok: true };

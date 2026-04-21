@@ -28,6 +28,9 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "notifications" });
 import type { WhatsAppSendResult } from "@/lib/whatsapp";
 import {
   sendConfirmacaoAgendamento,
@@ -71,7 +74,7 @@ export async function scheduleRemindersForAppointment(
     p_appointment_id: appointmentId,
   });
   if (error) {
-    console.error("[notifications] schedule rpc:", error);
+    log.error("schedule rpc", { err: error, appointment_id: appointmentId });
     return { appointmentId, scheduled: [] };
   }
   return {
@@ -104,7 +107,7 @@ export async function enqueueImmediate(
     p_payload: opts.payload ?? null,
   });
   if (error) {
-    console.error("[notifications] enqueue rpc:", error);
+    log.error("enqueue rpc", { err: error });
     return null;
   }
   return (data as string | null) ?? null;
@@ -146,7 +149,7 @@ async function loadDueNotifications(
     .limit(limit);
 
   if (error) {
-    console.error("[notifications] loadDueNotifications:", error);
+    log.error("loadDueNotifications", { err: error });
     return [];
   }
   return (data ?? []) as unknown as NotificationRow[];

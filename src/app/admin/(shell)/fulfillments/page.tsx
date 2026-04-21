@@ -20,6 +20,9 @@ import Link from "next/link";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { labelForFulfillmentStatus } from "@/lib/fulfillment-transitions";
 import type { FulfillmentStatus } from "@/lib/fulfillments";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/admin/fulfillments" });
 
 export const dynamic = "force-dynamic";
 
@@ -112,7 +115,7 @@ async function loadByStatuses(
     .limit(200);
 
   if (error) {
-    console.error("[admin/fulfillments] load:", error);
+    log.error("load", { err: error });
     return [];
   }
   return (data ?? []) as unknown as FfOperationalRow[];

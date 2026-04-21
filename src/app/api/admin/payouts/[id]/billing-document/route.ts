@@ -17,6 +17,9 @@ import {
   isStoragePath,
   removeFromStorage,
 } from "@/lib/billing-documents";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/payouts/[id]/billing-document" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,7 +44,7 @@ async function loadDocument(payoutId: string): Promise<
     .eq("id", payoutId)
     .maybeSingle();
   if (payoutErr) {
-    console.error("[admin/billing-document] payout load:", payoutErr);
+    log.error("payout load", { err: payoutErr, payout_id: payoutId });
     return { ok: false, status: 500, error: "load_failed" };
   }
   if (!payout) return { ok: false, status: 404, error: "payout_not_found" };
@@ -53,7 +56,7 @@ async function loadDocument(payoutId: string): Promise<
     .maybeSingle();
 
   if (error) {
-    console.error("[admin/billing-document] doc load:", error);
+    log.error("doc load", { err: error, payout_id: payoutId });
     return { ok: false, status: 500, error: "load_failed" };
   }
 
@@ -132,15 +135,13 @@ export async function DELETE(_req: Request, { params }: RouteParams) {
     .delete()
     .eq("id", ctx.document.id);
   if (delErr) {
-    console.error("[admin/billing-document] delete:", delErr);
+    log.error("delete", { err: delErr, payout_id: payoutId });
     return NextResponse.json(
       { ok: false, error: "db_delete_failed", message: delErr.message },
       { status: 500 }
     );
   }
 
-  console.log(
-    `[admin/billing-document] deleted by ${admin.email} payout=${payoutId}`
-  );
+  log.info("deleted", { admin_email: admin.email, payout_id: payoutId });
   return NextResponse.json({ ok: true });
 }

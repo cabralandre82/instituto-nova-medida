@@ -37,6 +37,9 @@
 
 import { getSupabaseAdmin } from "@/lib/supabase";
 import type { MeetingSummary } from "@/lib/video";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "reconcile" });
 import {
   applyNoShowPolicy,
   classifyFinalStatus,
@@ -124,7 +127,7 @@ async function loadDoctorMatchName(
     .eq("id", doctorId)
     .maybeSingle();
   if (error) {
-    console.warn("[reconcile] loadDoctorMatchName:", error.message);
+    log.warn("loadDoctorMatchName", { err: error, doctor_id: doctorId });
     return null;
   }
   if (!data) return null;
@@ -214,7 +217,7 @@ export async function reconcileAppointmentFromMeetings(
     .maybeSingle();
 
   if (loadErr) {
-    console.error("[reconcile] load falhou:", loadErr);
+    log.error("load falhou", { err: loadErr });
     return {
       ok: false,
       appointmentId: input.appointmentId,
@@ -350,7 +353,7 @@ export async function reconcileAppointmentFromMeetings(
     .eq("id", appt.id);
 
   if (updateErr) {
-    console.error("[reconcile] update falhou:", updateErr);
+    log.error("update falhou", { err: updateErr });
     return {
       ok: false,
       appointmentId: appt.id,
@@ -377,13 +380,13 @@ export async function reconcileAppointmentFromMeetings(
         source: input.source,
       });
     } catch (e) {
-      console.error("[reconcile] applyNoShowPolicy falhou:", e);
+      log.error("applyNoShowPolicy falhou", { err: e });
       // Não bloqueia — o status já foi atualizado. Admin pode retry
       // via UI futura se necessário.
     }
   }
 
-  console.log("[reconcile] fechado:", {
+  log.info("fechado", {
     appointment_id: appt.id,
     action,
     source: input.source,

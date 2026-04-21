@@ -1596,14 +1596,18 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
 
 ## Lente 14 — Observabilidade
 
-### [14.1 🟡 PARCIAL] Logs dispersos em `console.*` — sem drain externo (ver também 17.2)
+### [14.1 🟡 PARCIAL — migração in-tree completa] Logs dispersos em `console.*` — sem drain externo (ver também 17.2)
 
 - **Onde (auditoria):** varredura `sentry|datadog|opentelemetry|axiom|posthog|logflare` = **0 matches**; 80+ arquivos usando `console.log/warn/error` com prefixos artesanais.
-- **Status:** 🟡 **PARCIALMENTE RESOLVIDO pela D-057 (PR-039, 2026-04-20)**.
+- **Status:** 🟡 **Migração in-tree 100% completa pela D-057 (PR-039 + PR-039-cont, 2026-04-20)**. Só falta drain externo.
   - Criado `src/lib/logger.ts` canônico (zero deps) com JSON em prod, redação automática de PII via `redactForLog` (D-056), child loggers com contexto encadeável e sink pluggable pronto para Axiom/Sentry.
-  - Migrados caminhos críticos: `cron-runs`, `cron-auth`, `admin-audit-log`, `patient-access-log`, `retention`, `patient-lgpd-requests`, as 8 rotas `/api/internal/cron/*`, `/api/asaas/webhook` (29 call-sites).
-  - Finding sai de 🟠 ALTO para 🟡 PARCIAL: infra no lugar, migração dos ~60 `console.*` remanescentes é oportunista (PR futura), fechamento total depende de integração com drain externo (Axiom/Sentry) — bloqueado por input operacional (chaves + budget).
-- **Pendente:** (a) `setSink(axiomSink)` no boot + config de projeto Axiom/Sentry (free tier 5k errors/mo); (b) alertas para Slack/WA por severidade; (c) finalizar migração dos ~60 call-sites restantes.
+  - **PR-039 (primeira onda):** caminhos críticos — `cron-runs`, `cron-auth`, `admin-audit-log`, `patient-access-log`, `retention`, `patient-lgpd-requests`, as 8 rotas `/api/internal/cron/*`, `/api/asaas/webhook` (29 call-sites).
+  - **PR-039-cont (finalização, 2026-04-20):** migrados **todos** os ~150 `console.*` restantes — libs (`reliability`, `no-show-policy`, `scheduling`, `refunds`, `reconcile`, `reconciliation`, `notifications`, `earnings`, `fulfillment-*`, `patient-update-shipping`, `doctor-finance`, `billing-documents`, `payout-proofs`, `notify-pending-documents`, `video`), rotas de fulfillment/admin/paciente/médica/auth/doctors/checkout/lead/reserve/notifications/payouts-proof/billing-document, webhooks (`daily`, `wa`, `daily-webhook` legacy em `pages/api/`) e páginas server component (`/consulta`, `/paciente/oferta`, `/admin/notifications`, `/admin/refunds`, `/admin/payouts`, `/medico/ganhos`, `/admin/fulfillments[/:id]`, `/checkout`, `/agendar`, `/planos`, `/admin/doctors`).
+  - **Checkpoint:** `grep console\. src/` retorna **apenas** `src/lib/logger.ts` (implementação interna do próprio logger — esperado).
+  - **Efeitos:** tests silenciosos por default (logger é no-op em `NODE_ENV=test`); JSON estruturado em prod (drain-ready); prefixos `[mod: …]` / `[route: …]` unificados; PII redigida automaticamente em campos sensíveis.
+- **Pendente (sai de 🟡 PARCIAL para ✅ RESOLVED quando):**
+  - (a) `setSink(axiomSink)` no boot + config de projeto Axiom/Sentry (free tier 5k errors/mo);
+  - (b) alertas para Slack/WA por severidade.
 - **Observador:** SRE, admin solo.
 
 ### [14.2 🟡 MÉDIO] Nenhuma métrica de negócio agregada
@@ -1900,7 +1904,7 @@ Ordem recomendada de ataque (1 = primeiro):
 - 12.2 `monthly-payouts` single function não batchable
 - ~~13.1 Sem `AbortController` em fetch externos~~ ✅ RESOLVED (PR-042 · D-058): helper `src/lib/fetch-timeout.ts` com `FetchTimeoutError` classificado, composição com AbortSignal externo, timeouts por provider (Asaas 10s, Daily 8s, WhatsApp 8s, ViaCEP 2.5s). Migrado em 5 call-sites core.
 - 13.2 Sem circuit breaker
-- ~~14.1 Zero Sentry/Datadog/Axiom~~ 🟡 PARCIAL (PR-039 · D-057): logger canônico `src/lib/logger.ts` + migração dos caminhos críticos (8 crons, webhook Asaas, libs infra). Finalização depende de plugar drain externo (bloqueado por input operacional — chaves + budget).
+- ~~14.1 Zero Sentry/Datadog/Axiom~~ 🟡 PARCIAL (PR-039 + PR-039-cont · D-057): logger canônico `src/lib/logger.ts` + **migração in-tree 100% completa** (150+ call-sites em libs, rotas, webhooks, páginas server). Único `console.*` restante em `src/lib/logger.ts` (interno). Finalização pra ✅ RESOLVED depende de plugar drain externo (bloqueado por input operacional — chaves Axiom/Sentry + budget).
 - 19.1 Sem dashboard de custo
 - 20.1 Sem runbook DR
 

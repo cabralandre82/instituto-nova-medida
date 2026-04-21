@@ -55,6 +55,9 @@ import {
   renderAcceptanceTerms,
 } from "./acceptance-terms";
 import { formatCurrencyBRL } from "./datetime-br";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "fulfillment-acceptance" });
 
 // ────────────────────────────────────────────────────────────────────────
 // Tipos
@@ -369,7 +372,7 @@ export async function acceptFulfillment(
       termsVersion
     );
   } catch (err) {
-    console.error("[fulfillment-acceptance] render terms failed:", err);
+    log.error("render terms failed", { err });
     return {
       ok: false,
       code: "db_error",
@@ -399,7 +402,7 @@ export async function acceptFulfillment(
   if (cUpd.error) {
     // log-and-continue: não aborta aceite por falha em atualização
     // de cache. O snapshot definitivo está no fulfillment.
-    console.error("[fulfillment-acceptance] customer update falhou:", cUpd.error);
+    log.error("customer update falhou", { err: cUpd.error });
   }
 
   // 10. INSERT em plan_acceptances (imutável por trigger)

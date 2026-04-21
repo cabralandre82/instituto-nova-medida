@@ -20,6 +20,9 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "doctor-finance" });
 
 export type DoctorBalance = {
   /** earnings.status='pending' — ainda na janela de risco. */
@@ -117,7 +120,7 @@ export async function getDoctorBalance(
   };
 
   if (error) {
-    console.error("[doctor-finance] getDoctorBalance:", error);
+    log.error("getDoctorBalance", { err: error });
     return balance;
   }
 
@@ -178,7 +181,7 @@ export async function estimateNextPayout(
   };
 
   if (error) {
-    console.error("[doctor-finance] estimateNextPayout:", error);
+    log.error("estimateNextPayout", { err: error });
     return estimate;
   }
 
@@ -222,7 +225,7 @@ export async function listPayoutsWithDocuments(
     .limit(limit);
 
   if (error) {
-    console.error("[doctor-finance] listPayoutsWithDocuments:", error);
+    log.error("listPayoutsWithDocuments", { err: error });
     return [];
   }
 
@@ -318,7 +321,7 @@ export async function countPendingBillingDocuments(
   const { data, error } = await query;
 
   if (error) {
-    console.error("[doctor-finance] countPendingBillingDocuments:", error);
+    log.error("countPendingBillingDocuments", { err: error });
     return { pendingUpload: 0, awaitingValidation: 0 };
   }
 

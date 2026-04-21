@@ -18,6 +18,9 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { sendBoasVindas } from "@/lib/whatsapp";
 import { isBodyTooLarge, validateLead } from "@/lib/lead-validate";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/lead" });
 
 export const runtime = "nodejs";
 
@@ -133,14 +136,14 @@ export async function POST(req: Request) {
       .single();
 
     if (error) {
-      console.error("[instituto-nova-medida][lead] supabase error:", error);
+      log.error("supabase error", { err: error });
       return NextResponse.json(
         { ok: false, error: "Falha ao registrar" },
         { status: 500 }
       );
     }
 
-    console.log("[instituto-nova-medida][lead] inserted:", data?.id);
+    log.info("inserted", { lead_id: data?.id });
 
     // 5. Disparar MSG 1 (boas-vindas) via WhatsApp Cloud API.
     //
@@ -159,10 +162,12 @@ export async function POST(req: Request) {
       });
 
       if (!wa.ok) {
-        console.error(
-          "[instituto-nova-medida][lead][whatsapp] falha ao enviar MSG 1:",
-          { leadId: data?.id, code: wa.code, message: wa.message, details: wa.details }
-        );
+        log.error("whatsapp falha ao enviar MSG 1", {
+          leadId: data?.id,
+          code: wa.code,
+          err: wa.message,
+          details: wa.details,
+        });
         await supabase
           .from("leads")
           .update({
@@ -173,7 +178,7 @@ export async function POST(req: Request) {
           })
           .eq("id", data?.id);
       } else {
-        console.log("[instituto-nova-medida][lead][whatsapp] MSG 1 enviada:", {
+        log.info("whatsapp MSG 1 enviada", {
           leadId: data?.id,
           messageId: wa.messageId,
           waId: wa.waId,
@@ -188,10 +193,7 @@ export async function POST(req: Request) {
           .eq("id", data?.id);
       }
     } catch (waErr) {
-      console.error(
-        "[instituto-nova-medida][lead][whatsapp] exception:",
-        waErr
-      );
+      log.error("whatsapp exception", { err: waErr });
       await supabase
         .from("leads")
         .update({
@@ -205,7 +207,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ ok: true, id: data?.id });
   } catch (err) {
-    console.error("[instituto-nova-medida][lead] internal error:", err);
+    log.error("internal error", { err });
     return NextResponse.json(
       { ok: false, error: "Erro interno" },
       { status: 500 }

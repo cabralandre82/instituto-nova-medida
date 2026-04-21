@@ -11,6 +11,9 @@ import Link from "next/link";
 import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { formatCurrencyBRL, formatDateBR } from "@/lib/datetime-br";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/medico/ganhos" });
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -78,7 +81,7 @@ async function loadEarnings(doctorId: string, year: number, month: number) {
     .order("earned_at", { ascending: false });
 
   if (error) {
-    console.error("[medico/ganhos] load:", error);
+    log.error("load", { err: error });
     return [] as EarningRow[];
   }
   return (data ?? []) as EarningRow[];

@@ -23,6 +23,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { verifyPatientToken } from "@/lib/patient-tokens";
 import { JoinRoomButton } from "./JoinRoomButton";
 import { formatDateBR, formatTimeBR } from "@/lib/datetime-br";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/consulta/[id]" });
 
 export const metadata: Metadata = {
   title: "Sua consulta · Instituto Nova Medida",
@@ -68,7 +71,7 @@ async function load(appointmentId: string, sp: SearchParams): Promise<LoadResult
     .maybeSingle();
 
   if (error) {
-    console.error("[consulta] load:", error);
+    log.error("load", { err: error });
     return { kind: "not_found" };
   }
   if (!appt) return { kind: "not_found" };

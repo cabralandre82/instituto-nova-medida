@@ -30,6 +30,9 @@ import {
   type AddressInput,
 } from "@/lib/patient-address";
 import type { FulfillmentStatus } from "@/lib/fulfillments";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "patient-update-shipping" });
 
 export type UpdateShippingResult =
   | {
@@ -246,11 +249,7 @@ export async function updateFulfillmentShipping(
       : (auditIns.data as { id: string }).id;
 
   if (auditIns.error) {
-    // Log mas não falha: o update já foi feito e o paciente viu sucesso.
-    console.warn(
-      "[updateFulfillmentShipping] audit insert falhou:",
-      auditIns.error.message
-    );
+    log.warn("audit insert falhou", { err: auditIns.error });
   }
 
   return {

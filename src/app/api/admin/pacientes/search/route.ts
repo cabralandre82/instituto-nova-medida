@@ -29,6 +29,9 @@ import {
   getAccessContextFromRequest,
   logPatientAccess,
 } from "@/lib/patient-access-log";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/pacientes/search" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -84,7 +87,7 @@ export async function GET(req: Request) {
       })),
     });
   } catch (err) {
-    console.error("[admin/pacientes/search] query failed", err);
+    log.error("query failed", { err });
     return NextResponse.json(
       { ok: false, error: "search_failed" },
       { status: 500 }

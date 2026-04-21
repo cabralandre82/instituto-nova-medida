@@ -16,6 +16,9 @@ import {
   getAuditContextFromRequest,
   logAdminAction,
 } from "@/lib/admin-audit-log";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/payouts/[id]/cancel" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,7 +51,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     })
     .eq("id", id);
   if (payoutErr) {
-    console.error("[payouts/cancel] payout:", payoutErr);
+    log.error("payout", { err: payoutErr, payout_id: id });
     return NextResponse.json({ ok: false, error: payoutErr.message }, { status: 500 });
   }
 
@@ -62,7 +65,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     .eq("payout_id", id)
     .eq("status", "in_payout");
   if (earnErr) {
-    console.error("[payouts/cancel] earnings:", earnErr);
+    log.error("earnings", { err: earnErr, payout_id: id });
     return NextResponse.json({ ok: false, error: earnErr.message }, { status: 500 });
   }
 

@@ -14,6 +14,9 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "earnings" });
 
 export type CreateConsultationEarningInput = {
   paymentId: string;
@@ -125,8 +128,7 @@ export async function createConsultationEarning(
       status: "pending",
     });
     if (bonusErr) {
-      console.error("[earnings] bônus on-demand falhou:", bonusErr);
-      // não bloqueia — earning principal já foi criado
+      log.error("bônus on-demand falhou", { err: bonusErr });
     }
   }
 
@@ -200,7 +202,7 @@ export async function createClawback(
       available_at: now,
     });
     if (claErr) {
-      console.error("[earnings] clawback insert:", claErr);
+      log.error("clawback insert", { err: claErr });
       continue;
     }
 
@@ -215,11 +217,9 @@ export async function createClawback(
         })
         .eq("id", parent.id);
     } else if (parent.status === "in_payout") {
-      // earning já está num payout draft/approved — admin precisa intervir
-      console.warn(
-        "[earnings] clawback enquanto earning está in_payout — admin deve revisar payout",
-        parent.id
-      );
+      log.warn("clawback enquanto earning está in_payout — admin deve revisar payout", {
+        earning_id: parent.id,
+      });
     }
 
     count++;

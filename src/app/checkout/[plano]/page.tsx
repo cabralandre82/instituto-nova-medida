@@ -28,6 +28,9 @@ import { Footer } from "@/components/Footer";
 import { getSupabaseAnon } from "@/lib/supabase";
 import { CheckoutForm, type CheckoutPlan } from "@/components/CheckoutForm";
 import { isLegacyPurchaseEnabled } from "@/lib/legacy-purchase-gate";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/checkout/[plano]" });
 
 export const dynamic = "force-dynamic";
 
@@ -56,12 +59,12 @@ async function loadPlan(slug: string): Promise<CheckoutPlan | null> {
       .maybeSingle();
 
     if (error) {
-      console.error("[checkout/page] supabase error:", error);
+      log.error("supabase error", { err: error });
       return null;
     }
     return (data as CheckoutPlan) ?? null;
   } catch (err) {
-    console.error("[checkout/page] load exception:", err);
+    log.error("load exception", { err });
     return null;
   }
 }

@@ -18,6 +18,9 @@ import { NextResponse } from "next/server";
 import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getVideoProvider, provisionConsultationRoom } from "@/lib/video";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/medico/appointments/[id]/join" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -106,7 +109,7 @@ export async function POST(_req: Request, { params }: RouteParams) {
         })
         .eq("id", appt.id);
     } catch (e) {
-      console.error("[medico/appointments/join] provision error:", e);
+      log.error("provision error", { err: e, appointment_id: appointmentId });
       return NextResponse.json(
         {
           ok: false,
@@ -132,7 +135,7 @@ export async function POST(_req: Request, { params }: RouteParams) {
       });
       doctorToken = tokens.doctorToken;
     } catch (e) {
-      console.error("[medico/appointments/join] token error:", e);
+      log.error("token error", { err: e, appointment_id: appointmentId });
       return NextResponse.json(
         {
           ok: false,

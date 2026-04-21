@@ -16,6 +16,9 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { requireAdmin } from "@/lib/auth";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/admin/doctors" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -100,7 +103,7 @@ export async function POST(req: Request) {
     perPage: 1000,
   });
   if (listErr) {
-    console.error("[admin/doctors] listUsers:", listErr);
+    log.error("listUsers", { err: listErr });
     return NextResponse.json({ ok: false, error: "Falha ao consultar usuários" }, { status: 500 });
   }
 
@@ -137,7 +140,7 @@ export async function POST(req: Request) {
       user_metadata: { display_name: body.displayName || fullName },
     });
     if (createErr || !created.user) {
-      console.error("[admin/doctors] createUser:", createErr);
+      log.error("createUser", { err: createErr });
       return NextResponse.json(
         { ok: false, error: "Falha ao criar usuário de autenticação" },
         { status: 500 }
@@ -166,7 +169,7 @@ export async function POST(req: Request) {
     .single();
 
   if (docErr || !doctor) {
-    console.error("[admin/doctors] insert doctor:", docErr);
+    log.error("insert doctor", { err: docErr });
     return NextResponse.json(
       { ok: false, error: "Falha ao criar registro de médica", details: docErr?.message },
       { status: 500 }
@@ -188,7 +191,7 @@ export async function POST(req: Request) {
       reason: "Default no cadastro inicial (D-024)",
     });
   if (ruleErr) {
-    console.error("[admin/doctors] insert rule:", ruleErr);
+    log.error("insert rule", { err: ruleErr, doctor_id: doctor.id });
     // não fatal — perfil foi criado
   }
 

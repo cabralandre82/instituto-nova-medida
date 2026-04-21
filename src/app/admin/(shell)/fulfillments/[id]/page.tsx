@@ -20,6 +20,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import type { FulfillmentStatus } from "@/lib/fulfillments";
 import { labelForFulfillmentStatus } from "@/lib/fulfillment-transitions";
 import { FulfillmentActions } from "./_FulfillmentActions";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/admin/fulfillments/[id]" });
 
 export const dynamic = "force-dynamic";
 
@@ -128,7 +131,7 @@ export default async function FulfillmentDetailPage({ params }: RouteParams) {
     .maybeSingle();
 
   if (error) {
-    console.error("[admin/fulfillments/:id] load:", error);
+    log.error("load", { err: error });
     notFound();
   }
   if (!data) notFound();

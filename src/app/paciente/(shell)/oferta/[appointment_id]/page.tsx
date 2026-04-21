@@ -35,6 +35,9 @@ import {
   formatDateBR,
   formatDateTimeBR,
 } from "@/lib/datetime-br";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/paciente/oferta/[appointment_id]" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,7 +70,7 @@ export default async function OfferPage({ params }: Params) {
     .maybeSingle();
 
   if (apptRes.error) {
-    console.error("[oferta] erro ao carregar appointment:", apptRes.error);
+    log.error("erro ao carregar appointment", { err: apptRes.error });
     notFound();
   }
   if (!apptRes.data) notFound();
@@ -124,7 +127,7 @@ export default async function OfferPage({ params }: Params) {
     .maybeSingle();
 
   if (ffRes.error) {
-    console.error("[oferta] erro ao carregar fulfillment:", ffRes.error);
+    log.error("erro ao carregar fulfillment", { err: ffRes.error });
     return (
       <EmptyState
         title="Erro ao carregar oferta"
