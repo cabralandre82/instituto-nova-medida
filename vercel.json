@@ -40,6 +40,9 @@
     },
     "src/app/api/internal/cron/retention-anonymize/route.ts": {
       "maxDuration": 60
+    },
+    "src/app/api/internal/cron/asaas-events-purge/route.ts": {
+      "maxDuration": 60
     }
   },
   "crons": [
@@ -82,6 +85,10 @@
     {
       "path": "/api/internal/cron/retention-anonymize",
       "schedule": "0 4 * * 0"
+    },
+    {
+      "path": "/api/internal/cron/asaas-events-purge",
+      "schedule": "0 5 * * 0"
     }
   ],
   "headers": [

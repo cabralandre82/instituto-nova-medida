@@ -5,6 +5,81 @@
 
 ---
 
+## D-063 · Retenção + redação de PII em `asaas_events` (finding 5.12) · 2026-04-20
+
+**Contexto.** Finding [5.12 🟠 ALTO]: a tabela `asaas_events` acumulava todo webhook recebido do Asaas com o payload bruto (`jsonb not null`) sem TTL. Cada payload inclui PII completa: nome, CPF, email, phone, endereço do customer Asaas, dados de cartão (holderInfo), descrições livres. Sem purge automático, em 12 meses o banco tem gigabytes de PII desnecessária pra qualquer finalidade operacional — violação LGPD Art. 16 (eliminação após término do tratamento) + princípio da adequação à finalidade.
+
+A PII em `asaas_events` não serve:
+
+- **Reconciliação**: os campos necessários (`asaas_payment_id`, `externalReference` → nosso `payments.id`, `value`, `status`, `paymentDate`, `billingType`) não contêm PII. A PII do paciente está em `customers` (controle RLS + trilha em `patient_access_log`).
+- **Auditoria fiscal**: exige `event_type + paymentDate + value + status` — não nome/CPF/endereço.
+- **Chargeback dispute**: prazo máximo Mastercard/Visa = 120 dias. Depois disso o payload vira dead weight.
+
+**Decisão.** Política dois-estágios, combinando prevenção (INSERT) + retenção (purge):
+
+1. **INSERT-time redact** — toda vez que o webhook do Asaas chegar, `redactAsaasPayload()` (em `src/lib/asaas-event-redact.ts`) aplica uma **allowlist deny-by-default** no payload antes de persistir. Resultado: PII nunca chega ao banco pra novos eventos.
+2. **Purge pós-retention** — cron semanal (`asaas-events-purge`, domingo 05:00 UTC) esvazia `payload` para `{}::jsonb` + marca `payload_purged_at` em eventos com `processed_at < now() - 180d`. 180d = 120d de chargeback + 60d de folga operacional.
+
+**Allowlist deny-by-default (estágio 1).** O motivo de escolher allowlist em vez de denylist:
+
+- **Forward-safety**: se o Asaas introduzir um campo novo no payload (acontece — eles expandem a API sem aviso), ele **não passa** a menos que a gente adicione explicitamente. Se fosse denylist, um campo novo com PII (ex.: `customer.document`, `payer.taxId`) passaria até ser notado.
+- **Auditabilidade**: lista explícita é grepável — qualquer review consegue validar "esse campo pode ficar?".
+- **Estrutura recursiva consciente**: `payment.customer`, `payment.refunds[]`, `payment.discount/fine/interest`, `payment.pixTransaction` têm cada um sua própria allowlist. Ninguém "esquece" um campo aninhado.
+
+Detalhes (reproduzidos do header da lib):
+
+- Envelope: `id`, `event`, `dateCreated`.
+- `payment.*`: campos financeiros/operacionais (status, billingType, value, netValue, dueDate, paymentDate, externalReference, invoiceNumber, bankSlipUrl, etc.). **NÃO** `description` (texto livre).
+- `payment.customer`: se string (ID Asaas), passa. Se objeto expandido → reduzido a `{id, externalReference}`. **Nome/CPF/email/phone/address todos dropados.**
+- `payment.refunds[]`: só `id/status/value/dateCreated/refundDate`. Sem `description` ou `endToEndIdentifier`.
+- `payment.discount/fine/interest`: só `value/type/dueDateLimitDays`. Sem `description`.
+- `payment.pixTransaction`: só `qrCode/endToEndIdentifier/txid`. Sem `payload` (EMV) e sem `payer`.
+- **BLOQUEADOS totalmente**: `creditCard`, `creditCardHolderInfo`, `creditCardToken`, `payer`, `billing`, `metadata`, `customFields`, qualquer campo não-listado.
+
+**Constante sentinela.** A lib exporta `REDACTED_MARK = "[redacted]"` mas **não é usada na prática** — allowlist dropa a chave inteira em vez de substituir por sentinela. A constante fica lá pra caso futuro queiramos redact seletivo (ex.: preservar estrutura pra visualização em painel sem mostrar PII).
+
+**Purge pós-retention (estágio 2).**
+
+- Threshold: 180d. Eventos antigos acumulados (pré-D-063) são purgados na primeira execução do cron (backfill gratuito).
+- Técnica: 2-step SELECT → UPDATE, com guard `.is("payload_purged_at", null)` em ambos. Idempotente sob concorrência (outro pod purgando no mesmo momento): se o UPDATE pega menos linhas que o SELECT viu, log `info` (não erro).
+- `payload := '{}'::jsonb` (mantém constraint `NOT NULL`). `payload_purged_at := now()`.
+- Preservado: `asaas_event_id`, `event_type`, `asaas_payment_id`, `processed_at`, `received_at`, `signature_valid`, `processing_error`.
+- Clamp de threshold: `MIN=90`, `MAX=3650`. Protege contra query-string acidental `?thresholdDays=1`.
+
+**Por que não NULL no `payload` em vez de `{}`.** Alterar a coluna pra nullable exige migration destrutiva do schema (`alter column drop not null`) e afeta código downstream que confia na presença do campo. `{}` tem semântica clara ("purgado"), mantém a constraint, e o cron marca `payload_purged_at` pra distinguir "evento novo sem payload por algum bug" de "payload esvaziado conscientemente por retenção".
+
+**Por que não redact em SQL / trigger.**
+
+- A allowlist é estrutural (recursão em refunds, customer, etc). Escrever em SQL puro é não-trivial e não-testável com Vitest.
+- Trigger BEFORE INSERT rodaria no banco, mas deixaria código de redact divorciado do tipo TS do `AsaasWebhookEvent`. A cada mudança na allowlist, 2 pontos pra sincronizar.
+- Manter em TS permite: (a) testes unitários com 12 casos; (b) constantes como `REDACT_VERSION` versionadas; (c) refatoração type-safe.
+
+**Eventos antigos (backfill).** Os eventos gravados antes do D-063 têm payload com PII. O primeiro run do cron `asaas-events-purge` pega todos os `processed_at < now() - 180d` — não importa se são antigos ou novos. Eventos antigos ainda dentro da janela de 180d continuam com PII até virarem ≥ 180d, o que é aceitável pelo mesmo princípio (janela legítima de reconciliação).
+
+**Integração operacional.**
+
+- Dashboard `/admin/crons`: novo job `asaas_events_purge` listado em `EXPECTED_JOBS`.
+- `vercel.json`: `"0 5 * * 0"` (domingo 05:00 UTC ≈ 02:00 BRT) — depois do `retention-anonymize` (04:00 UTC), mantendo domingo como janela de housekeeping LGPD.
+- `maxDuration: 60` (batch default 500 eventos, tempo largo).
+
+**Escopo NÃO incluído neste PR.**
+
+- **Finding [5.8]** (takeover de customer no checkout sem login): é um finding diferente; exige fluxo de login antes de update de PII — próximo PR.
+- **Backfill retroativo de redact em eventos já gravados**: o audit não exige; o purge pós-180d cobre a mesma finalidade LGPD (dados antigos deletados). Se um operador quiser purge imediato de eventos mais recentes, basta rodar o cron com `?thresholdDays=90` uma vez manualmente.
+
+**Consequências.**
+
+- LGPD compliance em `asaas_events`: PII nova → zero; PII antiga → purgada em até 180d.
+- Redução de storage a longo prazo (~GB/ano pra plataforma em volume).
+- 21 testes unitários novos (12 redact + 9 retention); suíte 977/977.
+- Audit finding [5.12] ✅ RESOLVED. ALTOs restantes: 3 → 2 (5.6 consent persistido, 17.4 signed URL log).
+
+**Referências:** `src/lib/asaas-event-redact.ts`, `src/lib/asaas-events-retention.ts`, `src/app/api/internal/cron/asaas-events-purge/route.ts`, `src/app/api/asaas/webhook/route.ts` (integração), `supabase/migrations/20260506000000_asaas_events_retention.sql`.
+
+**Supersedes:** nenhum. Estende D-052 (política LGPD automática) e complementa a estratégia de retenção iniciada em PR-033-A (ghost customers).
+
+---
+
 ## D-062 · Reconciliação pós-clawback no `generateMonthlyPayouts` (finding 5.5) · 2026-04-20
 
 **Contexto.** Finding [5.5 🟠 ALTO] do audit: `src/lib/monthly-payouts.ts` roda em 2 passos sequenciais:

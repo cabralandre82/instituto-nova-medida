@@ -40,6 +40,7 @@ const EXPECTED_JOBS = [
   "nudge_reconsulta",
   "admin_digest",
   "retention_anonymize",
+  "asaas_events_purge",
 ] as const;
 
 const JOB_LABELS: Record<string, string> = {
@@ -50,6 +51,7 @@ const JOB_LABELS: Record<string, string> = {
   nudge_reconsulta: "Nudge de reconsulta",
   admin_digest: "Digest para o admin",
   retention_anonymize: "Retenção LGPD (anonimizar)",
+  asaas_events_purge: "Purge LGPD (asaas_events.payload)",
 };
 
 /**
@@ -65,6 +67,7 @@ const JOB_CADENCE: Record<string, string> = {
   nudge_reconsulta: "diário",
   admin_digest: "diário",
   retention_anonymize: "diário",
+  asaas_events_purge: "semanal (dom 05:00 UTC)",
 };
 
 const WINDOW_DAYS = 30;

@@ -655,11 +655,12 @@ _Fim da PARTE 1. Seguir pra PARTE 2 (Lentes 5 Dinheiro + 6 LGPD/CFM)._
 
 ### [5.12] `asaas_events` guarda payload bruto com PII sem TTL
 
-- **Veredicto:** 🟠 ALTO (cruza Lente 5 e Lente 6)
-- **Achado:** tabela `asaas_events` acumula todos os webhooks indefinidamente. Cada payload inclui: nome, CPF, email, phone, endereço completo, valor, billing type. Sem purge automático, em 12 meses o banco acumula GBs de PII desnecessária — e a retenção ilimitada viola princípio da LGPD de "adequação à finalidade".
-- **Correção (PR):** cron diária `purge_asaas_events_older_than(180 days)` que:
-  1. Seleciona eventos com `processed_at < now() - 180d AND processing_error IS NULL`.
-  2. Atualiza `payload = null, payload_redacted_at = now()` mantendo `event_type, asaas_event_id, created_at` pra rastreio.
+- **Veredicto:** ✅ RESOLVED em 2026-04-20 via PR-052 · D-063.
+- **Achado original:** tabela `asaas_events` acumula todos os webhooks indefinidamente. Cada payload inclui: nome, CPF, email, phone, endereço completo, valor, billing type. Sem purge automático, em 12 meses o banco acumula GBs de PII desnecessária — e a retenção ilimitada viola princípio da LGPD de "adequação à finalidade".
+- **Solução aplicada:** política dois-estágios:
+  1. **INSERT-time redact** (`src/lib/asaas-event-redact.ts`): allowlist deny-by-default aplicada a todo webhook ANTES de persistir em `asaas_events`. Preserva só campos financeiros/operacionais (id, event, payment.id/status/value/dates/externalReference, refunds metadados, pixTransaction sem EMV). PII nunca chega no banco pra novos eventos. 12 testes unitários cobrem envelope/payment/customer expandido/creditCard/refunds/discount/pixTransaction/campo não-listado.
+  2. **Purge pós-180d** (`src/lib/asaas-events-retention.ts` + cron `asaas-events-purge` domingo 05:00 UTC): eventos com `processed_at < now() - 180d` têm `payload := '{}'::jsonb` + `payload_purged_at := now()`. Threshold 180d = 120d chargeback Visa/Mastercard + 60d folga. Idempotente via guard `payload_purged_at IS NULL`. 9 testes unitários.
+  3. Migration `20260506000000_asaas_events_retention.sql` adiciona `payload_redacted_at`, `payload_purged_at`, índice parcial `asaas_events_purge_candidates_idx`.
 - **Observador:** DPO, CISO.
 
 ### [5.13] Lista Negra (blocklist) — sem mecanismo para bloquear paciente/cliente fraudador
@@ -1881,8 +1882,8 @@ Ordem recomendada de ataque (1 = primeiro):
 - ~~5.2 Earning em PAYMENT_CONFIRMED sem compensação financeira~~ — ✅ RESOLVED na Onda 1D (PR-014, D-050).
 - ~~5.5 Clawback não recalcula payout~~ — ✅ RESOLVED em 2026-04-20 (PR-051, D-062).
 - 5.6 Checkout consent não persiste
-- 5.8 `asaas_events` sem TTL
-- 5.12 PII em `asaas_events`
+- 5.8 Customer takeover no checkout/reserve sem auth
+- ~~5.12 PII em `asaas_events`~~ — ✅ RESOLVED em 2026-04-20 (PR-052, D-063).
 - 22.3 CPF fake gerado por LLM → DoS de slots
 
 ### Legal/LGPD/CFM (7)

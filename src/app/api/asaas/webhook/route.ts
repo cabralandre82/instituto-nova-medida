@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { isWebhookTokenValid, type AsaasWebhookEvent } from "@/lib/asaas";
+import { redactAsaasPayload } from "@/lib/asaas-event-redact";
 import { createConsultationEarning, createClawback } from "@/lib/earnings";
 import { activateAppointmentAfterPayment } from "@/lib/scheduling";
 import { provisionConsultationRoom } from "@/lib/video";
@@ -90,7 +91,28 @@ export async function POST(req: Request) {
   const supabase = getSupabaseAdmin();
   const asaasPaymentId = body.payment?.id ?? null;
 
-  // 2) Persiste raw (idempotente via asaas_event_id quando presente)
+  // 2) Persiste raw (idempotente via asaas_event_id quando presente).
+  //
+  // PR-052 · D-063 · finding 5.12: o payload é passado pelo
+  // `redactAsaasPayload()` antes do INSERT — PII (nome, CPF, email,
+  // phone, endereço, dados do cartão, descrições livres) nunca chega
+  // no banco. Só ficam os campos financeiros/operacionais necessários
+  // pra reconciliação e classificação do evento. Purge final via cron
+  // weekly (asaas-events-purge) esvazia payload para `{}` após 180d.
+  //
+  // Mesmo com falha no redact (bug futuro), marcamos `payload = {}`
+  // e logamos — nunca serializamos raw com PII.
+  let safePayload: Record<string, unknown> = {};
+  let redactedAt: string | null = null;
+  try {
+    safePayload = redactAsaasPayload(body as unknown);
+    redactedAt = new Date().toISOString();
+  } catch (err) {
+    log.error("redact falhou — gravando payload vazio", { err });
+    safePayload = {};
+    redactedAt = null;
+  }
+
   let storedEventId: string | null = null;
   try {
     const { data: stored, error: storeErr } = await supabase
@@ -99,7 +121,8 @@ export async function POST(req: Request) {
         asaas_event_id: body.id ?? null,
         event_type: body.event,
         asaas_payment_id: asaasPaymentId,
-        payload: body as unknown as Record<string, unknown>,
+        payload: safePayload,
+        payload_redacted_at: redactedAt,
         signature: headerToken,
         signature_valid: signatureValid,
       })

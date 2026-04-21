@@ -23,7 +23,8 @@ export type CronJob =
   | "auto_deliver_fulfillments"
   | "nudge_reconsulta"
   | "admin_digest"
-  | "retention_anonymize";
+  | "retention_anonymize"
+  | "asaas_events_purge";
 
 export async function startCronRun(
   supabase: SupabaseClient,
