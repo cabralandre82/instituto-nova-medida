@@ -5,6 +5,73 @@
 
 ---
 
+## D-059 · Dashboard temporal de `cron_runs` em `/admin/crons` · 2026-04-21
+
+**Contexto.** `cron_runs` (D-040) é a trilha de execução dos 7 jobs agendados: cada start/finish grava linha com `status`, `duration_ms`, `payload`, `error_message`. Até hoje a única superfície de consumo era `system-health.ts::checkCronFreshness`, que pergunta só "o último run foi ok e há quanto tempo?". Isso cobre o caso "cron está morto?", mas deixa três perguntas sem resposta:
+
+1. **Tendência.** Um cron que passou de 500ms para 4s em duração nas últimas 2 semanas ainda está "ok" pra health, mas é sintoma claro de crescimento de dados ou regressão. Não há como ver isso sem abrir SQL editor.
+2. **Concentração de falhas.** `admin_digest` pode ter 90% de sucesso na semana passada e 60% nesta — `/admin/health` só mostra o último run, não o delta. Operador solo não tem bandwidth pra inspecionar manualmente.
+3. **Runs travadas.** Se `finishCronRun` nunca é chamada (crash do handler, OOM, deploy durante execução), a linha fica em `status='running'` indefinidamente. Hoje não há alerta nem visibilidade.
+
+Alternativas descartadas:
+
+- **Plugar Axiom/Sentry + dashboard externo.** Futuro (D-057 já preparou a drain). Mas requer contrato/billing + é overkill pros 7 jobs atuais.
+- **Materialized view no Postgres.** Mais barato em CPU, mas exige migração + refresh schedule + explicação pro próximo dev. Volume atual (≤210 linhas/30d) não justifica. Reservado pra quando o volume dobrar.
+- **Adicionar seção ao `/admin/health`.** Misturaria snapshot ("está vivo?") com série temporal ("como está a tendência?"). Duas perguntas diferentes, audiências diferentes (incident response vs. revisão semanal). Separar em duas páginas preserva a leitura rápida do health.
+
+**Decisão.** Página nova `/admin/crons` com agregação in-process sobre uma única query de `cron_runs` (janela configurável via `?days=7|30|90`).
+
+### Arquitetura
+
+- **`src/lib/cron-dashboard.ts`** — três funções, responsabilidades isoladas:
+  - `fetchCronRunsWindow(supabase, days)` — IO. Uma query, limit 5000, ordenada desc. Isolada pra que a agregação seja testável sem Supabase.
+  - `buildCronDashboard(rows, opts)` — **pura**. Recebe linhas cruas, devolve `CronDashboardReport` completo. 20 testes cobrindo ok/error/running, percentile nearest-rank, stuck detection, week-delta, ordenação, janela truncada.
+  - `loadCronDashboard(supabase, opts)` — orquestra as duas. Page chama esta.
+- **`/admin/crons/page.tsx`** — server component; resumo global (4 cards) + 1 card por job com badge de status, métricas (p50/p95/máx), sparkline de 30d, delta semana-vs-semana, último erro destacado, tabela expansível das últimas 20 execuções.
+- **`AdminNav`** — entry "Crons" entre "Saúde" e "Erros".
+
+### Modelo de dados derivado (ops, não persistido)
+
+Por job, `CronJobSummary` traz:
+
+| Campo | Fonte | Uso na UI |
+|---|---|---|
+| `total_runs`, `ok_count`, `error_count`, `running_count` | contagem direta | cards de métrica |
+| `stuck_count` | `status='running'` e idade ≥ 2h | badge terracotta "travado" |
+| `success_rate` | `ok / (ok + error)` — exclui running | card principal por job |
+| `duration.{avg,p50,p95,max}_ms` | percentile nearest-rank sobre runs concluídos | métricas laterais |
+| `last_run`, `last_error_at`, `last_error_message` | ordenação desc por `started_at` | banner vermelho do card |
+| `daily[30]` | bucket UTC por dia, sempre 30 entries (inclui zerados) | sparkline |
+| `week_delta.success_rate_delta_pp` | `current - previous` em pp | seta ▲▼ no card |
+| `recent_runs[20]` | truncamento desc | tabela expansível |
+
+**Defaults & guardrails:**
+
+- `STUCK_THRESHOLD_MS = 2h` — nenhum cron atual leva > 30s; 2h absorve retry de lock + execução longa sem alarme falso.
+- `expectedJobs` injetado do page — garante que um cron que não rodou na janela ainda apareça zerado. Evita sumir do dashboard por semanas (ex.: `generate_monthly_payouts`, cadência mensal).
+- Percentile: método nearest-rank. Suficiente pra dashboards ops (não é Prometheus). Quando volume escalar e precisarmos de percentis contínuos, trocamos aqui.
+- Buckets por UTC (não BR). Coerente com `started_at` do cron Vercel (UTC). Conversão pra BR só na borda (`datetime-br` já aplicado nos timestamps exibidos).
+- Ordenação: jobs com erro recente primeiro, depois por volume. Traz anomalias pro topo.
+
+### Trade-offs explicitados
+
+- **Agregação em Node, não SQL.** 7 jobs × ~1 run/dia × 30d ≈ 210 linhas. Agregar em JS é trivial, totalmente testável, zero lock-in em função Postgres. Quando dobrar volume (cron 1-min ou 20+ jobs), migramos pra RPC SQL com `percent_cont`/`window function`. Boundary está no `fetchCronRunsWindow` — trocar só o IO.
+- **Sem realtime.** `dynamic = "force-dynamic"` já refaz a query a cada request. Pra incident response (o use case agudo), é suficiente. Stream/websocket seria overkill.
+- **Sparkline sem SVG lib.** Divs com height% por dia, segmento verde/vermelho por status. Zero dependência, zero runtime cost, acessível via `role="img"` e `title` por barra.
+- **Sem ação de "rerun manual" na página.** Intencional: rerun é operação sensível (idempotência, locks). Fica em `/admin/health` via endpoint dedicado + rota `/api/internal/cron/*`. Dashboard é read-only.
+
+### Consequências
+
+- Nova superfície admin: `/admin/crons` (protegida por `requireAdmin` via shell).
+- PRS-PENDING: PR-040 vai para "Concluídos". Sem finding de auditoria associado (era melhoria operacional, não gap de segurança).
+- RLS inalterado: `cron_runs` continua service-role-only. Page usa `getSupabaseAdmin()` como todas as outras admin pages.
+- Próximos:
+  - Quando chegarmos a > 500 linhas/30d, migrar `fetchCronRunsWindow` pra RPC SQL agregada.
+  - Se acrescentarmos um 8º cron, atualizar `EXPECTED_JOBS` + `JOB_LABELS` + `JOB_CADENCE` na page (e o type `CronJob` em `src/lib/cron-runs.ts`).
+  - Alerta Slack/WA quando `stuck_count > 0` ou `success_rate < 0.9` — depende de drain externo (PR-043).
+
+---
+
 ## D-058 · `fetchWithTimeout` canônico + migração de fetches externos (fecha finding 13.1) · 2026-04-21
 
 **Contexto.** A auditoria profunda registrou **[13.1 🟠 ALTO] "Nenhum `AbortController` / `signal` em fetch externos — stuck request trava função inteira"**. Três dos quatro principais clientes de provedores externos (`src/lib/asaas.ts::request`, `src/lib/whatsapp.ts::postToGraph`, `src/lib/video.ts::dailyRequest`) chamavam `fetch()` cru, sem timeout. O quarto (`src/lib/cep.ts::fetchViaCep`) tinha `AbortController` inline, mas duplicado também em `src/lib/system-health.ts` de forma inconsistente.

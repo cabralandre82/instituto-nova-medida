@@ -2,7 +2,7 @@
 
 Lista consolidada de PRs identificados na auditoria (`docs/AUDIT-FINDINGS.md`) que **não podem ser abertos só pelo engenheiro**: dependem de dados reais, decisões do operador ou acesso externo.
 
-Atualizado em: **2026-04-21** (pós-PR-042 / D-058 — fetchWithTimeout canônico + migração de fetches externos).
+Atualizado em: **2026-04-21** (pós-PR-040 / D-059 — dashboard temporal de `cron_runs` em `/admin/crons`).
 
 ---
 
@@ -95,7 +95,7 @@ Endereço físico da sede (rua, número, bairro, cidade, UF, CEP): _____________
 
 Enquanto o operador colhe os dados acima, o engenheiro segue com os PRs que não dependem de inputs externos.
 
-**Status pós-PR-042 (2026-04-21):**
+**Status pós-PR-040 (2026-04-21):**
 
 - ✅ Concluídos:
   - Onda 1A (D-047): PR-024, PR-025, PR-026 (dark patterns + fail-fast CRON_SECRET)
@@ -110,10 +110,10 @@ Enquanto o operador colhe os dados acima, o engenheiro segue com os PRs que não
   - Onda 2F (D-056): **PR-037 (guardrails pra agentes de IA + blindagem `customers.name`)** — primitivas `prompt-envelope.ts` (wrapUserInput com nonce + formatStructuredFields), `prompt-redact.ts` (CPF/CEP/email/phone/UUID/Asaas token/JWT), `customer-display.ts` (displayFirstName/FullName/PlanName/CityState com fallback seguro); `fulfillment-messages.ts` refatorado pra usar os `display*` + helper `safeOpNote`; `/api/checkout` e `/api/agendar/reserve` agora rodam `sanitizeShortText` com pattern `personName`; migration `20260504000000` com backfill idempotente + CHECK em `customers.name` (char_length ≤ 120, POSIX `[[:cntrl:]]`); `AGENTS.md` no root do repo (contrato normativo lido pelos agentes). **76 testes novos. Fecha [9.2] e [9.4].**
   - PR-039 (D-057): **logger canônico estruturado + migração inicial** — `src/lib/logger.ts` zero-deps (JSON em prod, pretty em dev, silencioso em test, `redactForLog` automática via D-056, child loggers com contexto encadeável, sink pluggable). Migração dos caminhos críticos: `cron-runs`, `cron-auth`, `admin-audit-log`, `patient-access-log`, `retention`, `patient-lgpd-requests`, 8 rotas `/api/internal/cron/*`, `/api/asaas/webhook` (29 call-sites). **23 testes novos.** `AGENTS.md` atualizado com o pipeline de logging. **Finding [14.1] rebaixado de 🟠 ALTO pra 🟡 PARCIAL** — infra pronta; plugar drain externo (Axiom/Sentry) aguarda input operacional.
   - PR-042 (D-058): **`fetchWithTimeout` canônico + migração de fetches externos** — `src/lib/fetch-timeout.ts` zero-deps (drop-in replacement do `fetch()` com timeout por `AbortController`, `FetchTimeoutError` classificado, composição com AbortSignal externo, log via logger canônico D-057, `PROVIDER_TIMEOUTS` calibrados). Migrado em `asaas.ts::request` (10s), `whatsapp.ts::postToGraph` (8s), `video.ts::dailyRequest` (8s), `cep.ts::fetchViaCep` (2.5s), `system-health.ts::checkAsaasEnv/checkDailyEnv`. **12 testes novos.** **Finding [13.1] ✅ RESOLVED** — total de ALTOs cai de 6 pra 5.
+  - PR-040 (D-059): **dashboard temporal de `cron_runs` em `/admin/crons`** — `src/lib/cron-dashboard.ts` (IO isolado + agregação pura testável + orquestrador) com `CronJobSummary` trazendo `success_rate`, `duration.{avg,p50,p95,max}`, `week_delta.success_rate_delta_pp`, `stuck_count` (running ≥ 2h), `daily[30]` buckets UTC, `recent_runs[20]`. Page `src/app/admin/(shell)/crons/page.tsx` com range 7/30/90d, cards de resumo global, card por job com sparkline (divs zero-deps verde/vermelho), badge de estado, delta semana-vs-semana e `<details>` das últimas 20 execuções. `expectedJobs` injetado mantém crons de cadência baixa visíveis mesmo sem runs recentes. Nav "Crons" adicionado. **20 testes novos.** Sem finding associado (melhoria operacional). Próximo: alertar Slack/WA quando `stuck_count > 0` depende de PR-043.
 - 🔜 Próximos sem input:
   1. **PR-039-cont** — migração dos ~60 `console.*` remanescentes (libs especializadas, rotas admin individuais). Cosmético; não bloqueia.
-  2. **PR-040** — dashboard temporal de `cron_runs`.
-  3. **PR-033-Clinical** — retenção pós-20-anos para pacientes com prontuário (só relevante em 2045+).
+  2. **PR-033-Clinical** — retenção pós-20-anos para pacientes com prontuário (só relevante em 2045+).
 - ⏸️ Bloqueados por input operacional não-crítico:
   - **PR-043** — plugar drain externo no `logger` (`setSink(axiomSink)` + alertas Slack/WA). Precisa: chaves Axiom/Sentry + budget aprovado.
 - ⏸️ Bloqueados pelo operador: PR-023 (footer CNPJ/RT — **crítico, bloqueia tráfego pago**), PR-033-B (DPA farmácia), PR-038 (2FA), PR-047 (break-glass)
