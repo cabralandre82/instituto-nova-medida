@@ -15,6 +15,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { sendAdminDigest } from "@/lib/admin-digest";
+import { CIRCUIT_KEYS } from "@/lib/circuit-breaker";
+import { skipIfCircuitOpen } from "@/lib/cron-guard";
 import { startCronRun, finishCronRun } from "@/lib/cron-runs";
 import { assertCronRequest } from "@/lib/cron-auth";
 import { logger } from "@/lib/logger";
@@ -31,6 +33,24 @@ export async function GET(req: NextRequest) {
   const supabase = getSupabaseAdmin();
   const startedAtMs = Date.now();
   const runId = await startCronRun(supabase, "admin_digest");
+
+  // Se o breaker do WhatsApp está aberto (Meta caiu recente), não vale
+  // gastar uma function pra iterar a inbox e bater em erro. Skippa
+  // explicitamente — quando o cooldown passar, o próximo tick entra
+  // em HALF_OPEN e tenta a probe automaticamente.
+  const gate = await skipIfCircuitOpen(supabase, runId, {
+    circuitKey: CIRCUIT_KEYS.whatsapp,
+    jobName: "admin_digest",
+    startedAtMs,
+  });
+  if (gate.skipped) {
+    return NextResponse.json({
+      ok: true,
+      skipped: true,
+      reason: "whatsapp_circuit_open",
+      retry_at: gate.retryAt ? new Date(gate.retryAt).toISOString() : null,
+    });
+  }
 
   try {
     const report = await sendAdminDigest(supabase);

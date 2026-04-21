@@ -20,6 +20,11 @@
  */
 
 import {
+  CIRCUIT_KEYS,
+  CircuitOpenError,
+  getBreaker,
+} from "./circuit-breaker";
+import {
   FetchTimeoutError,
   fetchWithTimeout,
   PROVIDER_TIMEOUTS,
@@ -82,21 +87,36 @@ export type WhatsAppSendResult =
 async function postToGraph(payload: unknown): Promise<WhatsAppSendResult> {
   const { phoneNumberId, accessToken } = loadEnv();
   const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`;
+  const breaker = getBreaker(CIRCUIT_KEYS.whatsapp);
 
+  // Fail-fast: breaker OPEN = Meta indisponível há < cooldown. Cada
+  // retry agora consumiria 8s. Melhor retornar erro imediato e deixar
+  // o cron (admin-digest, notify-pending-documents etc.) pular o batch.
   let res: Response;
   try {
-    res = await fetchWithTimeout(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-      cache: "no-store",
-      timeoutMs: PROVIDER_TIMEOUTS.whatsapp,
-      provider: "whatsapp",
-    });
+    res = await breaker.execute(() =>
+      fetchWithTimeout(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        cache: "no-store",
+        timeoutMs: PROVIDER_TIMEOUTS.whatsapp,
+        provider: "whatsapp",
+      })
+    );
   } catch (err) {
+    if (err instanceof CircuitOpenError) {
+      return {
+        ok: false,
+        code: null,
+        message: `WhatsApp (Meta) indisponível (circuit breaker aberto até ${new Date(
+          err.retryAt
+        ).toISOString()}).`,
+      };
+    }
     if (err instanceof FetchTimeoutError) {
       return {
         ok: false,
@@ -116,6 +136,7 @@ async function postToGraph(payload: unknown): Promise<WhatsAppSendResult> {
   try {
     data = (await res.json()) as WhatsAppApiResponse;
   } catch {
+    breaker.recordFailure(`whatsapp_invalid_json:${res.status}`);
     return {
       ok: false,
       code: res.status,
@@ -124,6 +145,12 @@ async function postToGraph(payload: unknown): Promise<WhatsAppSendResult> {
   }
 
   if (!res.ok || data.error) {
+    // Meta >= 500 = platform-wide issue. 4xx geralmente é erro do
+    // nosso request (token expirado, template rejeitado, janela 24h
+    // fechada) — NÃO marca como falha do provider.
+    if (res.status >= 500) {
+      breaker.recordFailure(`whatsapp_http_${res.status}`);
+    }
     return {
       ok: false,
       code: data.error?.code ?? res.status,

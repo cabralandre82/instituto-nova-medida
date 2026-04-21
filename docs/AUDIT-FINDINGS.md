@@ -1576,12 +1576,12 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
 - **Resolução (PR-042 · D-058):** criado helper canônico `src/lib/fetch-timeout.ts` com `fetchWithTimeout(url, {timeoutMs, provider})`, `FetchTimeoutError` classificado, composição com `AbortSignal` externo, integração com logger canônico (D-057). Defaults `PROVIDER_TIMEOUTS = { asaas: 10s, daily: 8s, whatsapp: 8s, viacep: 2.5s }`. Migrado em `asaas.ts::request`, `whatsapp.ts::postToGraph`, `video.ts::dailyRequest`, `cep.ts::fetchViaCep`, `system-health.ts::checkAsaasEnv/checkDailyEnv`. 12 testes novos cobrindo happy path, timeout real, signal externo, erros de rede cru, log emitido.
 - **Observador:** SRE, paciente.
 
-### [13.2 🟠 ALTO] Sem circuit breaker / fallback se Asaas, Daily ou WA cair
+### [13.2 ✅ RESOLVED] Sem circuit breaker / fallback se Asaas, Daily ou WA cair
 
 - **Onde:** toda integração externa.
-- **Achado:** se Asaas está fora, cada tentativa de criação de payment falha. Sem backoff exponencial, sem "pausa automática de crons", sem alerta.
+- **Achado original:** se Asaas está fora, cada tentativa de criação de payment falha. Sem backoff exponencial, sem "pausa automática de crons", sem alerta.
 - **Risco:** cascading failure + inbox explodindo de erros.
-- **Correção:** (a) usar `opossum` ou implementar circuit breaker simples (Postgres `circuit_state` table); (b) quando breaker OPEN, cron skippa e grava `cron_runs.status='skipped'`; (c) alerta WA pro admin.
+- **Resolução (PR-050 · D-061 · 2026-04-20):** implementado `src/lib/circuit-breaker.ts` (zero deps, in-memory, 3 estados). Defaults: window 60s, threshold 50%, minThroughput 5, cooldown 30s. Integrado em 4 providers: Asaas (`asaas.ts::request`), WhatsApp (`whatsapp.ts::postToGraph`), Daily (`video.ts::dailyRequest`), ViaCEP (`cep.ts::fetchViaCep`). HTTP 5xx contabilizado como falha; 4xx NÃO marca (erro de request, não de provider). Cron skip: migration `20260505000000_cron_runs_skipped.sql` adiciona `'skipped'` ao CHECK, helpers `skipCronRun` + `skipIfCircuitOpen` integrados em `admin-digest`, `nudge-reconsulta`, `notify-pending-documents`. Observability: `system-health.ts::checkCircuitBreakers` expõe snapshot no `/admin/health`; `cron-dashboard.ts` ganha `skipped_count` + bucket `skipped`. 17 testes unitários + 953/953 suite total. Alerta proativo (item c original) fica com PR-050-C, depende de PR-043 (drain externo do logger).
 - **Observador:** SRE, admin solo.
 
 ### [13.3 🟡 MÉDIO] Supabase Auth outage derruba painel inteiro — sem fallback
@@ -1804,7 +1804,7 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
 | Severidade | Contagem | IDs |
 |---|---|---|
 | 🔴 CRÍTICO | **0** | — |
-| 🟠 ALTO | **4** | 12.1, 12.2, 13.2, 19.1, 20.1 (13.1 resolvido em PR-042 · D-058; 14.1 rebaixado pra 🟡 PARCIAL após PR-039 · D-057; 11.1 resolvido em PR-041 · D-060, incluindo fix CVE-2025-29927 CVSS 9.1) |
+| 🟠 ALTO | **3** | 12.1, 12.2, 19.1, 20.1 (13.1 resolvido em PR-042 · D-058; 13.2 resolvido em PR-050 · D-061; 14.1 rebaixado pra 🟡 PARCIAL após PR-039 · D-057; 11.1 resolvido em PR-041 · D-060, incluindo fix CVE-2025-29927 CVSS 9.1) |
 | 🟡 MÉDIO | **16** | 11.2, 11.3, 12.3, 12.4, 13.3, 14.2, 14.3, 15.1, 15.2, 15.3, 16.1, 16.2, 18.2, 18.3, 19.2, 19.3, 20.2, 21.1, 21.2, 21.3 |
 | 🟢 SEGURO | **8** | 11.4, 12.5, 13.4, 14.4, 15.4, 16.3, 19.4, 20.3, 21.4 |
 
@@ -1910,7 +1910,7 @@ Ordem recomendada de ataque (1 = primeiro):
 - 12.1 Agendamento não escala pra múltiplas médicas
 - 12.2 `monthly-payouts` single function não batchable
 - ~~13.1 Sem `AbortController` em fetch externos~~ ✅ RESOLVED (PR-042 · D-058): helper `src/lib/fetch-timeout.ts` com `FetchTimeoutError` classificado, composição com AbortSignal externo, timeouts por provider (Asaas 10s, Daily 8s, WhatsApp 8s, ViaCEP 2.5s). Migrado em 5 call-sites core.
-- 13.2 Sem circuit breaker
+- ~~13.2 Sem circuit breaker~~ ✅ RESOLVED (PR-050 · D-061): `src/lib/circuit-breaker.ts` in-memory 3-state, integrado em Asaas/WA/Daily/ViaCEP. Cron skip via migration `cron_runs.status='skipped'` + `skipIfCircuitOpen` em 3 crons WA. Health check no `/admin/health`. 17 testes.
 - ~~14.1 Zero Sentry/Datadog/Axiom~~ 🟡 PARCIAL (PR-039 + PR-039-cont · D-057): logger canônico `src/lib/logger.ts` + **migração in-tree 100% completa** (150+ call-sites em libs, rotas, webhooks, páginas server). Único `console.*` restante em `src/lib/logger.ts` (interno). Finalização pra ✅ RESOLVED depende de plugar drain externo (bloqueado por input operacional — chaves Axiom/Sentry + budget).
 - 19.1 Sem dashboard de custo
 - 20.1 Sem runbook DR

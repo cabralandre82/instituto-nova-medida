@@ -31,6 +31,7 @@ import { getReconciliationCounts } from "@/lib/reconciliation";
 import { listDoctorReliabilityOverview } from "@/lib/reliability";
 import { getLatestRun, type CronJob } from "@/lib/cron-runs";
 import { fetchWithTimeout, isFetchTimeout } from "@/lib/fetch-timeout";
+import { snapshotAllBreakers } from "@/lib/circuit-breaker";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Tipos
@@ -212,6 +213,12 @@ export async function runHealthCheck(
           CRON_RETENTION_WARN_DAYS * 24 * 60 * 60 * 1000,
           CRON_RETENTION_ERROR_DAYS * 24 * 60 * 60 * 1000
         ),
+      timeoutMs
+    ),
+    withTimeout(
+      "circuit_breakers",
+      "Circuit breakers (Asaas / WA / Daily / ViaCEP)",
+      checkCircuitBreakers,
       timeoutMs
     ),
   ]);
@@ -641,6 +648,69 @@ async function checkReliability(): Promise<
       in_soft_warn: softWarn,
     },
   };
+}
+
+/**
+ * Circuit breakers dos providers externos (PR-050 · D-061).
+ *
+ * Status:
+ *   - `ok`      : todos closed
+ *   - `warning` : algum half_open (recuperando) ou com algumas falhas recentes
+ *   - `error`   : algum open = provider degradado AGORA, crons dependentes
+ *                 estão sendo skipped
+ *
+ * Details lista cada breaker: estado, falhas recentes, quando a janela
+ * abre HALF_OPEN de novo. Usado pelo admin pra saber "por que o cron
+ * X não está rodando" sem precisar abrir logs do provider.
+ */
+async function checkCircuitBreakers(): Promise<
+  Omit<HealthCheck, "key" | "label" | "elapsedMs">
+> {
+  const snapshots = snapshotAllBreakers();
+
+  if (snapshots.length === 0) {
+    return {
+      status: "unknown",
+      summary:
+        "Nenhum breaker registrado ainda (nenhuma chamada externa nesta instância).",
+      details: { breakers: 0 },
+    };
+  }
+
+  const open = snapshots.filter((s) => s.state === "open");
+  const halfOpen = snapshots.filter((s) => s.state === "half_open");
+  const closed = snapshots.filter((s) => s.state === "closed");
+
+  let status: HealthStatus = "ok";
+  if (open.length > 0) status = "error";
+  else if (halfOpen.length > 0) status = "warning";
+
+  const summary =
+    open.length > 0
+      ? `${open.length} provider(s) indisponível(is): ${open
+          .map((s) => s.key)
+          .join(", ")}`
+      : halfOpen.length > 0
+      ? `${halfOpen.length} provider(s) recuperando: ${halfOpen
+          .map((s) => s.key)
+          .join(", ")}`
+      : `${closed.length} provider(s) operando normalmente.`;
+
+  const details: Record<string, string | number | boolean | null> = {
+    breakers: snapshots.length,
+    open: open.length,
+    half_open: halfOpen.length,
+    closed: closed.length,
+  };
+
+  for (const s of snapshots) {
+    details[`${s.key}_state`] = s.state;
+    details[`${s.key}_window_failures`] = s.windowFailures;
+    details[`${s.key}_lifetime_openings`] = s.lifetime.openings;
+    details[`${s.key}_retry_at`] = s.retryAt ? new Date(s.retryAt).toISOString() : null;
+  }
+
+  return { status, summary, details };
 }
 
 async function checkCronFreshness(

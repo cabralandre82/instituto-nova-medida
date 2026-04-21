@@ -42,7 +42,7 @@ const log = logger.with({ mod: "cron-dashboard" });
  */
 const STUCK_THRESHOLD_MS = 2 * 60 * 60 * 1000;
 
-export type CronRunStatus = "running" | "ok" | "error";
+export type CronRunStatus = "running" | "ok" | "error" | "skipped";
 
 /**
  * Linha bruta do `cron_runs` como retornada pela query. Mantemos
@@ -66,6 +66,8 @@ export type DailyBucket = {
   ok: number;
   error: number;
   running: number;
+  /** Runs que o cron decidiu pular (ex.: circuit breaker OPEN). PR-050. */
+  skipped: number;
 };
 
 export type DurationStats = {
@@ -103,6 +105,8 @@ export type CronJobSummary = {
   ok_count: number;
   error_count: number;
   running_count: number;
+  /** Runs 'skipped' (circuit breaker OPEN, etc.). Não contam em success_rate. */
+  skipped_count: number;
   /**
    * Runs em `running` há mais de STUCK_THRESHOLD_MS — sinal de handler
    * que crashou antes do `finishCronRun`.
@@ -142,6 +146,7 @@ export type CronDashboardReport = {
     ok_count: number;
     error_count: number;
     running_count: number;
+    skipped_count: number;
     stuck_count: number;
     success_rate: number | null;
     distinct_jobs: number;
@@ -248,6 +253,7 @@ export function buildCronDashboard(
     ok_count: jobs.reduce((s, j) => s + j.ok_count, 0),
     error_count: jobs.reduce((s, j) => s + j.error_count, 0),
     running_count: jobs.reduce((s, j) => s + j.running_count, 0),
+    skipped_count: jobs.reduce((s, j) => s + j.skipped_count, 0),
     stuck_count: jobs.reduce((s, j) => s + j.stuck_count, 0),
     success_rate: computeSuccessRate(
       jobs.reduce((s, j) => s + j.ok_count, 0),
@@ -272,10 +278,18 @@ function buildJobSummary(
   const ok_count = rows.filter((r) => r.status === "ok").length;
   const error_count = rows.filter((r) => r.status === "error").length;
   const running_count = rows.filter((r) => r.status === "running").length;
+  const skipped_count = rows.filter((r) => r.status === "skipped").length;
   const stuck_count = rows.filter((r) => isStuck(r, ctx.now)).length;
 
+  // Duração só faz sentido pra runs que executaram trabalho — ok ou
+  // error. 'skipped' tem duração ~0ms (decisão em <1ms), não é
+  // representativo da latência do job.
   const durations = rows
-    .filter((r) => r.status !== "running" && typeof r.duration_ms === "number")
+    .filter(
+      (r) =>
+        (r.status === "ok" || r.status === "error") &&
+        typeof r.duration_ms === "number"
+    )
     .map((r) => r.duration_ms as number)
     .sort((a, b) => a - b);
 
@@ -317,6 +331,7 @@ function buildJobSummary(
     ok_count,
     error_count,
     running_count,
+    skipped_count,
     stuck_count,
     success_rate: computeSuccessRate(ok_count, error_count),
     duration,
@@ -351,7 +366,14 @@ function buildDailyBuckets(
   for (let i = 0; i < ctx.windowDays; i++) {
     const d = startOfWindow + i * 86_400_000;
     const key = dateKey(d);
-    buckets.set(key, { date: key, total: 0, ok: 0, error: 0, running: 0 });
+    buckets.set(key, {
+      date: key,
+      total: 0,
+      ok: 0,
+      error: 0,
+      running: 0,
+      skipped: 0,
+    });
   }
 
   // Preenche.
@@ -362,6 +384,7 @@ function buildDailyBuckets(
     b.total += 1;
     if (r.status === "ok") b.ok += 1;
     else if (r.status === "error") b.error += 1;
+    else if (r.status === "skipped") b.skipped += 1;
     else b.running += 1;
   }
 

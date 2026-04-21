@@ -30,6 +30,11 @@
  */
 
 import {
+  CIRCUIT_KEYS,
+  CircuitOpenError,
+  getBreaker,
+} from "./circuit-breaker";
+import {
   FetchTimeoutError,
   fetchWithTimeout,
   PROVIDER_TIMEOUTS,
@@ -164,22 +169,38 @@ async function request<T>(
 ): Promise<AsaasResult<T>> {
   const cfg = loadConfig();
   const url = `${cfg.baseUrl}${path.startsWith("/") ? path : `/${path}`}`;
+  const breaker = getBreaker(CIRCUIT_KEYS.asaas);
 
+  // Fail-fast: se o breaker está OPEN, não gastamos 10s num timeout
+  // certo. Convertemos em result `{ok:false, code:"CIRCUIT_OPEN"}` pro
+  // caller (webhook/checkout/refund) decidir retry posterior.
   let res: Response;
   try {
-    res = await fetchWithTimeout(url, {
-      method,
-      headers: {
-        access_token: cfg.apiKey,
-        "Content-Type": "application/json",
-        "User-Agent": "InstitutoNovaMedida/1.0",
-      },
-      body: body ? JSON.stringify(body) : undefined,
-      cache: "no-store",
-      timeoutMs: PROVIDER_TIMEOUTS.asaas,
-      provider: "asaas",
-    });
+    res = await breaker.execute(() =>
+      fetchWithTimeout(url, {
+        method,
+        headers: {
+          access_token: cfg.apiKey,
+          "Content-Type": "application/json",
+          "User-Agent": "InstitutoNovaMedida/1.0",
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        cache: "no-store",
+        timeoutMs: PROVIDER_TIMEOUTS.asaas,
+        provider: "asaas",
+      })
+    );
   } catch (err) {
+    if (err instanceof CircuitOpenError) {
+      return {
+        ok: false,
+        status: null,
+        code: "CIRCUIT_OPEN",
+        message: `Asaas indisponível (circuit breaker aberto até ${new Date(
+          err.retryAt
+        ).toISOString()}).`,
+      };
+    }
     if (err instanceof FetchTimeoutError) {
       return {
         ok: false,
@@ -204,6 +225,9 @@ async function request<T>(
     try {
       json = JSON.parse(text);
     } catch {
+      // JSON malformado do Asaas é sinal de degradação — contabiliza
+      // como falha manualmente pra ajudar o breaker a abrir.
+      breaker.recordFailure(`asaas_invalid_json:${res.status}`);
       return {
         ok: false,
         status: res.status,
@@ -217,6 +241,12 @@ async function request<T>(
   if (!res.ok) {
     const errPayload = json as AsaasErrorResponse | null;
     const firstErr = errPayload?.errors?.[0];
+    // HTTP 5xx do Asaas = provider degradado. Marca como falha no
+    // breaker pra contagem. 4xx NÃO marca (é erro de request nosso —
+    // CPF inválido, customer inexistente — não vai melhorar com retry).
+    if (res.status >= 500) {
+      breaker.recordFailure(`asaas_http_${res.status}`);
+    }
     return {
       ok: false,
       status: res.status,

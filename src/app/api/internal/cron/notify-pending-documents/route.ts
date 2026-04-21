@@ -16,6 +16,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { notifyPendingDocuments } from "@/lib/notify-pending-documents";
+import { CIRCUIT_KEYS } from "@/lib/circuit-breaker";
+import { skipIfCircuitOpen } from "@/lib/cron-guard";
 import { startCronRun, finishCronRun } from "@/lib/cron-runs";
 import { assertCronRequest } from "@/lib/cron-auth";
 import { logger } from "@/lib/logger";
@@ -32,6 +34,20 @@ export async function GET(req: NextRequest) {
   const supabase = getSupabaseAdmin();
   const startedAtMs = Date.now();
   const runId = await startCronRun(supabase, "notify_pending_documents");
+
+  const gate = await skipIfCircuitOpen(supabase, runId, {
+    circuitKey: CIRCUIT_KEYS.whatsapp,
+    jobName: "notify_pending_documents",
+    startedAtMs,
+  });
+  if (gate.skipped) {
+    return NextResponse.json({
+      ok: true,
+      skipped: true,
+      reason: "whatsapp_circuit_open",
+      retry_at: gate.retryAt ? new Date(gate.retryAt).toISOString() : null,
+    });
+  }
 
   try {
     const report = await notifyPendingDocuments(supabase);

@@ -448,7 +448,7 @@ function Sparkline({ daily }: { daily: DailyBucket[] }) {
               key={d.date}
               className="flex-1 min-w-[3px] flex flex-col-reverse"
               style={{ height: `${heightPct}%` }}
-              title={`${d.date}: ${d.ok} ok, ${d.error} erro, ${d.running} em execução`}
+              title={`${d.date}: ${d.ok} ok, ${d.error} erro, ${d.running} em execução${d.skipped ? `, ${d.skipped} skipped` : ""}`}
             >
               {total > 0 ? (
                 <>
@@ -494,6 +494,13 @@ function StatusChip({ status }: { status: CronRunStatus }) {
     return (
       <span className="inline-flex items-center text-xs font-medium px-2 py-0.5 rounded-full bg-terracotta-100 text-terracotta-800 border border-terracotta-300">
         erro
+      </span>
+    );
+  }
+  if (status === "skipped") {
+    return (
+      <span className="inline-flex items-center text-xs font-medium px-2 py-0.5 rounded-full bg-ink-100 text-ink-700 border border-ink-300">
+        skipped
       </span>
     );
   }

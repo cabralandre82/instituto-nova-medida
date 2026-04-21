@@ -5,6 +5,95 @@
 
 ---
 
+## D-061 · Circuit breaker in-memory pra providers externos (finding 13.2) · 2026-04-20
+
+**Contexto.** Finding [13.2 🟠 ALTO] do audit: quando um provider externo (Asaas, Daily, WhatsApp Meta, ViaCEP) degrada, cada chamada ainda roda `fetchWithTimeout` até o fim (2.5–10s). O cascading é concreto:
+
+- Webhook Asaas dispara 3 requests à API Asaas → se Asaas tá lento, a function Vercel queima 30s (= `maxDuration` no hobby tier) e os retries do Asaas duplicam eventos.
+- Cron `admin-digest` envia ~20 WhatsApp → Meta offline = 20 × 8s = 160s, excede a janela do Vercel Cron e o cron marca como erro.
+- Paciente digita CEP no checkout → ViaCEP fora = 2.5s de espera por request + nenhum autocomplete.
+
+Também bloqueia o observability: sem breaker, não tem como um dashboard (ou o admin solo) ver "provider X tá indisponível AGORA" sem cavar logs.
+
+**Decisão.** Implementar um circuit breaker canônico `src/lib/circuit-breaker.ts` com os 3 estados clássicos (CLOSED / OPEN / HALF_OPEN), in-memory, zero dependências externas, com rolling window por tempo (não por contagem de chamadas).
+
+Defaults calibrados pra APIs externas com latência humana:
+
+```
+windowMs:          60_000   (1 min de janela rolante)
+failureThreshold:  0.5      (50% de falhas na janela)
+minThroughput:     5        (não abre com 1-2 amostras)
+cooldownMs:        30_000   (30s em OPEN antes de probar)
+```
+
+Integrado em 4 providers: Asaas (`asaas.ts::request`), WhatsApp (`whatsapp.ts::postToGraph`), Daily (`video.ts::dailyRequest`), ViaCEP (`cep.ts::fetchViaCep`). Cada um:
+
+1. Envolve o `fetchWithTimeout` com `breaker.execute(fn)`. Exceções automáticas → falhas contabilizadas.
+2. Classifica HTTP 5xx como falha manual (`breaker.recordFailure()`). 4xx NÃO marca — é erro do nosso request, não do provider.
+3. Traduz `CircuitOpenError` pro union-type de cada provider (`{ok:false, code:"CIRCUIT_OPEN"}` ou equivalente).
+
+**Por que in-memory e não Postgres.**
+
+O audit sugeria tabela `circuit_state` compartilhada. Rejeitado:
+
+- Cada call de provider gastaria 1 roundtrip Supabase (~20–50ms) só pra ler estado — já é metade do que queremos economizar.
+- Escrever o estado a cada falha/sucesso adiciona mais 1 roundtrip.
+- Serverless frio tem ~2–5 containers simultâneos em carga normal do MVP. Perder 5 probes independentes (pior caso) NÃO é catastrófico pra escala atual.
+- Operação solo com 1 médica. Escala que justificaria Postgres compartilhado é PR-046 (multi-médica).
+
+Trade-off documentado aqui explicitamente. Migrar pra Postgres quando for hora fica como gancho: a interface do `CircuitBreaker` não muda, só a implementação interna do registry.
+
+**Cron skipping.**
+
+Quando o breaker de um provider tá OPEN, os crons que *só* dependem desse provider devem pular a execução em vez de iterar e bater em erro. Adicionado:
+
+- Migration `20260505000000_cron_runs_skipped.sql`: adiciona `'skipped'` ao CHECK de `cron_runs.status`.
+- `src/lib/cron-runs.ts::skipCronRun(supabase, runId, {reason, details})` — fecha o run com status `'skipped'` e payload estruturado.
+- `src/lib/cron-guard.ts::skipIfCircuitOpen(...)` — guard centralizado que os crons WA usam.
+
+Integrado nos 3 crons 100% WhatsApp-dependentes:
+- `admin-digest`
+- `nudge-reconsulta`
+- `notify-pending-documents`
+
+NÃO integrado em `auto-deliver-fulfillments` (trabalho principal é transição SQL de fulfillment; WA é best-effort — o fail-fast do breaker já protege cada envio individualmente) nem em `wa-reminders` (não usa `cron_runs`, roda a cada 1 minuto e se beneficia só do fail-fast do breaker).
+
+**Observabilidade.**
+
+- `system-health.ts` ganha check `circuit_breakers` — status `error` se algum OPEN, `warning` se algum HALF_OPEN, `ok` se todos CLOSED. Details incluem contadores lifetime e `retry_at` por breaker.
+- `cron-dashboard.ts` ganha `skipped_count` por job e campo `skipped` por bucket diário (separados do `ok`/`error` pra não poluir success_rate).
+- `/admin/crons` mostra chip `skipped` (tom neutro — não é erro).
+
+**Alternativas descartadas.**
+
+- `opossum` (lib popular Node pra circuit breaker): +1 dependência npm, API orientada a comandos "wrap this function" (menos ergonomia pro padrão `execute(fn)` que já usamos) e traz recursos que não precisamos (bulkhead, retries internos, percentis). Rolar por conta cabe em ~300 linhas testadas, zero dep.
+- Breaker em Postgres `circuit_state`: rejeitado acima (custo de roundtrip, sobre-engineering pra escala atual).
+- Breaker *no nível do `fetchWithTimeout`* (global, não-por-provider): errado — um provider degradado contamina os outros. Breaker precisa ser isolado por chave.
+
+**Consequências.**
+
+- Latência percebida em degradação cai de 10s → <1ms (fail-fast).
+- Em vez de cascading failure, o admin vê imediatamente no `/admin/health` qual provider tá fora.
+- Crons WA pulam silenciosamente enquanto Meta tá offline — recuperam sozinhos no próximo tick (cooldown expira → HALF_OPEN probe → se passar, CLOSED).
+- Zero falso positivo em degradação: threshold 50% com minThroughput 5 significa que 2 falhas em 3 não abrem — precisa volume real de falha.
+- `snapshotAllBreakers()` dá visibilidade por-container mas não cross-container. Para um admin solo rodando em Vercel (1-5 containers ativos), aceitável — uma inbox WA alerta quando *qualquer* container registra abertura (via logger structured).
+
+**Validação.**
+
+- `src/lib/circuit-breaker.test.ts`: 17 testes cobrindo estados, transições, janela rolante, concurrent probe rejection, registry global.
+- `npx tsc --noEmit`: 0 erros.
+- `npx vitest run`: 953/953 testes (17 novos + 936 anteriores).
+- `npx eslint`: 0 warnings.
+- Migration aplicada no Supabase remoto: `supabase db push` OK.
+
+**Follow-ups (PRs futuros).**
+
+- `PR-050-B` · integração Asaas-dependent crons: hoje nenhum cron depende *só* de Asaas (monthly-payouts vai depender quando implementarmos PIX out em D-041). Quando chegar, usar `skipIfCircuitOpen({circuitKey: "asaas"})`.
+- `PR-050-C` · alerta proativo WhatsApp/Slack no evento "circuit opened" (dispara 1x, não spam). Usa o logger drain externo de PR-043.
+- `PR-043` · plugar logger em Axiom/Sentry (já pendente): aí o log estruturado `circuit opened` vira alerta no Sentry.
+
+---
+
 ## D-060 · Bump Next 14.2.18 → 14.2.35 (fecha CVE-2025-29927 CVSS 9.1 e finding 11.1) · 2026-04-20
 
 **Contexto.** O audit de abril (Lente 11 / Performance) já tinha flagado `package.json` travado em `next@14.2.18` como 🟠 ALTO, motivado pelo próprio runtime do Next avisando "is outdated". A motivação inicial era cosmética + patches acumulados de bug/perf — nada aparentemente bloqueador.

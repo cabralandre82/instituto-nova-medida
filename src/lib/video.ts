@@ -23,6 +23,11 @@
  */
 
 import {
+  CIRCUIT_KEYS,
+  CircuitOpenError,
+  getBreaker,
+} from "./circuit-breaker";
+import {
   FetchTimeoutError,
   fetchWithTimeout,
   PROVIDER_TIMEOUTS,
@@ -309,20 +314,36 @@ async function dailyRequest<T>(
   path: string,
   body?: unknown
 ): Promise<{ ok: true; data: T } | { ok: false; status: number; error: string }> {
+  const breaker = getBreaker(CIRCUIT_KEYS.daily);
+
+  // Fail-fast: Daily indisponível → agendamento falha em < 1ms em vez
+  // de 8s. O form do /agendar mostra erro imediato e o paciente tenta
+  // de novo em 30s (quando o cooldown expira e abre 1 probe).
   let res: Response;
   try {
-    res = await fetchWithTimeout(`${DAILY_API_BASE}${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        ...(body ? { "Content-Type": "application/json" } : {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
-      cache: "no-store",
-      timeoutMs: PROVIDER_TIMEOUTS.daily,
-      provider: "daily",
-    });
+    res = await breaker.execute(() =>
+      fetchWithTimeout(`${DAILY_API_BASE}${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          ...(body ? { "Content-Type": "application/json" } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        cache: "no-store",
+        timeoutMs: PROVIDER_TIMEOUTS.daily,
+        provider: "daily",
+      })
+    );
   } catch (e) {
+    if (e instanceof CircuitOpenError) {
+      return {
+        ok: false,
+        status: 0,
+        error: `[daily] circuit_open — indisponível até ${new Date(
+          e.retryAt
+        ).toISOString()}`,
+      };
+    }
     if (e instanceof FetchTimeoutError) {
       return {
         ok: false,
@@ -335,12 +356,18 @@ async function dailyRequest<T>(
 
   const text = await res.text();
   if (!res.ok) {
+    // 5xx da Daily = platform down. 4xx = erro nosso (sala inexistente,
+    // token vencido) e NÃO marca.
+    if (res.status >= 500) {
+      breaker.recordFailure(`daily_http_${res.status}`);
+    }
     return { ok: false, status: res.status, error: text || res.statusText };
   }
 
   try {
     return { ok: true, data: JSON.parse(text) as T };
   } catch {
+    breaker.recordFailure(`daily_invalid_json:${res.status}`);
     return { ok: false, status: res.status, error: `[daily] resposta não-JSON: ${text.slice(0, 200)}` };
   }
 }

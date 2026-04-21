@@ -26,6 +26,11 @@
  */
 
 import {
+  CIRCUIT_KEYS,
+  CircuitOpenError,
+  getBreaker,
+} from "./circuit-breaker";
+import {
   FetchTimeoutError,
   fetchWithTimeout,
   PROVIDER_TIMEOUTS,
@@ -117,16 +122,30 @@ export async function fetchViaCep(
   }
 
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const breaker = getBreaker(CIRCUIT_KEYS.viacep);
 
+  // Fail-fast: ViaCEP fora do ar é frequente (é um serviço gov
+  // não-crítico). Sem breaker, cada CEP digitado no checkout trava
+  // 2.5s. Com breaker, após 5 falhas em 1min, autocompleta vira
+  // instantâneo (o paciente digita manualmente rua/bairro).
   let res: Response;
   try {
-    res = await fetchWithTimeout(`${VIACEP_BASE}/${cep}/json/`, {
-      headers: { Accept: "application/json" },
-      timeoutMs,
-      provider: "viacep",
-      fetchImpl: opts.fetchImpl,
-    });
+    res = await breaker.execute(() =>
+      fetchWithTimeout(`${VIACEP_BASE}/${cep}/json/`, {
+        headers: { Accept: "application/json" },
+        timeoutMs,
+        provider: "viacep",
+        fetchImpl: opts.fetchImpl,
+      })
+    );
   } catch (err) {
+    if (err instanceof CircuitOpenError) {
+      return {
+        ok: false,
+        code: "network_error",
+        message: "ViaCEP temporariamente indisponível — digite o endereço manualmente.",
+      };
+    }
     if (err instanceof FetchTimeoutError) {
       return {
         ok: false,
@@ -142,6 +161,9 @@ export async function fetchViaCep(
   }
 
   if (!res.ok) {
+    if (res.status >= 500) {
+      breaker.recordFailure(`viacep_http_${res.status}`);
+    }
     return {
       ok: false,
       code: "network_error",
@@ -153,6 +175,7 @@ export async function fetchViaCep(
   try {
     raw_body = await res.json();
   } catch {
+    breaker.recordFailure(`viacep_invalid_json:${res.status}`);
     return {
       ok: false,
       code: "invalid_response",

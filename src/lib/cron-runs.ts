@@ -45,7 +45,7 @@ export async function finishCronRun(
   supabase: SupabaseClient,
   id: string | null,
   params: {
-    status: "ok" | "error";
+    status: "ok" | "error" | "skipped";
     payload?: Record<string, unknown>;
     errorMessage?: string;
     startedAtMs?: number;
@@ -69,6 +69,36 @@ export async function finishCronRun(
   if (error) {
     log.warn("finish falhou", { run_id: id, error: error.message });
   }
+}
+
+/**
+ * Fecha o run como 'skipped' — usado quando o cron decide não executar
+ * (ex.: circuit breaker do provider externo está OPEN). Grava `payload`
+ * com o motivo pra auditoria no dashboard `/admin/crons`.
+ *
+ * Chame DEPOIS de `startCronRun` — mantém a simetria start/finish e
+ * registra duração zero (~ms). Não é erro: dashboard e system-health
+ * não alertam sobre skipped.
+ *
+ * PR-050 · D-061.
+ */
+export async function skipCronRun(
+  supabase: SupabaseClient,
+  id: string | null,
+  params: {
+    reason: string;
+    details?: Record<string, unknown>;
+    startedAtMs?: number;
+  }
+): Promise<void> {
+  return finishCronRun(supabase, id, {
+    status: "skipped",
+    payload: {
+      skip_reason: params.reason,
+      ...(params.details ?? {}),
+    },
+    startedAtMs: params.startedAtMs,
+  });
 }
 
 /**
@@ -114,7 +144,7 @@ export async function getLatestRun(
   job: CronJob
 ): Promise<{
   id: string;
-  status: "running" | "ok" | "error";
+  status: "running" | "ok" | "error" | "skipped";
   started_at: string;
   finished_at: string | null;
   duration_ms: number | null;
@@ -136,7 +166,7 @@ export async function getLatestRun(
   }
   return (data as {
     id: string;
-    status: "running" | "ok" | "error";
+    status: "running" | "ok" | "error" | "skipped";
     started_at: string;
     finished_at: string | null;
     duration_ms: number | null;
