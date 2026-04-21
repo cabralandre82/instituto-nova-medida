@@ -29,6 +29,12 @@
  * Docs oficiais: https://docs.asaas.com/reference/comece-por-aqui
  */
 
+import {
+  FetchTimeoutError,
+  fetchWithTimeout,
+  PROVIDER_TIMEOUTS,
+} from "./fetch-timeout";
+
 const SANDBOX_BASE = "https://sandbox.asaas.com/api/v3";
 const PRODUCTION_BASE = "https://api.asaas.com/v3";
 
@@ -161,7 +167,7 @@ async function request<T>(
 
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetchWithTimeout(url, {
       method,
       headers: {
         access_token: cfg.apiKey,
@@ -170,8 +176,18 @@ async function request<T>(
       },
       body: body ? JSON.stringify(body) : undefined,
       cache: "no-store",
+      timeoutMs: PROVIDER_TIMEOUTS.asaas,
+      provider: "asaas",
     });
   } catch (err) {
+    if (err instanceof FetchTimeoutError) {
+      return {
+        ok: false,
+        status: null,
+        code: "TIMEOUT",
+        message: `Asaas API não respondeu em ${err.timeoutMs}ms.`,
+      };
+    }
     return {
       ok: false,
       status: null,

@@ -122,6 +122,62 @@ delete process.env.LOGGER_ENABLED;
 
 ---
 
+## 3-bis. Pipeline obrigatório de fetch externo
+
+Toda chamada HTTP **server-side** para provedor externo (Asaas, Daily, WhatsApp Graph, ViaCEP, Supabase-Auth admin-SMTP, etc.) **DEVE** passar por `src/lib/fetch-timeout.ts::fetchWithTimeout` — não use `fetch()` cru.
+
+Por quê:
+- Uma function Node.js do Vercel tem `maxDuration` limitada (10s Hobby / 60s Pro). Um provider lento trava a function até o limite da plataforma e dispara retries duplicados do provider.
+- O helper aplica timeout (`AbortController`), classifica o erro (`FetchTimeoutError`) e emite `logger.warn("fetch timeout", {provider, url, timeout_ms})` automaticamente — correlacionável no drain.
+
+Padrão canônico:
+
+```ts
+import {
+  FetchTimeoutError,
+  fetchWithTimeout,
+  PROVIDER_TIMEOUTS,
+} from "@/lib/fetch-timeout";
+
+try {
+  const res = await fetchWithTimeout(url, {
+    method: "POST",
+    headers: { ... },
+    body: JSON.stringify(payload),
+    timeoutMs: PROVIDER_TIMEOUTS.asaas,
+    provider: "asaas",
+  });
+  // ... parse / handle ...
+} catch (err) {
+  if (err instanceof FetchTimeoutError) {
+    // timeout tipado — degradar pra erro de negócio específico
+  } else {
+    // DNS, TLS, ECONNREFUSED, TypeError("fetch failed") — tratar genérico
+  }
+}
+```
+
+Defaults já calibrados em `PROVIDER_TIMEOUTS`:
+- `asaas: 10s`
+- `daily: 8s`
+- `whatsapp: 8s`
+- `viacep: 2.5s`
+- `default: 8s`
+
+Quando introduzir novo provider externo, adicione a chave em `PROVIDER_TIMEOUTS` (centraliza ajustes operacionais) e use `provider: "<nome>"` na chamada.
+
+Exceções:
+- **Client-side** (`"use client"` ou hooks em `.tsx`) pode usar `fetch()` cru — rodam no browser, não consomem function time.
+- **Testes** podem injetar `fetchImpl` pra simular latência/erros.
+
+Referências:
+- `src/lib/fetch-timeout.ts` (helper + tipos + defaults)
+- `src/lib/fetch-timeout.test.ts` (12 casos — happy path, timeout, signal externo, erros de rede, log emitido)
+- `src/lib/asaas.ts::request`, `src/lib/whatsapp.ts::postToGraph`, `src/lib/video.ts::dailyRequest`, `src/lib/cep.ts::fetchViaCep`, `src/lib/system-health.ts::checkAsaasEnv` — exemplos de migração
+- `docs/DECISIONS.md` D-058 · `docs/AUDIT-FINDINGS.md` finding 13.1 (resolved)
+
+---
+
 ## 4. Banco de dados: permissões e auditoria
 
 - **`service_role`** é usado só no backend (`getSupabaseAdmin`). Nunca

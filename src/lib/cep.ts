@@ -25,8 +25,14 @@
  * rate-limit e contexto HTTP.
  */
 
+import {
+  FetchTimeoutError,
+  fetchWithTimeout,
+  PROVIDER_TIMEOUTS,
+} from "./fetch-timeout";
+
 const VIACEP_BASE = "https://viacep.com.br/ws";
-const DEFAULT_TIMEOUT_MS = 2500;
+const DEFAULT_TIMEOUT_MS = PROVIDER_TIMEOUTS.viacep;
 
 /** Limites conservadores. Nenhum endereço real legítimo excede esses. */
 const LIMITS = {
@@ -110,20 +116,18 @@ export async function fetchViaCep(
     };
   }
 
-  const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   let res: Response;
   try {
-    res = await fetchImpl(`${VIACEP_BASE}/${cep}/json/`, {
-      signal: controller.signal,
+    res = await fetchWithTimeout(`${VIACEP_BASE}/${cep}/json/`, {
       headers: { Accept: "application/json" },
+      timeoutMs,
+      provider: "viacep",
+      fetchImpl: opts.fetchImpl,
     });
   } catch (err) {
-    const name = (err as Error)?.name ?? "";
-    if (name === "AbortError") {
+    if (err instanceof FetchTimeoutError) {
       return {
         ok: false,
         code: "timeout",
@@ -135,8 +139,6 @@ export async function fetchViaCep(
       code: "network_error",
       message: "Falha ao consultar o serviço de CEP.",
     };
-  } finally {
-    clearTimeout(timer);
   }
 
   if (!res.ok) {

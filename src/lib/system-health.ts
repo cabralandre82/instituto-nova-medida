@@ -30,6 +30,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { getReconciliationCounts } from "@/lib/reconciliation";
 import { listDoctorReliabilityOverview } from "@/lib/reliability";
 import { getLatestRun, type CronJob } from "@/lib/cron-runs";
+import { fetchWithTimeout, isFetchTimeout } from "@/lib/fetch-timeout";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Tipos
@@ -286,13 +287,11 @@ async function checkAsaasEnv(
       : "https://sandbox.asaas.com/api/v3";
 
   try {
-    const ctrl = new AbortController();
-    const tid = setTimeout(() => ctrl.abort(), timeoutMs);
-    const res = await fetch(`${baseUrl}/customers?limit=1`, {
+    const res = await fetchWithTimeout(`${baseUrl}/customers?limit=1`, {
       headers: { access_token: apiKey! },
-      signal: ctrl.signal,
+      timeoutMs,
+      provider: "asaas",
     });
-    clearTimeout(tid);
 
     if (!res.ok) {
       return {
@@ -309,7 +308,9 @@ async function checkAsaasEnv(
   } catch (err) {
     return {
       status: "error",
-      summary: `Ping Asaas falhou: ${errMsg(err)}`,
+      summary: isFetchTimeout(err)
+        ? `Ping Asaas timeout (${err.timeoutMs}ms)`
+        : `Ping Asaas falhou: ${errMsg(err)}`,
       details: { env, pinged: true, error: errMsg(err) },
     };
   }
@@ -409,13 +410,14 @@ async function checkDailyEnv(
   }
 
   try {
-    const ctrl = new AbortController();
-    const tid = setTimeout(() => ctrl.abort(), timeoutMs);
-    const res = await fetch("https://api.daily.co/v1/rooms?limit=1", {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: ctrl.signal,
-    });
-    clearTimeout(tid);
+    const res = await fetchWithTimeout(
+      "https://api.daily.co/v1/rooms?limit=1",
+      {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        timeoutMs,
+        provider: "daily",
+      }
+    );
 
     if (!res.ok) {
       return {
@@ -432,7 +434,9 @@ async function checkDailyEnv(
   } catch (err) {
     return {
       status: "error",
-      summary: `Ping Daily falhou: ${errMsg(err)}`,
+      summary: isFetchTimeout(err)
+        ? `Ping Daily timeout (${err.timeoutMs}ms)`
+        : `Ping Daily falhou: ${errMsg(err)}`,
       details: { domain: domain!, pinged: true, error: errMsg(err) },
     };
   }

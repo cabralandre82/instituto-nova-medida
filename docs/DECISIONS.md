@@ -5,6 +5,55 @@
 
 ---
 
+## D-058 · `fetchWithTimeout` canônico + migração de fetches externos (fecha finding 13.1) · 2026-04-21
+
+**Contexto.** A auditoria profunda registrou **[13.1 🟠 ALTO] "Nenhum `AbortController` / `signal` em fetch externos — stuck request trava função inteira"**. Três dos quatro principais clientes de provedores externos (`src/lib/asaas.ts::request`, `src/lib/whatsapp.ts::postToGraph`, `src/lib/video.ts::dailyRequest`) chamavam `fetch()` cru, sem timeout. O quarto (`src/lib/cep.ts::fetchViaCep`) tinha `AbortController` inline, mas duplicado também em `src/lib/system-health.ts` de forma inconsistente.
+
+Três cenários de falha com impacto em produção:
+
+1. **Vercel function burn.** Uma function Node.js do Vercel tem `maxDuration` limitada (10s no plano Hobby, 60s no Pro). Se o Asaas responde em 30s por qualquer razão (instabilidade, latência de rede, DNS), o webhook `/api/asaas/webhook` fica preso. O handler faz 3-4 lookups HTTP em sequência (`getPayment`, `refundPayment`, Daily reconcile) — basta um desses fetches travar pra consumir toda a maxDuration.
+2. **Retries duplicados do provider.** Asaas e Daily têm políticas de retry agressivas em webhooks (5+ tentativas em backoff exponencial). Um handler que trava por timeout da plataforma retorna erro 504 ao provider, que retenta o mesmo evento, multiplicando o problema pela idempotência só-parcial do nosso lado.
+3. **Cascata em cron.** Crons como `auto-deliver-fulfillments` e `admin-digest` fazem dezenas de chamadas externas em sequência. Um único fetch lento pode travar o cron inteiro, atrasando crons posteriores do mesmo schedule e falseando `system-health.ts::checkCronFreshness`.
+
+**Decisão.** Implementar helper canônico `src/lib/fetch-timeout.ts` (zero-deps) e migrar os 5 call-sites server-side que falam com provedores externos. Timeouts padrão por provider, erro classificado (`FetchTimeoutError`) e log estruturado integrado.
+
+### Primitiva — `src/lib/fetch-timeout.ts`
+
+- **`fetchWithTimeout(url, opts)`.** Drop-in replacement do `fetch()` global. Aceita todo `RequestInit` + `timeoutMs` + `provider` (tag) + `fetchImpl` (injetável pra testes).
+- **Erro classificado.** Se o nosso timer aborta, lança `FetchTimeoutError` com `url`, `timeoutMs` e `provider`. Outros erros (DNS, TLS, ECONNREFUSED, `TypeError: fetch failed`) passam cru. `isFetchTimeout(err)` pra discriminação ergonômica no caller.
+- **Composição com `AbortSignal` externo.** Se o caller passa seu próprio `signal` (ex.: cancel do usuário ou timeout mais agressivo), o helper encadeia — qualquer um dos dois aborta o fetch. Signal externo já abortado na entrada: lança `AbortError` nativo (não timeout).
+- **Log via `logger` canônico (D-057).** Em timeout, emite `logger.warn("fetch timeout", {provider, url, timeout_ms})`. Automaticamente estruturado + PII-redacted + drenável pro sink (futuro Axiom).
+- **Defaults calibrados.** `PROVIDER_TIMEOUTS = { asaas: 10s, daily: 8s, whatsapp: 8s, viacep: 2.5s, default: 8s }`. Centraliza política — Black Friday no Asaas, só mexer aqui.
+- **Cleanup garantido.** `clearTimeout` e `removeEventListener` em `finally`, sem leak de timer mesmo no caminho feliz.
+
+### Migração (5 call-sites)
+
+| Arquivo | Função | Timeout aplicado | Comportamento |
+|---|---|---|---|
+| `src/lib/asaas.ts` | `request()` (core HTTP) | 10s | Timeout vira `AsaasResult { ok: false, code: "TIMEOUT" }`. |
+| `src/lib/whatsapp.ts` | `postToGraph()` | 8s | Timeout vira `WhatsAppSendResult { ok: false, code: null, message }`. |
+| `src/lib/video.ts` | `dailyRequest()` | 8s | Timeout vira `{ ok: false, status: 0, error: "[daily] timeout ..." }`. |
+| `src/lib/cep.ts` | `fetchViaCep()` | 2.5s | Mantém semântica antiga (`{ ok: false, code: "timeout" }`). |
+| `src/lib/system-health.ts` | `checkAsaasEnv` / `checkDailyEnv` | 5-6s | Status `error` com mensagem "Ping X timeout (Nms)". |
+
+Por que **lança exceção** em vez de retornar union (`{ok, res}`): os 4 wrappers já fazem `try/catch` em torno do `fetch()` e convertem exceção no seu próprio union tipado. Drop-in compatibility — zero reescrita de semântica dos wrappers.
+
+### Design trade-offs
+
+- **Sem retries no helper.** Cada provider tem política distinta: Asaas é idempotente por `externalReference`, Daily não (duplicaria meeting tokens), Meta tem rate-limit específico. Retry fica no caller. Overengineering centralizá-lo aqui.
+- **Sem circuit breaker.** Ainda não há escala justificando — volume atual < 10 req/s. Finding **[13.2]** continua aberto. Quando reabrir, o helper é o ponto natural de extensão (composição com state map por host).
+- **Timeouts generosos (8-10s).** Escolhidos pra absorver P95 real dos providers observado em dev sem disparar falso-positivo. Ajustar por observabilidade (PR-043 quando Axiom/Sentry entrar) — não por chute.
+- **Não migramos chamadas client-side.** Componentes `src/app/.../(shell)/*.tsx` que chamam `fetch('/api/...')` pro próprio backend ficam de fora: rodam no browser, não consomem function time do Vercel. Escopo do finding 13.1 é **outbound server-side**.
+
+### Consequências
+
+- Qualquer nova integração externa DEVE usar `fetchWithTimeout` — `AGENTS.md` atualizado.
+- Finding **[13.1]** sai de 🟠 ALTO pra **✅ RESOLVED**. Total de ALTOs cai de 6 pra 5.
+- Testes: `src/lib/fetch-timeout.test.ts` com 12 casos (happy path, timeout real, erro classificado, signal externo antes/durante, erros de rede cru, log emitido, defaults). `src/lib/cep.test.ts` ajustado de "AbortError vira timeout" (simulava com fetchImpl lançando AbortError) pra simular timeout real com `timeoutMs: 20` + fetchImpl que honra o signal.
+- Base pronta pra PR futuro de circuit breaker (13.2) e pra instrumentação com métricas (P95/P99 por provider) sem mexer no call-site.
+
+---
+
 ## D-057 · Logger canônico estruturado + migração de caminhos críticos (endereça finding 14.1) · 2026-04-20
 
 **Contexto.** A auditoria profunda tinha como finding **[14.1 🟡 MÉDIO] "Logs dispersos em `console.log/warn/error`, sem correlação, sem redação de PII."**. Mais de 80 arquivos usavam `console.*` com prefixos artesanais tipo `[cron/auto-deliver-fulfillments]`, formato inconsistente (ora string, ora objeto, ora JSON.stringify manual), sem campos estruturados, sem redação. Em produção, qualquer log que vazasse CPF/email/phone ia cru pro drain do Vercel — problema direto de LGPD Art. 6º (minimização) + Art. 46 (segurança técnica).

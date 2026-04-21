@@ -250,13 +250,23 @@ describe("fetchViaCep — I/O", () => {
     if (!res.ok) expect(res.code).toBe("invalid_response");
   });
 
-  it("AbortError vira timeout", async () => {
-    const fetchImpl = vi.fn(async () => {
-      const e = new Error("aborted");
-      e.name = "AbortError";
-      throw e;
+  it("timeout real (fetch excede timeoutMs) vira code: timeout", async () => {
+    // Simula ViaCEP lento: fetchImpl que honra o AbortSignal vindo do
+    // helper mas normalmente demoraria 500ms pra resolver.
+    const fetchImpl = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
+      return new Promise<Response>((resolve, reject) => {
+        const t = setTimeout(
+          () => resolve(new Response("{}", { status: 200 })),
+          500
+        );
+        init?.signal?.addEventListener("abort", () => {
+          clearTimeout(t);
+          reject(new DOMException("Aborted", "AbortError"));
+        });
+      });
     });
     const res = await fetchViaCep("01310100", {
+      timeoutMs: 20,
       fetchImpl: fetchImpl as never,
     });
     expect(res.ok).toBe(false);

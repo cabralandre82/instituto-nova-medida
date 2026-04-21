@@ -1562,12 +1562,12 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
 
 ## Lente 13 — Resiliência (graceful degradation, outages)
 
-### [13.1 🟠 ALTO] Nenhum `AbortController` / `signal` em fetch externos — stuck request trava função inteira
+### [13.1 ✅ RESOLVED] Nenhum `AbortController` / `signal` em fetch externos — stuck request trava função inteira
 
 - **Onde:** ViaCEP (`OfferForm.tsx`), Asaas (`lib/asaas.ts`), Daily (`lib/video.ts`), WhatsApp Meta (`lib/wa-*`).
-- **Achado:** varredura retornou matches só em webhooks (`daily/webhook`, `asaas/webhook`). Outbound para terceiros **não** usa timeout. Se Asaas responder em 30s, Vercel function consome maxDuration sem necessidade.
+- **Achado:** varredura retornou matches só em webhooks (`daily/webhook`, `asaas/webhook`). Outbound para terceiros **não** usava timeout. Se Asaas responder em 30s, Vercel function consome maxDuration sem necessidade.
 - **Risco:** função expira, paciente fica no limbo "tentando pagar".
-- **Correção:** wrapper `fetchWithTimeout(url, opts, ms=5000)` usando `AbortController`; replace em lib/asaas.ts, lib/video.ts, lib/wa-*.
+- **Resolução (PR-042 · D-058):** criado helper canônico `src/lib/fetch-timeout.ts` com `fetchWithTimeout(url, {timeoutMs, provider})`, `FetchTimeoutError` classificado, composição com `AbortSignal` externo, integração com logger canônico (D-057). Defaults `PROVIDER_TIMEOUTS = { asaas: 10s, daily: 8s, whatsapp: 8s, viacep: 2.5s }`. Migrado em `asaas.ts::request`, `whatsapp.ts::postToGraph`, `video.ts::dailyRequest`, `cep.ts::fetchViaCep`, `system-health.ts::checkAsaasEnv/checkDailyEnv`. 12 testes novos cobrindo happy path, timeout real, signal externo, erros de rede cru, log emitido.
 - **Observador:** SRE, paciente.
 
 ### [13.2 🟠 ALTO] Sem circuit breaker / fallback se Asaas, Daily ou WA cair
@@ -1794,7 +1794,7 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
 | Severidade | Contagem | IDs |
 |---|---|---|
 | 🔴 CRÍTICO | **0** | — |
-| 🟠 ALTO | **6** | 11.1, 12.1, 12.2, 13.1, 13.2, 19.1, 20.1 (14.1 rebaixado pra 🟡 PARCIAL após PR-039 · D-057) |
+| 🟠 ALTO | **5** | 11.1, 12.1, 12.2, 13.2, 19.1, 20.1 (13.1 resolvido em PR-042 · D-058; 14.1 rebaixado pra 🟡 PARCIAL após PR-039 · D-057) |
 | 🟡 MÉDIO | **16** | 11.2, 11.3, 12.3, 12.4, 13.3, 14.2, 14.3, 15.1, 15.2, 15.3, 16.1, 16.2, 18.2, 18.3, 19.2, 19.3, 20.2, 21.1, 21.2, 21.3 |
 | 🟢 SEGURO | **8** | 11.4, 12.5, 13.4, 14.4, 15.4, 16.3, 19.4, 20.3, 21.4 |
 
@@ -1898,7 +1898,7 @@ Ordem recomendada de ataque (1 = primeiro):
 ### Escala/Resiliência/Observabilidade (5)
 - 12.1 Agendamento não escala pra múltiplas médicas
 - 12.2 `monthly-payouts` single function não batchable
-- 13.1 Sem `AbortController` em fetch externos
+- ~~13.1 Sem `AbortController` em fetch externos~~ ✅ RESOLVED (PR-042 · D-058): helper `src/lib/fetch-timeout.ts` com `FetchTimeoutError` classificado, composição com AbortSignal externo, timeouts por provider (Asaas 10s, Daily 8s, WhatsApp 8s, ViaCEP 2.5s). Migrado em 5 call-sites core.
 - 13.2 Sem circuit breaker
 - ~~14.1 Zero Sentry/Datadog/Axiom~~ 🟡 PARCIAL (PR-039 · D-057): logger canônico `src/lib/logger.ts` + migração dos caminhos críticos (8 crons, webhook Asaas, libs infra). Finalização depende de plugar drain externo (bloqueado por input operacional — chaves + budget).
 - 19.1 Sem dashboard de custo

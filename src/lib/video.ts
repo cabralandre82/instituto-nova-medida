@@ -22,6 +22,12 @@
  * Docs: https://docs.daily.co/reference/rest-api
  */
 
+import {
+  FetchTimeoutError,
+  fetchWithTimeout,
+  PROVIDER_TIMEOUTS,
+} from "./fetch-timeout";
+
 const DAILY_API_BASE = "https://api.daily.co/v1";
 
 // ────────────────────────────────────────────────────────────────────────
@@ -302,7 +308,7 @@ async function dailyRequest<T>(
 ): Promise<{ ok: true; data: T } | { ok: false; status: number; error: string }> {
   let res: Response;
   try {
-    res = await fetch(`${DAILY_API_BASE}${path}`, {
+    res = await fetchWithTimeout(`${DAILY_API_BASE}${path}`, {
       method,
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -310,8 +316,17 @@ async function dailyRequest<T>(
       },
       body: body ? JSON.stringify(body) : undefined,
       cache: "no-store",
+      timeoutMs: PROVIDER_TIMEOUTS.daily,
+      provider: "daily",
     });
   } catch (e) {
+    if (e instanceof FetchTimeoutError) {
+      return {
+        ok: false,
+        status: 0,
+        error: `[daily] timeout ${e.timeoutMs}ms em ${path}`,
+      };
+    }
     return { ok: false, status: 0, error: `[daily] network: ${String(e)}` };
   }
 

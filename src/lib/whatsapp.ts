@@ -19,6 +19,12 @@
  *   no painel. Suficiente para todo o desenvolvimento.
  */
 
+import {
+  FetchTimeoutError,
+  fetchWithTimeout,
+  PROVIDER_TIMEOUTS,
+} from "./fetch-timeout";
+
 const GRAPH_API_VERSION = "v21.0";
 
 type WhatsAppEnv = {
@@ -79,7 +85,7 @@ async function postToGraph(payload: unknown): Promise<WhatsAppSendResult> {
 
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetchWithTimeout(url, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -87,8 +93,17 @@ async function postToGraph(payload: unknown): Promise<WhatsAppSendResult> {
       },
       body: JSON.stringify(payload),
       cache: "no-store",
+      timeoutMs: PROVIDER_TIMEOUTS.whatsapp,
+      provider: "whatsapp",
     });
   } catch (err) {
+    if (err instanceof FetchTimeoutError) {
+      return {
+        ok: false,
+        code: null,
+        message: `Meta API não respondeu em ${err.timeoutMs}ms.`,
+      };
+    }
     return {
       ok: false,
       code: null,
