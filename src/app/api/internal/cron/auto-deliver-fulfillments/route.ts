@@ -19,6 +19,11 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { autoDeliverFulfillments } from "@/lib/auto-deliver-fulfillments";
 import { startCronRun, finishCronRun } from "@/lib/cron-runs";
 import { assertCronRequest } from "@/lib/cron-auth";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({
+  route: "/api/internal/cron/auto-deliver-fulfillments",
+});
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -56,7 +61,9 @@ export async function GET(req: NextRequest) {
         : undefined,
     });
 
-    console.info("[cron/auto-deliver-fulfillments]", {
+    log.info("run finished", {
+      run_id: runId,
+      duration_ms: Date.now() - startedAtMs,
       evaluated: report.evaluated,
       delivered: report.delivered,
       errors: report.errors,
@@ -66,7 +73,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: true, ...report });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    console.error("[cron/auto-deliver-fulfillments] exception:", message);
+    log.error("exception", { run_id: runId, err: e });
     await finishCronRun(supabase, runId, {
       status: "error",
       errorMessage: message,

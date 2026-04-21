@@ -31,6 +31,9 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { anonymizePatient } from "./patient-lgpd";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "patient-lgpd-requests" });
 
 // ────────────────────────────────────────────────────────────────────────
 // Tipos
@@ -416,10 +419,10 @@ export async function fulfillAnonymizeRequest(
   if (updErr) {
     // Paciente já foi anonimizado (irreversível). Logamos mas devolvemos
     // sucesso com warning — a ação principal foi concluída.
-    console.error(
-      "[lgpd-requests] anonymize aplicado mas request update falhou:",
-      updErr.message
-    );
+    log.error("anonymize aplicado mas request update falhou", {
+      request_id: input.requestId,
+      error: updErr.message,
+    });
   }
 
   return {

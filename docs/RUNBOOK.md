@@ -323,6 +323,17 @@ registrado pra auditoria.
 Se o cron falha **3 dias seguidos** pela mesma causa, abrir issue
 (trello/github) pra tratar como bug. Não espere o quarto dia.
 
+**Logs adicionais (JSON estruturado pós-D-057):**
+
+- No Vercel Logs (Functions → Filter → `/api/internal/cron/<slug>`),
+  cada execução emite uma linha JSON com `{ts, level, msg, context}`.
+- Campos úteis: `context.route`, `context.run_id` (correlaciona com a
+  linha em `cron_runs`), `context.duration_ms`, contadores por ação.
+- Erros vêm em `level: "error"` com `err.name`/`err.message` já
+  redigidos de PII (CPF/CEP/email/phone → `[REDACTED]`).
+- Para correlacionar com o banco: copie `run_id` do log e rode
+  `SELECT * FROM cron_runs WHERE id = '<run_id>';` no SQL Editor.
+
 ---
 
 ## 11 · Webhook Asaas com erro de processamento
@@ -346,6 +357,13 @@ Se o cron falha **3 dias seguidos** pela mesma causa, abrir issue
 Webhook é replayable — se o Asaas reenviar, o processamento será
 tentado de novo. O campo `processing_error` fica preenchido até
 próximo reenvio bem-sucedido.
+
+**Logs estruturados do webhook (pós-D-057):** cada request emite
+linhas JSON no Vercel Logs com `context.route = "/api/asaas/webhook"`
+e chaves por entity: `asaas_payment_id`, `event`, `fulfillment_id`,
+`appointment_id`, `payment_id`. Use a filter bar do Vercel pra
+correlacionar: filtrar por `asaas_payment_id` mostra tudo que rolou
+pra aquele payment (update, earning, fulfillment promovido, WA).
 
 ---
 

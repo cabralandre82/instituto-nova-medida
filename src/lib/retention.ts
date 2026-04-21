@@ -51,6 +51,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { anonymizePatient } from "./patient-lgpd";
 import { logAdminAction } from "./admin-audit-log";
 import { logPatientAccess } from "./patient-access-log";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "retention" });
 
 export const RETENTION_SYSTEM_EMAIL = "system:retention";
 export const DEFAULT_RETENTION_THRESHOLD_DAYS = 730; // 24 meses
@@ -105,7 +108,7 @@ export async function findCustomersEligibleForRetentionAnonymize(
     .limit(oversample);
 
   if (error) {
-    console.error("[retention] find candidates failed:", error.message);
+    log.error("find candidates failed", { error: error.message });
     return [];
   }
   if (!candidates || candidates.length === 0) return [];

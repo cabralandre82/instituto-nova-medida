@@ -38,6 +38,9 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { NextRequest } from "next/server";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "admin-audit-log" });
 
 export type AdminAuditEntry = {
   actorUserId?: string | null;
@@ -103,14 +106,14 @@ export async function logAdminAction(
   if (actorKind === "admin" && !entry.actorUserId) {
     const msg =
       "logAdminAction: actorKind='admin' exige actorUserId. Use actorKind='system' para crons/triggers.";
-    console.error("[admin-audit-log]", msg, { action: entry.action });
+    log.error(msg, { action: entry.action });
     if (options.failHard) return { ok: false, error: msg };
     return { ok: true, id: null };
   }
   if (actorKind === "system" && entry.actorUserId) {
     const msg =
       "logAdminAction: actorKind='system' não pode ter actorUserId (constraint de binding).";
-    console.error("[admin-audit-log]", msg, { action: entry.action });
+    log.error(msg, { action: entry.action });
     if (options.failHard) return { ok: false, error: msg };
     return { ok: true, id: null };
   }
@@ -133,10 +136,10 @@ export async function logAdminAction(
       .maybeSingle();
 
     if (error) {
-      console.error("[admin-audit-log] insert failed:", {
+      log.error("insert failed", {
         action: entry.action,
-        entityType: entry.entityType,
-        entityId: entry.entityId,
+        entity_type: entry.entityType,
+        entity_id: entry.entityId,
         error: error.message,
       });
       if (options.failHard) {
@@ -148,10 +151,7 @@ export async function logAdminAction(
     return { ok: true, id: (data?.id as string | undefined) ?? null };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error("[admin-audit-log] insert exception:", {
-      action: entry.action,
-      message,
-    });
+    log.error("insert exception", { action: entry.action, err });
     if (options.failHard) {
       return { ok: false, error: message };
     }

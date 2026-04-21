@@ -33,6 +33,9 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { enqueueImmediate } from "@/lib/notifications";
 import { assertCronRequest } from "@/lib/cron-auth";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/internal/cron/expire-reservations" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -68,32 +71,29 @@ export async function GET(req: NextRequest) {
   const result = await runSweep();
 
   if (!result.ok) {
-    console.error("[cron/expire-reservations] rpc error", result.error);
+    log.error("rpc error", { error: result.error });
     return NextResponse.json(result, { status: 500 });
   }
 
   if (result.expired_count > 0) {
-    console.info(
-      `[cron/expire-reservations] expired ${result.expired_count} slot(s):`,
-      result.rows.map((r) => ({
+    log.info("expired slots", {
+      expired_count: result.expired_count,
+      slots: result.rows.map((r) => ({
         appointment_id: r.appointment_id,
         doctor_id: r.doctor_id,
         scheduled_at: r.scheduled_at,
-      }))
-    );
+      })),
+    });
 
-    // Enfileira notificação `reserva_expirada` pra cada slot liberado.
-    // Idempotente via unique(appointment_id, kind). Dispara pelo cron
-    // wa-reminders nos próximos 60s. Não bloqueia a resposta HTTP.
     await Promise.all(
       result.rows.map(async (r) => {
         try {
           await enqueueImmediate(r.appointment_id, "reserva_expirada");
         } catch (e) {
-          console.error(
-            "[cron/expire-reservations] enqueue reserva_expirada falhou:",
-            { appointment_id: r.appointment_id, err: e }
-          );
+          log.error("enqueue reserva_expirada falhou", {
+            appointment_id: r.appointment_id,
+            err: e,
+          });
         }
       })
     );

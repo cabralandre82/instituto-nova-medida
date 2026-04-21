@@ -31,6 +31,9 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "cron-auth" });
 
 function isProd(): boolean {
   return process.env.NODE_ENV === "production";
@@ -61,10 +64,9 @@ export function assertCronRequest(req: NextRequest): NextResponse | null {
       // Fail-fast: produção sem CRON_SECRET = misconfiguração crítica.
       // Vercel Cron vai ver 503 e marcar o job como falhou, o que dispara
       // alertas. Prefere-se isso a abrir silenciosamente os endpoints.
-      console.error(
-        "[cron-auth] CRON_SECRET missing in production — refusing request",
-        { url: req.nextUrl?.pathname }
-      );
+      log.error("CRON_SECRET missing in production — refusing request", {
+        path: req.nextUrl?.pathname,
+      });
       return NextResponse.json(
         {
           ok: false,
@@ -76,8 +78,8 @@ export function assertCronRequest(req: NextRequest): NextResponse | null {
     }
 
     if (!warnedMissingInDev && process.env.NODE_ENV !== "test") {
-      console.warn(
-        "[cron-auth] CRON_SECRET not set — allowing unauthenticated cron calls (dev only)"
+      log.warn(
+        "CRON_SECRET not set — allowing unauthenticated cron calls (dev only)"
       );
       warnedMissingInDev = true;
     }

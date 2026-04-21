@@ -48,6 +48,9 @@ import {
   DEFAULT_RETENTION_THRESHOLD_DAYS,
   DEFAULT_RETENTION_BATCH_LIMIT,
 } from "@/lib/retention";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/internal/cron/retention-anonymize" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -118,7 +121,9 @@ export async function GET(req: NextRequest) {
         : undefined,
     });
 
-    console.info("[cron/retention-anonymize]", {
+    log.info("run finished", {
+      run_id: runId,
+      duration_ms: Date.now() - startedAtMs,
       dryRun: report.dryRun,
       thresholdDays: report.thresholdDays,
       totalCandidates: report.totalCandidates,
@@ -131,7 +136,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: true, ...report });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    console.error("[cron/retention-anonymize] exception:", message);
+    log.error("exception", { run_id: runId, err: e });
     await finishCronRun(supabase, runId, {
       status: "error",
       errorMessage: message,

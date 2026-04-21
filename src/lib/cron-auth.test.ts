@@ -16,7 +16,11 @@ import {
   assertCronRequest,
   __resetCronAuthWarningForTests,
 } from "@/lib/cron-auth";
+import { setSink, type LogEntry } from "@/lib/logger";
 import { NextRequest } from "next/server";
+
+let capturedEntries: LogEntry[] = [];
+let previousSink: ((e: LogEntry) => void) | null = null;
 
 function makeReq(headers: Record<string, string> = {}): NextRequest {
   return new NextRequest("https://example.com/api/internal/cron/foo", {
@@ -27,13 +31,16 @@ function makeReq(headers: Record<string, string> = {}): NextRequest {
 describe("assertCronRequest", () => {
   beforeEach(() => {
     __resetCronAuthWarningForTests();
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    capturedEntries = [];
+    process.env.LOGGER_ENABLED = "1";
+    previousSink = setSink((e) => capturedEntries.push(e));
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+    if (previousSink) setSink(previousSink);
+    delete process.env.LOGGER_ENABLED;
   });
 
   describe("produção sem CRON_SECRET", () => {
@@ -53,15 +60,14 @@ describe("assertCronRequest", () => {
       expect(body.hint).toContain("CRON_SECRET");
     });
 
-    it("loga erro explícito no console.error", () => {
+    it("loga erro explícito via logger", () => {
       vi.stubEnv("CRON_SECRET", "");
       vi.stubEnv("NODE_ENV", "production");
-      const errSpy = vi.spyOn(console, "error");
 
       assertCronRequest(makeReq());
-      expect(errSpy).toHaveBeenCalled();
-      const firstCall = errSpy.mock.calls[0]?.[0];
-      expect(String(firstCall)).toContain("CRON_SECRET missing");
+      const errors = capturedEntries.filter((e) => e.level === "error");
+      expect(errors).toHaveLength(1);
+      expect(errors[0]!.msg).toContain("CRON_SECRET missing");
     });
   });
 
@@ -74,25 +80,25 @@ describe("assertCronRequest", () => {
       expect(res).toBeNull();
     });
 
-    it("avisa no console.warn só uma vez por processo", () => {
+    it("avisa via logger só uma vez por processo", () => {
       vi.stubEnv("CRON_SECRET", "");
       vi.stubEnv("NODE_ENV", "development");
-      const warnSpy = vi.spyOn(console, "warn");
 
       assertCronRequest(makeReq());
       assertCronRequest(makeReq());
       assertCronRequest(makeReq());
 
-      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const warns = capturedEntries.filter((e) => e.level === "warn");
+      expect(warns).toHaveLength(1);
     });
 
     it("em test silencia o warn também", () => {
       vi.stubEnv("CRON_SECRET", "");
       vi.stubEnv("NODE_ENV", "test");
-      const warnSpy = vi.spyOn(console, "warn");
 
       assertCronRequest(makeReq());
-      expect(warnSpy).not.toHaveBeenCalled();
+      const warns = capturedEntries.filter((e) => e.level === "warn");
+      expect(warns).toHaveLength(0);
     });
   });
 

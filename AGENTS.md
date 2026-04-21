@@ -67,20 +67,58 @@ de `sanitizeFreeText` por `wrapUserInput` — SEMPRE.
 
 ## 3. Pipeline obrigatório de logging
 
-Antes de logar qualquer string que possa conter dado de cliente ou
-segredo:
+**Não use `console.*` em código novo.** Use o logger canônico em
+`src/lib/logger.ts` — ele já aplica `redactForLog` automaticamente em
+`msg` e em todas as strings dentro do `context`, seleciona formato
+(JSON em prod, legível em dev), respeita `LOG_LEVEL`, e é pluggable
+para Axiom/Sentry/Datadog via `setSink`.
+
+Padrão canônico:
 
 ```ts
-import { redactForLog } from "@/lib/prompt-redact";
-console.log("[module] algo:", redactForLog(someText));
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/asaas/webhook" }); // ou { mod: "nome" }
+
+log.info("payment atualizado", {
+  asaas_payment_id: payment.id,
+  status: payment.status,
+});
+
+try {
+  /* ... */
+} catch (err) {
+  log.error("processing exception", { err, stored_event_id: storedEventId });
+}
 ```
 
-Presets:
-- `redactForLog` — mantém UUID (útil debugging), remove CPF/CEP/email/
-  phone/token.
+Regras:
+
+- **Sempre** `logger.with({ route })` para rotas HTTP, `logger.with({ mod })` para libs.
+- **Sempre** valores estruturados em `context` (`{asaas_payment_id, status}`), nunca string concatenada.
+- Passe `Error` em `err`: o logger extrai `name`, `message` e `stack` (stack só em dev).
+- Use `debug` para casos "noisy mas úteis só em debug" (webhook skip, duplicate event).
+- `info` = fluxo normal. `warn` = degradação aceitável. `error` = falha operacional que merece atenção.
+
+Se precisar redigir manualmente (ex.: passar texto pra LLM externo, não pra log), use os presets de `src/lib/prompt-redact.ts`:
+
+- `redactForLog` — mantém UUID (útil debugging). Já aplicado automaticamente pelo `logger`.
 - `redactForLLM` — remove também UUID (correlação externa).
-- `redactPII(raw, opts)` — opções específicas quando você sabe o que
-  faz.
+- `redactPII(raw, opts)` — opções específicas quando você sabe o que faz.
+
+**Testes.** Quando um teste precisa validar que um log foi emitido:
+
+```ts
+import { setSink, type LogEntry } from "@/lib/logger";
+
+const entries: LogEntry[] = [];
+process.env.LOGGER_ENABLED = "1";
+const restore = setSink((e) => entries.push(e));
+// ... roda o código ...
+expect(entries.some((e) => e.level === "error" && e.msg.includes("..."))).toBe(true);
+setSink(restore);
+delete process.env.LOGGER_ENABLED;
+```
 
 ---
 

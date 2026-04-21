@@ -54,6 +54,9 @@ import {
   type ReconcileAction,
 } from "@/lib/reconcile";
 import { assertCronRequest } from "@/lib/cron-auth";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/internal/cron/daily-reconcile" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -143,7 +146,7 @@ export async function GET(req: NextRequest) {
     .limit(limit * 2); // oversize pra sobrar após filtro de idade real
 
   if (selectErr) {
-    console.error("[cron/daily-reconcile] select candidatos falhou:", selectErr);
+    log.error("select candidatos falhou", { error: selectErr.message });
     return NextResponse.json(
       { ok: false, error: selectErr.message },
       { status: 500 }
@@ -168,7 +171,7 @@ export async function GET(req: NextRequest) {
   const report = newCounters();
 
   if (refined.length === 0) {
-    console.log("[cron/daily-reconcile] nada pra reconciliar");
+    log.debug("nothing to reconcile");
     return NextResponse.json({ ok: true, ...report });
   }
 
@@ -176,7 +179,7 @@ export async function GET(req: NextRequest) {
   try {
     provider = getVideoProvider();
   } catch (e) {
-    console.error("[cron/daily-reconcile] provider indisponível:", e);
+    log.error("provider indisponível", { err: e });
     return NextResponse.json(
       { ok: false, error: "video_provider_unavailable" },
       { status: 503 }
@@ -207,14 +210,15 @@ export async function GET(req: NextRequest) {
         (report.by_action[result.action] ?? 0) + 1;
     } catch (e) {
       report.errors += 1;
-      console.error(
-        "[cron/daily-reconcile] reconcile falhou:",
-        row.id,
-        e instanceof Error ? e.message : String(e)
-      );
+      log.error("reconcile falhou", { appointment_id: row.id, err: e });
     }
   }
 
-  console.info("[cron/daily-reconcile]", report);
+  log.info("run finished", {
+    processed: report.processed,
+    errors: report.errors,
+    empty_meetings: report.empty_meetings,
+    by_action: report.by_action,
+  });
   return NextResponse.json({ ok: true, ...report });
 }

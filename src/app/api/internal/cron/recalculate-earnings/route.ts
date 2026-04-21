@@ -29,6 +29,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { recalculateEarningsAvailability } from "@/lib/earnings-availability";
 import { startCronRun, finishCronRun } from "@/lib/cron-runs";
 import { assertCronRequest } from "@/lib/cron-auth";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/internal/cron/recalculate-earnings" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -61,7 +64,9 @@ export async function GET(req: NextRequest) {
         : undefined,
     });
 
-    console.info("[cron/recalc-earnings]", {
+    log.info("run finished", {
+      run_id: runId,
+      duration_ms: Date.now() - startedAtMs,
       inspected: report.inspected,
       promoted: report.promoted,
       scheduledFuture: report.scheduledFuture,
@@ -71,7 +76,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ...report });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    console.error("[cron/recalc-earnings] exception:", message);
+    log.error("exception", { run_id: runId, err: e });
     await finishCronRun(supabase, runId, {
       status: "error",
       errorMessage: message,

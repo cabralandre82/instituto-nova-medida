@@ -23,6 +23,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { processDuePending } from "@/lib/notifications";
 import { assertCronRequest } from "@/lib/cron-auth";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/internal/cron/wa-reminders" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,7 +49,7 @@ export async function GET(req: NextRequest) {
   const report = await processDuePending(limit);
 
   if (report.sent > 0 || report.failed > 0) {
-    console.info("[cron/wa-reminders]", {
+    log.info("run finished", {
       processed: report.processed,
       sent: report.sent,
       failed: report.failed,

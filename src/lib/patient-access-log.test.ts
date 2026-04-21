@@ -14,6 +14,20 @@ import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createSupabaseMock } from "../test/mocks/supabase";
 import { logPatientAccess } from "./patient-access-log";
+import { setSink, type LogEntry } from "./logger";
+
+function captureLogger(): { entries: LogEntry[]; restore: () => void } {
+  const entries: LogEntry[] = [];
+  const previous = setSink((e) => entries.push(e));
+  process.env.LOGGER_ENABLED = "1";
+  return {
+    entries,
+    restore: () => {
+      setSink(previous);
+      delete process.env.LOGGER_ENABLED;
+    },
+  };
+}
 
 const ADMIN_ID = "admin-1";
 const CUSTOMER_ID = "cust-1";
@@ -87,7 +101,7 @@ describe("logPatientAccess", () => {
   });
 
   it("failSoft (padrão): insert falha, devolve ok:false sem throw", async () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { entries, restore } = captureLogger();
     const mock = createSupabaseMock();
     mock.enqueue("patient_access_log", {
       data: null,
@@ -104,8 +118,8 @@ describe("logPatientAccess", () => {
     );
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.code).toBe("insert_failed");
-    expect(consoleSpy).toHaveBeenCalled();
-    consoleSpy.mockRestore();
+    expect(entries.some((e) => e.level === "error")).toBe(true);
+    restore();
   });
 
   it("failHard: insert falha, devolve ok:false sem logar (caller decide)", async () => {

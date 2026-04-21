@@ -18,6 +18,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { nudgeReconsulta } from "@/lib/nudge-reconsulta";
 import { startCronRun, finishCronRun } from "@/lib/cron-runs";
 import { assertCronRequest } from "@/lib/cron-auth";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/internal/cron/nudge-reconsulta" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -58,7 +61,9 @@ export async function GET(req: NextRequest) {
         : undefined,
     });
 
-    console.info("[cron/nudge-reconsulta]", {
+    log.info("run finished", {
+      run_id: runId,
+      duration_ms: Date.now() - startedAtMs,
       evaluated: report.evaluated,
       nudged: report.nudged,
       skipped: report.skipped,
@@ -68,7 +73,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: true, ...report });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    console.error("[cron/nudge-reconsulta] exception:", message);
+    log.error("exception", { run_id: runId, err: e });
     await finishCronRun(supabase, runId, {
       status: "error",
       errorMessage: message,

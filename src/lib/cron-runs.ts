@@ -12,6 +12,9 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "cron-runs" });
 
 export type CronJob =
   | "recalc_earnings_availability"
@@ -32,7 +35,7 @@ export async function startCronRun(
     .select("id")
     .single();
   if (error || !data) {
-    console.warn("[cron_runs] start falhou:", job, error?.message);
+    log.warn("start falhou", { job, error: error?.message ?? null });
     return null;
   }
   return (data as { id: string }).id;
@@ -64,7 +67,7 @@ export async function finishCronRun(
     })
     .eq("id", id);
   if (error) {
-    console.warn("[cron_runs] finish falhou:", id, error.message);
+    log.warn("finish falhou", { run_id: id, error: error.message });
   }
 }
 
@@ -90,7 +93,7 @@ export async function getLatestSuccessfulRun(
     .limit(1)
     .maybeSingle();
   if (error) {
-    console.warn("[cron_runs] latest failed:", job, error.message);
+    log.warn("latest success failed", { job, error: error.message });
     return null;
   }
   return (data as {
@@ -128,7 +131,7 @@ export async function getLatestRun(
     .limit(1)
     .maybeSingle();
   if (error) {
-    console.warn("[cron_runs] latest failed:", job, error.message);
+    log.warn("latest failed", { job, error: error.message });
     return null;
   }
   return (data as {

@@ -17,6 +17,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { sendAdminDigest } from "@/lib/admin-digest";
 import { startCronRun, finishCronRun } from "@/lib/cron-runs";
 import { assertCronRequest } from "@/lib/cron-auth";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/internal/cron/admin-digest" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,7 +50,9 @@ export async function GET(req: NextRequest) {
         : undefined,
     });
 
-    console.info("[cron/admin-digest]", {
+    log.info("run finished", {
+      run_id: runId,
+      duration_ms: Date.now() - startedAtMs,
       sent: report.sent,
       reason: report.reason,
       inboxCounts: report.inboxCounts,
@@ -56,7 +61,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: true, ...report });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    console.error("[cron/admin-digest] exception:", message);
+    log.error("exception", { run_id: runId, err: e });
     await finishCronRun(supabase, runId, {
       status: "error",
       errorMessage: message,

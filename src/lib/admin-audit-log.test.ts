@@ -12,9 +12,23 @@ import {
   logAdminAction,
   getAuditContextFromRequest,
 } from "@/lib/admin-audit-log";
+import { setSink, type LogEntry } from "@/lib/logger";
 
 function asClient(mock: ReturnType<typeof createSupabaseMock>) {
   return mock.client as unknown as SupabaseClient;
+}
+
+function captureLogger(): { entries: LogEntry[]; restore: () => void } {
+  const entries: LogEntry[] = [];
+  const previous = setSink((e) => entries.push(e));
+  process.env.LOGGER_ENABLED = "1";
+  return {
+    entries,
+    restore: () => {
+      setSink(previous);
+      delete process.env.LOGGER_ENABLED;
+    },
+  };
 }
 
 describe("logAdminAction", () => {
@@ -88,7 +102,7 @@ describe("logAdminAction", () => {
       error: { code: "42P01", message: "relation does not exist" },
     });
 
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { entries, restore } = captureLogger();
 
     const res = await logAdminAction(asClient(supa), {
       actorUserId: "user-1",
@@ -99,8 +113,8 @@ describe("logAdminAction", () => {
     });
 
     expect(res).toEqual({ ok: true, id: null });
-    expect(errSpy).toHaveBeenCalled();
-    errSpy.mockRestore();
+    expect(entries.some((e) => e.level === "error")).toBe(true);
+    restore();
   });
 
   it("bloqueia o caller quando failHard=true e o insert falha", async () => {

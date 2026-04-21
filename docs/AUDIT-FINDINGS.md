@@ -1596,12 +1596,14 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
 
 ## Lente 14 — Observabilidade
 
-### [14.1 🟠 ALTO] Zero integração APM/tracing — `console.error` é tudo que há (ver também 17.2)
+### [14.1 🟡 PARCIAL] Logs dispersos em `console.*` — sem drain externo (ver também 17.2)
 
-- **Onde:** varredura `sentry|datadog|opentelemetry|axiom|posthog|logflare` = **0 matches**.
-- **Achado:** sem Sentry, sem Datadog, sem Axiom. Admin solo fica sem alertas proativos ("um crón caiu!", "webhook Asaas está retornando 500").
-- **Risco:** incident blindness.
-- **Correção:** adicionar Sentry (free tier, 5k errors/mo) + Axiom Vercel integration; alertas para Slack/WA.
+- **Onde (auditoria):** varredura `sentry|datadog|opentelemetry|axiom|posthog|logflare` = **0 matches**; 80+ arquivos usando `console.log/warn/error` com prefixos artesanais.
+- **Status:** 🟡 **PARCIALMENTE RESOLVIDO pela D-057 (PR-039, 2026-04-20)**.
+  - Criado `src/lib/logger.ts` canônico (zero deps) com JSON em prod, redação automática de PII via `redactForLog` (D-056), child loggers com contexto encadeável e sink pluggable pronto para Axiom/Sentry.
+  - Migrados caminhos críticos: `cron-runs`, `cron-auth`, `admin-audit-log`, `patient-access-log`, `retention`, `patient-lgpd-requests`, as 8 rotas `/api/internal/cron/*`, `/api/asaas/webhook` (29 call-sites).
+  - Finding sai de 🟠 ALTO para 🟡 PARCIAL: infra no lugar, migração dos ~60 `console.*` remanescentes é oportunista (PR futura), fechamento total depende de integração com drain externo (Axiom/Sentry) — bloqueado por input operacional (chaves + budget).
+- **Pendente:** (a) `setSink(axiomSink)` no boot + config de projeto Axiom/Sentry (free tier 5k errors/mo); (b) alertas para Slack/WA por severidade; (c) finalizar migração dos ~60 call-sites restantes.
 - **Observador:** SRE, admin solo.
 
 ### [14.2 🟡 MÉDIO] Nenhuma métrica de negócio agregada
@@ -1792,7 +1794,7 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
 | Severidade | Contagem | IDs |
 |---|---|---|
 | 🔴 CRÍTICO | **0** | — |
-| 🟠 ALTO | **7** | 11.1, 12.1, 12.2, 13.1, 13.2, 14.1, 19.1, 20.1 (8 — depende de como conta 18.1) |
+| 🟠 ALTO | **6** | 11.1, 12.1, 12.2, 13.1, 13.2, 19.1, 20.1 (14.1 rebaixado pra 🟡 PARCIAL após PR-039 · D-057) |
 | 🟡 MÉDIO | **16** | 11.2, 11.3, 12.3, 12.4, 13.3, 14.2, 14.3, 15.1, 15.2, 15.3, 16.1, 16.2, 18.2, 18.3, 19.2, 19.3, 20.2, 21.1, 21.2, 21.3 |
 | 🟢 SEGURO | **8** | 11.4, 12.5, 13.4, 14.4, 15.4, 16.3, 19.4, 20.3, 21.4 |
 
@@ -1898,7 +1900,7 @@ Ordem recomendada de ataque (1 = primeiro):
 - 12.2 `monthly-payouts` single function não batchable
 - 13.1 Sem `AbortController` em fetch externos
 - 13.2 Sem circuit breaker
-- 14.1 Zero Sentry/Datadog/Axiom
+- ~~14.1 Zero Sentry/Datadog/Axiom~~ 🟡 PARCIAL (PR-039 · D-057): logger canônico `src/lib/logger.ts` + migração dos caminhos críticos (8 crons, webhook Asaas, libs infra). Finalização depende de plugar drain externo (bloqueado por input operacional — chaves + budget).
 - 19.1 Sem dashboard de custo
 - 20.1 Sem runbook DR
 
@@ -1906,7 +1908,7 @@ Ordem recomendada de ataque (1 = primeiro):
 - 8.3 `CRON_SECRET` depende de config humana
 - 10.2 Campos operacionais livres sem `updated_by`
 - 10.3 Migrations sem rollback
-- 17.2 Logs via `console.error` expiram
+- ~~17.2 Logs via `console.error` expiram~~ — parcialmente coberto pela D-057 (infra de logger estruturado pronta; drain externo pendente)
 
 ---
 

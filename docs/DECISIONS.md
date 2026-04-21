@@ -5,6 +5,51 @@
 
 ---
 
+## D-057 · Logger canônico estruturado + migração de caminhos críticos (endereça finding 14.1) · 2026-04-20
+
+**Contexto.** A auditoria profunda tinha como finding **[14.1 🟡 MÉDIO] "Logs dispersos em `console.log/warn/error`, sem correlação, sem redação de PII."**. Mais de 80 arquivos usavam `console.*` com prefixos artesanais tipo `[cron/auto-deliver-fulfillments]`, formato inconsistente (ora string, ora objeto, ora JSON.stringify manual), sem campos estruturados, sem redação. Em produção, qualquer log que vazasse CPF/email/phone ia cru pro drain do Vercel — problema direto de LGPD Art. 6º (minimização) + Art. 46 (segurança técnica).
+
+Três dores imediatas:
+
+1. **Incident response.** Para debugar um webhook Asaas que travou às 03h47, o operador precisa correlacionar `[asaas-webhook] payment atualizado` com `[asaas-webhook] earning criado` e `[asaas-webhook] fulfillment promovido` — só que não há `request_id`, nem `asaas_payment_id` consistente em todas as entradas. Cada linha é um dialeto diferente.
+2. **PII em log.** O próprio D-056 recomenda `redactForLog`, mas sem um logger canônico que aplique automaticamente, depender que cada `console.log` lembre de redigir é ilusão. Basta um lapso e CPF vaza pro drain.
+3. **Integração futura (Axiom/Sentry/Datadog).** Para plugar um drain estruturado, o código precisa emitir JSON line consumível. `console.log("texto " + obj)` não é parseável de forma confiável.
+
+**Decisão.** Implementar um logger canônico zero-deps e migrar os caminhos mais críticos, deixando migração gradual do resto.
+
+### Primitiva — `src/lib/logger.ts`
+
+- **Formato.** Em prod (`NODE_ENV=production`), uma linha JSON por entry com `{ts, level, msg, context, err?}`. Em dev, output legível multi-line. Em test, silencioso por default (flag `LOGGER_ENABLED=1` reativa).
+- **Níveis.** `debug` / `info` / `warn` / `error` com ordem numérica — `LOG_LEVEL` env override.
+- **Redação automática.** Tanto `msg` quanto todas as strings dentro de `context` passam por `redactForLog` (D-056) antes do sink. Aplicação recursiva com limite de profundidade (6) e proteção contra ciclos. CPF/CEP/email/phone/Asaas token/JWT nunca chegam crus ao drain.
+- **Child loggers.** `logger.with({ route: "/api/x" })` cria um logger com contexto base permanente. Chains (`with().with()`) preservam camadas. Isso é o mecanismo pra correlação — cada entry de uma request carrega a mesma `route`.
+- **Sink pluggable.** `setSink(fn)` instala coletor custom (retorna o anterior pra restore). Default é `console.*` com fallback ao próprio default se o sink custom lançar — logger **nunca** pode derrubar o handler.
+- **Error normalization.** Se `ctx.err` é um `Error`, move pra top-level com `{name, message, stack}`. `stack` só em dev (PII-risk em prod + verbosidade).
+- **Zero deps externas.** Nem pino, nem winston. A ABI mínima cabe em ~250 linhas.
+
+### Migração
+
+- **Libs infra centrais.** `cron-runs.ts`, `cron-auth.ts`, `admin-audit-log.ts`, `patient-access-log.ts`, `retention.ts`, `patient-lgpd-requests.ts`. Todos `console.*` substituídos por `log.warn/error` com `mod: <nome>` no contexto base.
+- **Webhook Asaas (`/api/asaas/webhook`).** 29 `console.*` → `log.*` com contexto base `{route}` + dados estruturados (`asaas_payment_id`, `event`, `fulfillment_id`, `appointment_id`, `payment_id`). É o handler mais crítico da plataforma em complexidade operacional.
+- **8 rotas de cron.** Padrão uniforme: cada cron tem `log.info("run finished", {run_id, duration_ms, ...métricas})` e `log.error("exception", {run_id, err})`. O `run_id` vem do `cron_runs` — permite juntar a entrada do logger com o payload persistido em DB.
+
+**Fora do escopo desta ADR (migração gradual):** ~60 arquivos com `console.*` remanescentes (rotas admin individuais, libs especializadas). O logger já está disponível; migrações posteriores são cosméticas/oportunistas.
+
+### Design trade-offs
+
+- **Sink silencioso em test por default.** Testes do código migrado não podem simplesmente espiar `console.error` — precisam usar `setSink` pra capturar entries estruturadas. Ajustes feitos em `cron-auth.test.ts`, `admin-audit-log.test.ts`, `patient-access-log.test.ts`. Trade-off: +3 linhas por teste que valida emissão de log; benefício: testes inspecionam **nível**, **mensagem** e **contexto estruturado**, não substring de saída crua.
+- **Sem buffer/queue.** Se o sink travar, o handler trava. Alternativa (fila assíncrona) introduz risco de perder log de incidente em caso de crash do pod — pior cenário. Volume atual (< 10 req/s) não justifica a complexidade.
+- **Redação automática nunca desativada.** Não há flag para "skip redaction". Mesmo em dev, logs refletem produção — reduz chance de acidente quando operador copia-cola log dev pra chat/email sem pensar.
+- **`redactForLog` (não `redactForLLM`).** Mantém UUIDs crus — são críticos pra correlação em debugging. Diferente do contrato LLM externa, onde UUIDs vazam IDs internos e devem ser redigidos.
+
+### Consequências
+
+- Qualquer novo caminho (rota, lib, cron) DEVE usar `logger.with({mod|route}).info|warn|error(...)` em vez de `console.*`. `AGENTS.md` atualizado pra refletir.
+- Quando chegar o momento de plugar Axiom/Sentry (PR-039+), a migração é cirúrgica: `setSink(axiomSink)` no boot, zero mudanças nos call-sites. Projeto preparado.
+- Finding **[14.1]** sai de "aberto" pra "parcialmente resolvido" — infra no lugar, migração dos ~60 call-sites restantes pode ser oportunista (não bloqueia). Fechamento total depende de integração com drain externo.
+
+---
+
 ## D-056 · Guardrails operacionais para agentes de IA + envelope + redação de PII (fecha findings 9.2 mitigado e 9.4) · 2026-04-20
 
 **Contexto.** Depois de Ondas 2C/2D/2E, os campos de input direto do usuário estão sanitizados. Sobravam, da auditoria:

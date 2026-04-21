@@ -21,6 +21,9 @@ import {
   shouldCreateEarning,
   shouldReverseEarning,
 } from "@/lib/payment-event-category";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/asaas/webhook" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -80,7 +83,7 @@ export async function POST(req: Request) {
   // pra facilitar testes manuais com curl.
   const env = process.env.ASAAS_ENV ?? "sandbox";
   if (env === "production" && !signatureValid) {
-    console.warn("[asaas-webhook] token inválido em produção, ignorando");
+    log.warn("token inválido em produção, ignorando");
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
@@ -106,17 +109,17 @@ export async function POST(req: Request) {
     if (storeErr) {
       // Conflict por unique(asaas_event_id) significa "já recebemos esse" — ok
       if (storeErr.code === "23505") {
-        console.log("[asaas-webhook] evento duplicado, ignorando:", body.id);
+        log.debug("evento duplicado, ignorando", { asaas_event_id: body.id });
         return NextResponse.json({ ok: true, duplicate: true });
       }
-      console.error("[asaas-webhook] persist raw failed:", storeErr);
+      log.error("persist raw failed", { error: storeErr.message });
       // Continua mesmo assim — o handler abaixo é importante demais pra
       // bloquear por falha no log.
     } else {
       storedEventId = stored?.id ?? null;
     }
   } catch (err) {
-    console.error("[asaas-webhook] persist raw exception:", err);
+    log.error("persist raw exception", { err });
   }
 
   // 3) Processamento
@@ -153,15 +156,15 @@ export async function POST(req: Request) {
       if (tsDecision.paid_at) updates.paid_at = tsDecision.paid_at;
       if (tsDecision.refunded_at) updates.refunded_at = tsDecision.refunded_at;
       if (tsDecision.paid_at_skipped) {
-        console.log("[asaas-webhook] paid_at já fixado, ignorando:", {
-          asaasPaymentId,
+        log.info("paid_at já fixado, ignorando", {
+          asaas_payment_id: asaasPaymentId,
           paid_at: tsDecision.paid_at_skipped,
           event: body.event,
         });
       }
       if (tsDecision.refunded_at_skipped) {
-        console.log("[asaas-webhook] refunded_at já fixado, ignorando:", {
-          asaasPaymentId,
+        log.info("refunded_at já fixado, ignorando", {
+          asaas_payment_id: asaasPaymentId,
           refunded_at: tsDecision.refunded_at_skipped,
           event: body.event,
         });
@@ -175,7 +178,10 @@ export async function POST(req: Request) {
         .maybeSingle();
 
       if (updateErr) {
-        console.error("[asaas-webhook] update payment falhou:", updateErr);
+        log.error("update payment falhou", {
+          asaas_payment_id: asaasPaymentId,
+          error: updateErr.message,
+        });
         if (storedEventId) {
           await supabase
             .from("asaas_events")
@@ -183,8 +189,8 @@ export async function POST(req: Request) {
             .eq("id", storedEventId);
         }
       } else {
-        console.log("[asaas-webhook] payment atualizado:", {
-          asaasPaymentId,
+        log.info("payment atualizado", {
+          asaas_payment_id: asaasPaymentId,
           event: body.event,
           status: payment.status,
         });
@@ -224,7 +230,7 @@ export async function POST(req: Request) {
         .eq("id", storedEventId);
     }
   } catch (err) {
-    console.error("[asaas-webhook] processing exception:", err);
+    log.error("processing exception", { err, stored_event_id: storedEventId });
     if (storedEventId) {
       await supabase
         .from("asaas_events")
@@ -304,11 +310,12 @@ async function handleEarningsLifecycle(
       internalPaymentId
     );
     if (!activation.ok) {
-      console.error("[asaas-webhook] activate falhou:", activation.error);
-    } else if (activation.wasActivated) {
-      console.log("[asaas-webhook] appointment ativado:", appt.id, {
-        category,
+      log.error("activate falhou", {
+        appointment_id: appt.id,
+        error: activation.error,
       });
+    } else if (activation.wasActivated) {
+      log.info("appointment ativado", { appointment_id: appt.id, category });
     }
 
     // 2) Provisiona sala Daily (best-effort, idempotente).
@@ -351,14 +358,15 @@ async function handleEarningsLifecycle(
           })
           .eq("id", appt.id as string);
 
-        console.log(
-          "[asaas-webhook] sala Daily provisionada:",
-          room.name,
-          "appt=",
-          appt.id
-        );
+        log.info("sala Daily provisionada", {
+          room_name: room.name,
+          appointment_id: appt.id,
+        });
       } catch (e) {
-        console.error("[asaas-webhook] provisionConsultationRoom falhou:", e);
+        log.error("provisionConsultationRoom falhou", {
+          appointment_id: appt.id,
+          err: e,
+        });
       }
     }
 
@@ -383,13 +391,12 @@ async function handleEarningsLifecycle(
         description: `Consulta · ${customerName}`,
       });
       if (!result.ok) {
-        console.error("[asaas-webhook] earning falhou:", result.error);
+        log.error("earning falhou", { error: result.error });
       } else if (result.created) {
-        console.log("[asaas-webhook] earning criado:", result.earningId);
+        log.info("earning criado", { earning_id: result.earningId });
       }
     } else {
-      // category === "confirmed": log explícito pra observabilidade.
-      console.log("[asaas-webhook] earning postergado (CONFIRMED sem RECEIVED):", {
+      log.info("earning postergado (CONFIRMED sem RECEIVED)", {
         appointment_id: appt.id,
         payment_id: internalPaymentId,
       });
@@ -401,16 +408,16 @@ async function handleEarningsLifecycle(
     try {
       const immediateId = await enqueueImmediate(appt.id as string, "confirmacao");
       const reminders = await scheduleRemindersForAppointment(appt.id as string);
-      console.log(
-        "[asaas-webhook] notificações enfileiradas:",
-        JSON.stringify({
-          appointment_id: appt.id,
-          confirmacao_id: immediateId,
-          reminders: reminders.scheduled,
-        })
-      );
+      log.info("notificações enfileiradas", {
+        appointment_id: appt.id,
+        confirmacao_id: immediateId,
+        reminders: reminders.scheduled,
+      });
     } catch (e) {
-      console.error("[asaas-webhook] enqueue notifications falhou:", e);
+      log.error("enqueue notifications falhou", {
+        appointment_id: appt.id,
+        err: e,
+      });
     }
     return;
   }
@@ -426,9 +433,9 @@ async function handleEarningsLifecycle(
       reason,
     });
     if (!result.ok) {
-      console.error("[asaas-webhook] clawback falhou:", result.error);
+      log.error("clawback falhou", { error: result.error });
     } else if (result.clawbacks > 0) {
-      console.log("[asaas-webhook] clawbacks criados:", result.clawbacks);
+      log.info("clawbacks criados", { count: result.clawbacks });
     }
 
     // ── Dedupe de refund processed (D-034) ────────────────────────
@@ -471,14 +478,14 @@ async function handleEarningsLifecycle(
         processedBy: null, // null = sem admin humano direto nesta ação
       });
       if (!markResult.ok) {
-        console.error(
-          "[asaas-webhook] markRefundProcessed via webhook falhou:",
-          markResult
-        );
-      } else {
-        console.log("[asaas-webhook] refund marcado via webhook:", {
+        log.error("markRefundProcessed via webhook falhou", {
           appointment_id: appt.id,
-          already: markResult.alreadyProcessed,
+          result: markResult,
+        });
+      } else {
+        log.info("refund marcado via webhook", {
+          appointment_id: appt.id,
+          already_processed: markResult.alreadyProcessed,
         });
       }
     }
@@ -522,23 +529,23 @@ async function handleFulfillmentLifecycle(
       result.code === "payment_not_found" ||
       result.code === "fulfillment_not_found"
     ) {
-      console.log("[asaas-webhook] fulfillment skip:", {
+      log.debug("fulfillment skip", {
         code: result.code,
-        paymentId: internalPaymentId,
+        payment_id: internalPaymentId,
       });
       return;
     }
-    console.error("[asaas-webhook] promote fulfillment falhou:", result);
+    log.error("promote fulfillment falhou", { result });
     return;
   }
 
   if (result.wasPromoted) {
-    console.log("[asaas-webhook] fulfillment promovido:", {
+    log.info("fulfillment promovido", {
       fulfillment_id: result.fulfillmentId,
       plan: result.planName,
     });
   } else if (result.alreadyPaid) {
-    console.log("[asaas-webhook] fulfillment já estava pago:", {
+    log.info("fulfillment já estava pago", {
       fulfillment_id: result.fulfillmentId,
       status: result.status,
     });
@@ -558,18 +565,21 @@ async function handleFulfillmentLifecycle(
         text: message,
       });
       if (waRes.ok) {
-        console.log("[asaas-webhook] WA pagamento-ok enviado:", {
+        log.info("WA pagamento-ok enviado", {
           fulfillment_id: result.fulfillmentId,
           message_id: waRes.messageId,
         });
       } else {
-        console.warn("[asaas-webhook] WA pagamento-ok falhou:", {
+        log.warn("WA pagamento-ok falhou", {
           fulfillment_id: result.fulfillmentId,
           error: waRes.message,
         });
       }
     } catch (e) {
-      console.error("[asaas-webhook] WA pagamento-ok exception:", e);
+      log.error("WA pagamento-ok exception", {
+        fulfillment_id: result.fulfillmentId,
+        err: e,
+      });
     }
   }
 }

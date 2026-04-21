@@ -2,7 +2,7 @@
 
 Lista consolidada de PRs identificados na auditoria (`docs/AUDIT-FINDINGS.md`) que **não podem ser abertos só pelo engenheiro**: dependem de dados reais, decisões do operador ou acesso externo.
 
-Atualizado em: **2026-04-20** (pós-Onda 2F / PR-037).
+Atualizado em: **2026-04-20** (pós-PR-039 / D-057 — logger canônico + migração inicial).
 
 ---
 
@@ -95,7 +95,7 @@ Endereço físico da sede (rua, número, bairro, cidade, UF, CEP): _____________
 
 Enquanto o operador colhe os dados acima, o engenheiro segue com os PRs que não dependem de inputs externos.
 
-**Status pós-Onda 2F / PR-037 (2026-04-20):**
+**Status pós-PR-039 (2026-04-20):**
 
 - ✅ Concluídos:
   - Onda 1A (D-047): PR-024, PR-025, PR-026 (dark patterns + fail-fast CRON_SECRET)
@@ -108,11 +108,14 @@ Enquanto o operador colhe os dados acima, o engenheiro segue com os PRs que não
   - Onda 2D (D-054): **PR-036 (`/api/lead` endurecido)** — lib `text-sanitize` (compartilhada) + `lead-validate` (charset slug em `answers`, limites em nome/phone/utm/referrer/landingPath, 37 testes) + rate-limit 10/15min por IP + body-guard 8 KB pré-parse + migration com CHECK constraints em `pg_column_size(answers/utm)` e `char_length(name/phone/status_notes/referrer/landing_path)` + índice parcial `leads_ip_created_at_idx` pra futuro cron de anti-spike. Fecha audit [9.3] e [22.2]; mitiga [9.1] em `leads.answers`.
   - Onda 2E (D-055): **PR-036-B (clínico/operacional endurecido)** — `hasEvilControlChars` + `cleanFreeText` + `sanitizeFreeText` em `text-sanitize` (aceita `\n\r\t`, bloqueia NULL/ESC/DEL/zero-width/bidi/U+2028-29); aplicado em `appointment-finalize.ts` (hipotese/conduta/anamnese.text com limites 4 KB/16 KB) e `fulfillment-transitions.ts` (tracking_note 500ch / cancelled_reason 2 KB); `validateFinalizeInput` passa a devolver `{ ok, sanitized }`; migration `20260503000000` com CHECK em `appointments.hipotese/conduta/anamnese` + `fulfillments.tracking_note/cancelled_reason` + defensivamente em `doctors.notes`, `doctor_payouts.{notes,failed_reason,cancelled_reason}`, `doctor_billing_documents.validation_notes`. **Fecha [9.1] totalmente.**
   - Onda 2F (D-056): **PR-037 (guardrails pra agentes de IA + blindagem `customers.name`)** — primitivas `prompt-envelope.ts` (wrapUserInput com nonce + formatStructuredFields), `prompt-redact.ts` (CPF/CEP/email/phone/UUID/Asaas token/JWT), `customer-display.ts` (displayFirstName/FullName/PlanName/CityState com fallback seguro); `fulfillment-messages.ts` refatorado pra usar os `display*` + helper `safeOpNote`; `/api/checkout` e `/api/agendar/reserve` agora rodam `sanitizeShortText` com pattern `personName`; migration `20260504000000` com backfill idempotente + CHECK em `customers.name` (char_length ≤ 120, POSIX `[[:cntrl:]]`); `AGENTS.md` no root do repo (contrato normativo lido pelos agentes). **76 testes novos. Fecha [9.2] e [9.4].**
+  - PR-039 (D-057): **logger canônico estruturado + migração inicial** — `src/lib/logger.ts` zero-deps (JSON em prod, pretty em dev, silencioso em test, `redactForLog` automática via D-056, child loggers com contexto encadeável, sink pluggable). Migração dos caminhos críticos: `cron-runs`, `cron-auth`, `admin-audit-log`, `patient-access-log`, `retention`, `patient-lgpd-requests`, 8 rotas `/api/internal/cron/*`, `/api/asaas/webhook` (29 call-sites). **23 testes novos.** `AGENTS.md` atualizado com o pipeline de logging. **Finding [14.1] rebaixado de 🟠 ALTO pra 🟡 PARCIAL** — infra pronta; plugar drain externo (Axiom/Sentry) aguarda input operacional.
 - 🔜 Próximos sem input:
-  1. **PR-039+** — observabilidade estruturada (Sentry + Axiom + `x-request-id`) + `redactForLog` nos hot paths (14.1).
+  1. **PR-039-cont** — migração dos ~60 `console.*` remanescentes (libs especializadas, rotas admin individuais). Cosmético; não bloqueia.
   2. **PR-040** — dashboard temporal de `cron_runs`.
   3. **PR-042** — `fetchWithTimeout` helper pra fetches externos (13.1).
   4. **PR-033-Clinical** — retenção pós-20-anos para pacientes com prontuário (só relevante em 2045+).
+- ⏸️ Bloqueados por input operacional não-crítico:
+  - **PR-043** — plugar drain externo no `logger` (`setSink(axiomSink)` + alertas Slack/WA). Precisa: chaves Axiom/Sentry + budget aprovado.
 - ⏸️ Bloqueados pelo operador: PR-023 (footer CNPJ/RT — **crítico, bloqueia tráfego pago**), PR-033-B (DPA farmácia), PR-038 (2FA), PR-047 (break-glass)
 - ⏸️ Bloqueados por maturação operacional: PR-046 (multi-médica, só quando chegar a 2ª)
 
@@ -120,6 +123,6 @@ Enquanto o operador colhe os dados acima, o engenheiro segue com os PRs que não
 
 **Estado dos ALTOs / MÉDIOs da família 9.x (AI/prompt-injection):** 100% fechados. Findings 9.1 (Ondas 2C+2D+2E), 9.2 (Onda 2F), 9.3 (Onda 2D), 9.4 (Onda 2F). Quando LLM externo for plugado, as primitivas (`prompt-envelope.ts`, `prompt-redact.ts`, `customer-display.ts`) + check-list em `AGENTS.md` são as referências normativas. Tudo sem débito técnico.
 
-**Estado dos demais ALTOs:** fechados também 22.1 (ViaCEP), 22.2 (leads DoS), LGPD 6.3/6.4/17.3/Art. 16. Pendentes são não-AI: 5.5 (clawback), 5.6 (checkout consent persistido), 5.8/5.12 (asaas_events retention + PII redact), 14.1 (Sentry/Axiom), 17.4 (signed URL log).
+**Estado dos demais ALTOs:** fechados também 22.1 (ViaCEP), 22.2 (leads DoS), LGPD 6.3/6.4/17.3/Art. 16. 14.1 foi rebaixado pra 🟡 PARCIAL pela D-057. Pendentes são não-AI: 5.5 (clawback), 5.6 (checkout consent persistido), 5.8/5.12 (asaas_events retention + PII redact), 17.4 (signed URL log).
 
 Ou seja: **zero CRÍTICOS sem caminho de resolução ativo, zero ALTOs LGPD, zero ALTOs trust-boundary externo, zero ALTOs DoS, zero ALTOs prompt-injection, zero ALTOs/MÉDIOs AI-agent**. Toda família 9.x (AI adversário) fechada pra superfície atual. Quando os inputs do operador chegarem, PR-023 entra **com prioridade máxima** (pré-requisito para qualquer tráfego pago).

@@ -26,6 +26,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { generateMonthlyPayouts } from "@/lib/monthly-payouts";
 import { startCronRun, finishCronRun } from "@/lib/cron-runs";
 import { assertCronRequest } from "@/lib/cron-auth";
+import { logger } from "@/lib/logger";
+
+const log = logger.with({ route: "/api/internal/cron/generate-payouts" });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -74,7 +77,9 @@ export async function GET(req: NextRequest) {
         : undefined,
     });
 
-    console.info("[cron/generate-payouts]", {
+    log.info("run finished", {
+      run_id: runId,
+      duration_ms: Date.now() - startedAtMs,
       referencePeriod: report.referencePeriod,
       payoutsCreated: report.payoutsCreated,
       payoutsSkippedMissingPix: report.payoutsSkippedMissingPix,
@@ -86,7 +91,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ...report });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    console.error("[cron/generate-payouts] exception:", message);
+    log.error("exception", { run_id: runId, err: e });
     await finishCronRun(supabase, runId, {
       status: "error",
       errorMessage: message,

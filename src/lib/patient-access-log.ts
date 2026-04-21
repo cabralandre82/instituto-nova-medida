@@ -34,6 +34,9 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { logger } from "./logger";
+
+const log = logger.with({ mod: "patient-access-log" });
 
 /**
  * Extrai IP e User-Agent de um Request (API route) ou de `headers()`
@@ -146,14 +149,14 @@ export async function logPatientAccess(
   if (actorKind === "admin" && !input.adminUserId) {
     const msg =
       "logPatientAccess: actorKind='admin' exige adminUserId. Use actorKind='system' em crons.";
-    console.error("[patient-access-log]", msg);
+    log.error(msg, { action: input.action });
     if (options.failHard) return { ok: false, code: "insert_failed", message: msg };
     return { ok: false, code: "insert_failed", message: msg };
   }
   if (actorKind === "system" && input.adminUserId) {
     const msg =
       "logPatientAccess: actorKind='system' não pode ter adminUserId (constraint de binding).";
-    console.error("[patient-access-log]", msg);
+    log.error(msg, { action: input.action });
     if (options.failHard) return { ok: false, code: "insert_failed", message: msg };
     return { ok: false, code: "insert_failed", message: msg };
   }
@@ -179,12 +182,13 @@ export async function logPatientAccess(
     if (options.failHard) {
       return { ok: false, code: "insert_failed", message };
     }
-    // failSoft: log no console pra investigação, devolve erro mas
+    // failSoft: log estruturado pra investigação, devolve erro mas
     // caller pode ignorar. Nunca lançamos exception aqui.
-    console.error(
-      `[patient-access-log] insert falhou (failSoft, ação="${input.action}", customer=${input.customerId}):`,
-      message
-    );
+    log.error("insert falhou (failSoft)", {
+      action: input.action,
+      customer_id: input.customerId,
+      error: message,
+    });
     return { ok: false, code: "insert_failed", message };
   }
 
