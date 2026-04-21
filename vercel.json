@@ -28,6 +28,18 @@
     },
     "src/app/api/internal/cron/notify-pending-documents/route.ts": {
       "maxDuration": 60
+    },
+    "src/app/api/internal/cron/auto-deliver-fulfillments/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/internal/cron/nudge-reconsulta/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/internal/cron/admin-digest/route.ts": {
+      "maxDuration": 30
+    },
+    "src/app/api/internal/cron/retention-anonymize/route.ts": {
+      "maxDuration": 60
     }
   },
   "crons": [
@@ -54,6 +66,22 @@
     {
       "path": "/api/internal/cron/notify-pending-documents",
       "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/internal/cron/auto-deliver-fulfillments",
+      "schedule": "0 10 * * *"
+    },
+    {
+      "path": "/api/internal/cron/nudge-reconsulta",
+      "schedule": "0 11 * * *"
+    },
+    {
+      "path": "/api/internal/cron/admin-digest",
+      "schedule": "30 11 * * *"
+    },
+    {
+      "path": "/api/internal/cron/retention-anonymize",
+      "schedule": "0 4 * * 0"
     }
   ],
   "headers": [
