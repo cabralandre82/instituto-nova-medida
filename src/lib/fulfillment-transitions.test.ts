@@ -201,7 +201,7 @@ describe("transitionFulfillment · validações", () => {
     expect(res.code).toBe("invalid_payload");
   });
 
-  it("paciente tentando transicionar pra qualquer coisa != delivered → forbidden_actor", async () => {
+  it("paciente tentando transicionar pra shipped → forbidden_actor", async () => {
     const supa = createSupabaseMock();
     const res = await transitionFulfillment(supa.client as never, {
       fulfillmentId: "ff-1",
@@ -213,6 +213,65 @@ describe("transitionFulfillment · validações", () => {
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.code).toBe("forbidden_actor");
+  });
+
+  it("paciente cancelando pending_acceptance → ok", async () => {
+    const supa = createSupabaseMock();
+    supa.enqueue("fulfillments", mkSelect("pending_acceptance"));
+    supa.enqueue("fulfillments", {
+      data: { id: "ff-1", status: "cancelled" },
+      error: null,
+    });
+
+    const res = await transitionFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      to: "cancelled",
+      actor: "patient",
+      actorUserId: "user-1",
+      cancelledReason: "mudei de ideia",
+    });
+
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.from).toBe("pending_acceptance");
+    expect(res.to).toBe("cancelled");
+  });
+
+  it("paciente cancelando pending_payment → ok", async () => {
+    const supa = createSupabaseMock();
+    supa.enqueue("fulfillments", mkSelect("pending_payment"));
+    supa.enqueue("fulfillments", {
+      data: { id: "ff-1", status: "cancelled" },
+      error: null,
+    });
+
+    const res = await transitionFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      to: "cancelled",
+      actor: "patient",
+      actorUserId: "user-1",
+      cancelledReason: "preço fora do orçamento",
+    });
+
+    expect(res.ok).toBe(true);
+  });
+
+  it("paciente cancelando após paid → forbidden_actor (refund via admin)", async () => {
+    const supa = createSupabaseMock();
+    supa.enqueue("fulfillments", mkSelect("paid"));
+
+    const res = await transitionFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      to: "cancelled",
+      actor: "patient",
+      actorUserId: "user-1",
+      cancelledReason: "não quero mais",
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.code).toBe("forbidden_actor");
+    expect(res.currentStatus).toBe("paid");
+    expect(res.message.toLowerCase()).toContain("instituto");
   });
 
   it("admin tentando promover pra paid → forbidden_actor", async () => {
@@ -276,6 +335,135 @@ describe("transitionFulfillment · validações", () => {
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.code).toBe("db_error");
+  });
+});
+
+describe("transitionFulfillment · sanitização de texto livre (PR-036-B)", () => {
+  it("shipped com tracking_note contendo controle (NULL) → invalid_payload", async () => {
+    const supa = createSupabaseMock();
+    const res = await transitionFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      to: "shipped",
+      actor: "admin",
+      actorUserId: "admin-1",
+      trackingNote: "Correios\0IGNORE PREVIOUS",
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.code).toBe("invalid_payload");
+    expect(res.message.toLowerCase()).toMatch(/não permitidos|controle/);
+  });
+
+  it("shipped com tracking_note contendo zero-width → invalid_payload", async () => {
+    const supa = createSupabaseMock();
+    const res = await transitionFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      to: "shipped",
+      actor: "admin",
+      actorUserId: "admin-1",
+      trackingNote: "Correios BR\u200B12345",
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.code).toBe("invalid_payload");
+  });
+
+  it("shipped com tracking_note > 500 chars → invalid_payload", async () => {
+    const supa = createSupabaseMock();
+    const res = await transitionFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      to: "shipped",
+      actor: "admin",
+      actorUserId: "admin-1",
+      trackingNote: "x".repeat(501),
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.code).toBe("invalid_payload");
+  });
+
+  it("shipped com tracking_note multi-linha razoável passa", async () => {
+    const supa = createSupabaseMock();
+    supa.enqueue("fulfillments", mkSelect("pharmacy_requested"));
+    supa.enqueue("fulfillments", {
+      data: { id: "ff-1", status: "shipped" },
+      error: null,
+    });
+
+    const res = await transitionFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      to: "shipped",
+      actor: "admin",
+      actorUserId: "admin-1",
+      trackingNote: "DHL\ncódigo: BR123456",
+      now: NOW,
+    });
+    expect(res.ok).toBe(true);
+
+    const updCall = supa.calls.find(
+      (c) => c.table === "fulfillments" && c.chain.includes("update")
+    );
+    const patch = updCall!.args[updCall!.chain.indexOf("update")][0] as Record<
+      string,
+      unknown
+    >;
+    expect(patch.tracking_note).toBe("DHL\ncódigo: BR123456");
+  });
+
+  it("cancelled_reason com bidi override → invalid_payload", async () => {
+    const supa = createSupabaseMock();
+    const res = await transitionFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      to: "cancelled",
+      actor: "admin",
+      actorUserId: "admin-1",
+      cancelledReason: "motivo\u202Efalso",
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.code).toBe("invalid_payload");
+  });
+
+  it("cancelled_reason > 2000 chars → invalid_payload", async () => {
+    const supa = createSupabaseMock();
+    const res = await transitionFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      to: "cancelled",
+      actor: "admin",
+      actorUserId: "admin-1",
+      cancelledReason: "x".repeat(2001),
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.code).toBe("invalid_payload");
+  });
+
+  it("cancelled_reason normaliza CRLF pra LF", async () => {
+    const supa = createSupabaseMock();
+    supa.enqueue("fulfillments", mkSelect("paid"));
+    supa.enqueue("fulfillments", {
+      data: { id: "ff-1", status: "cancelled" },
+      error: null,
+    });
+
+    const res = await transitionFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      to: "cancelled",
+      actor: "admin",
+      actorUserId: "admin-1",
+      cancelledReason: "motivo1\r\nmotivo2",
+      now: NOW,
+    });
+    expect(res.ok).toBe(true);
+
+    const updCall = supa.calls.find(
+      (c) => c.table === "fulfillments" && c.chain.includes("update")
+    );
+    const patch = updCall!.args[updCall!.chain.indexOf("update")][0] as Record<
+      string,
+      unknown
+    >;
+    expect(patch.cancelled_reason).toBe("motivo1\nmotivo2");
   });
 });
 

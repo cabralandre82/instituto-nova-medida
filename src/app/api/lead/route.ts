@@ -1,39 +1,82 @@
+/**
+ * POST /api/lead — captura de leads do quiz da landing page.
+ *
+ * Endurecido em PR-036 · D-054 contra audit [9.1 + 9.3 + 22.2]:
+ *   - **Body size guard** (8 KB pré-parse) pra DoS.
+ *   - **Rate-limit por IP** (10 leads / 15min) pra atacante spam.
+ *   - **`validateLead`** sanitiza charset, tamanho e shape de
+ *     `name`/`phone`/`answers`/`utm`/`referrer`/`landingPath` antes
+ *     do INSERT. Qualquer prompt-injection em `answers` (campo que
+ *     alimentará LLMs no futuro) é rejeitado na borda.
+ *
+ * UX: erros retornam 400/413/429 com mensagem amigável. Erros
+ * internos (WhatsApp, Supabase) não derrubam a resposta de sucesso:
+ * o lead é o que importa pra captura.
+ */
+
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { sendBoasVindas } from "@/lib/whatsapp";
+import { isBodyTooLarge, validateLead } from "@/lib/lead-validate";
 
 export const runtime = "nodejs";
-
-type Lead = {
-  name: string;
-  phone: string;
-  consent: boolean;
-  answers: Record<string, string>;
-  utm?: Record<string, string>;
-  referrer?: string;
-  landingPath?: string;
-};
 
 const CONSENT_TEXT =
   "Pode me chamar por aqui. Concordo com a Política de Privacidade e o uso dos meus dados conforme a LGPD.";
 
-function isValid(body: Partial<Lead>): body is Lead {
-  if (!body || typeof body !== "object") return false;
-  if (typeof body.name !== "string" || body.name.trim().length < 2) return false;
-  if (
-    typeof body.phone !== "string" ||
-    body.phone.replace(/\D/g, "").length < 10
-  )
-    return false;
-  if (body.consent !== true) return false;
-  if (!body.answers || typeof body.answers !== "object") return false;
+// ────────────────────────────────────────────────────────────────────────
+// Rate-limit in-memory (mesmo pattern do magic-link e /api/cep).
+// Leads são mais "caros" (disparam WhatsApp outbound = custo Meta),
+// então o bucket é mais agressivo: 10 por IP / 15min.
+// ────────────────────────────────────────────────────────────────────────
+
+const MAX_LEADS_PER_WINDOW = 10;
+const LEAD_RATE_WINDOW_MS = 15 * 60 * 1000;
+const leadHits = new Map<string, { count: number; resetAt: number }>();
+
+function leadRateLimitOk(ip: string): boolean {
+  const now = Date.now();
+  const cur = leadHits.get(ip);
+  if (!cur || cur.resetAt < now) {
+    leadHits.set(ip, { count: 1, resetAt: now + LEAD_RATE_WINDOW_MS });
+    return true;
+  }
+  if (cur.count >= MAX_LEADS_PER_WINDOW) return false;
+  cur.count += 1;
   return true;
 }
 
+function getClientIp(req: Request): string {
+  return (
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    req.headers.get("x-real-ip") ||
+    "unknown"
+  );
+}
+
 export async function POST(req: Request) {
-  let body: Partial<Lead>;
+  // 1. Body-size guard ANTES de parsear JSON.
+  //    Lemos como texto primeiro pra medir bytes UTF-8.
+  let rawText: string;
   try {
-    body = (await req.json()) as Partial<Lead>;
+    rawText = await req.text();
+  } catch {
+    return NextResponse.json(
+      { ok: false, error: "Falha ao ler body" },
+      { status: 400 }
+    );
+  }
+  if (isBodyTooLarge(rawText)) {
+    return NextResponse.json(
+      { ok: false, error: "Payload muito grande" },
+      { status: 413 }
+    );
+  }
+
+  // 2. Parse + rate-limit.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText);
   } catch {
     return NextResponse.json(
       { ok: false, error: "JSON inválido" },
@@ -41,30 +84,41 @@ export async function POST(req: Request) {
     );
   }
 
-  if (!isValid(body)) {
+  const ip = getClientIp(req);
+  if (!leadRateLimitOk(ip)) {
     return NextResponse.json(
-      { ok: false, error: "Dados inválidos" },
-      { status: 400 }
+      {
+        ok: false,
+        error: "Muitas tentativas. Aguarde alguns minutos e tente novamente.",
+      },
+      { status: 429, headers: { "Retry-After": "900" } }
     );
   }
 
-  const ip =
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    req.headers.get("x-real-ip") ||
-    null;
-  const userAgent = req.headers.get("user-agent") || null;
-  const referrer = body.referrer || req.headers.get("referer") || null;
+  // 3. Valida + sanitiza.
+  const result = validateLead(parsed);
+  if (!result.ok) {
+    return NextResponse.json(
+      { ok: false, error: result.message, code: result.code },
+      { status: 400 }
+    );
+  }
+  const lead = result.lead;
 
-  const lead = {
-    name: body.name.trim(),
-    phone: body.phone.replace(/\D/g, ""),
-    answers: body.answers,
-    consent: body.consent,
+  const userAgent = req.headers.get("user-agent") || null;
+  const referrer = lead.referrer || req.headers.get("referer") || null;
+
+  // 4. Persistência.
+  const row = {
+    name: lead.name,
+    phone: lead.phone,
+    answers: lead.answers,
+    consent: lead.consent,
     consent_text: CONSENT_TEXT,
     consent_at: new Date().toISOString(),
-    utm: body.utm ?? {},
+    utm: lead.utm,
     referrer,
-    landing_path: body.landingPath ?? "/",
+    landing_path: lead.landingPath,
     ip,
     user_agent: userAgent,
     status: "novo" as const,
@@ -74,7 +128,7 @@ export async function POST(req: Request) {
     const supabase = getSupabaseAdmin();
     const { data, error } = await supabase
       .from("leads")
-      .insert(lead)
+      .insert(row)
       .select("id")
       .single();
 
@@ -88,7 +142,7 @@ export async function POST(req: Request) {
 
     console.log("[instituto-nova-medida][lead] inserted:", data?.id);
 
-    // Disparar MSG 1 (boas-vindas) via WhatsApp Cloud API.
+    // 5. Disparar MSG 1 (boas-vindas) via WhatsApp Cloud API.
     //
     // Importante: em runtime serverless (Vercel), promises "fire-and-forget"
     // após `return` são abortadas pela plataforma. Por isso fazemos `await`
@@ -148,8 +202,6 @@ export async function POST(req: Request) {
         })
         .eq("id", data?.id);
     }
-
-    // TODO Sprint 5: enviar evento de conversão para Meta CAPI
 
     return NextResponse.json({ ok: true, id: data?.id });
   } catch (err) {

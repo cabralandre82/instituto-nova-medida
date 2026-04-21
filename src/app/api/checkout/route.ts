@@ -6,6 +6,7 @@ import {
   getAsaasEnv,
   type AsaasBillingType,
 } from "@/lib/asaas";
+import { sanitizeShortText, TEXT_PATTERNS } from "@/lib/text-sanitize";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,8 +64,32 @@ function parseAndValidate(raw: unknown): CheckoutBody | { error: string } {
   )
     return { error: "Forma de pagamento inválida" };
 
-  if (typeof b.name !== "string" || b.name.trim().length < 3)
+  // PR-037 · D-056: `customers.name` é propagado pra templates WhatsApp,
+  // eventual LLM de atendimento, logs e comprovantes. Sanitização mais
+  // apertada que o resto do body: rejeita dígitos, controles, zero-width
+  // e qualquer char fora do `personName` pattern (letras Unicode + `.
+  // , ' ( ) -`).
+  const nameSanitization =
+    typeof b.name === "string"
+      ? sanitizeShortText(b.name, {
+          maxLen: 120,
+          minLen: 3,
+          pattern: TEXT_PATTERNS.personName,
+        })
+      : ({ ok: false as const, reason: "empty" as const });
+  if (!nameSanitization.ok) {
+    if (nameSanitization.reason === "charset") {
+      return {
+        error:
+          "Nome contém caracteres não permitidos. Use apenas letras, espaços e pontuação básica.",
+      };
+    }
+    if (nameSanitization.reason === "too_long") {
+      return { error: "Nome muito longo" };
+    }
     return { error: "Informe o nome completo" };
+  }
+  const sanitizedName = nameSanitization.value;
 
   const cpfDigits =
     typeof b.cpf === "string" ? b.cpf.replace(/\D/g, "") : "";
@@ -101,7 +126,7 @@ function parseAndValidate(raw: unknown): CheckoutBody | { error: string } {
   return {
     planSlug: b.planSlug,
     paymentMethod: b.paymentMethod,
-    name: b.name.trim(),
+    name: sanitizedName,
     cpf: cpfDigits,
     email: b.email.trim().toLowerCase(),
     phone: phoneDigits,

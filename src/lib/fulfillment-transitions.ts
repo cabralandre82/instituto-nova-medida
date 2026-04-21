@@ -36,6 +36,38 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { canTransition, type FulfillmentStatus } from "./fulfillments";
+import { sanitizeFreeText } from "./text-sanitize";
+
+// Limites pros campos livres do fulfillment. Usados também pelas CHECK
+// constraints no banco (migration 20260503000000_clinical_text_hardening).
+export const FULFILLMENT_TEXT_LIMITS = {
+  /** "DHL + BR1234567890" cabe folgado. */
+  trackingNoteMaxLen: 500,
+  trackingNoteMaxLines: 10,
+  /** Operador tende a ser prolixo em cancelamento, deixa folga. */
+  cancelledReasonMaxLen: 2000,
+  cancelledReasonMaxLines: 40,
+  /** Tamanho mínimo (herdado do comportamento atual). */
+  minLen: 3,
+} as const;
+
+function reasonMessageForFulfillmentField(
+  field: "tracking_note" | "cancelled_reason",
+  reason: "empty" | "too_long" | "too_many_lines" | "control_chars"
+): string {
+  const label =
+    field === "tracking_note" ? "Transportadora / código" : "Motivo do cancelamento";
+  switch (reason) {
+    case "empty":
+      return `${label}: informe ao menos ${FULFILLMENT_TEXT_LIMITS.minLen} caracteres.`;
+    case "too_long":
+      return `${label}: texto excede o tamanho permitido.`;
+    case "too_many_lines":
+      return `${label}: muitas linhas — condense.`;
+    case "control_chars":
+      return `${label}: contém caracteres não permitidos (controle, zero-width ou bidi override).`;
+  }
+}
 
 // ────────────────────────────────────────────────────────────────────────
 // Tipos
@@ -89,45 +121,69 @@ export type TransitionResult = TransitionSuccess | TransitionFailure;
  * Regras de ator (defense-in-depth; a auth é no endpoint):
  *   - `admin` pode todas as transições exceto iniciar `pending_payment`
  *     → `paid` (isso é só via webhook Asaas).
- *   - `patient` só pode `shipped → delivered` (confirmar recebimento).
- *   - `system` pode todas (uso interno, ex: cron que auto-delivered
- *     depois de N dias sem confirmação — futuro).
+ *   - `patient` pode:
+ *       • `shipped → delivered` (confirmar recebimento)
+ *       • `pending_acceptance | pending_payment → cancelled`
+ *         (desistir antes de pagar). Pós-pagamento, cancelamento
+ *         envolve refund e passa pelo admin.
+ *   - `system` pode todas (uso interno, ex: crons que auto-delivered
+ *     depois de N dias sem confirmação).
  */
 export async function transitionFulfillment(
   supabase: SupabaseClient,
   input: TransitionInput
 ): Promise<TransitionResult> {
-  // 1) Validações puras
+  // 1) Validações puras + sanitização
   const target = input.to;
+  // Guardamos os valores sanitizados pra reuso no patch (etapa 5).
+  let trackingNoteSanitized: string | null = null;
+  let cancelledReasonSanitized: string | null = null;
 
   if (target === "shipped") {
-    const note = (input.trackingNote ?? "").trim();
-    if (note.length < 3) {
+    const r = sanitizeFreeText(input.trackingNote ?? "", {
+      maxLen: FULFILLMENT_TEXT_LIMITS.trackingNoteMaxLen,
+      maxLines: FULFILLMENT_TEXT_LIMITS.trackingNoteMaxLines,
+      minLen: FULFILLMENT_TEXT_LIMITS.minLen,
+      allowEmpty: false,
+    });
+    if (!r.ok) {
       return {
         ok: false,
         code: "invalid_payload",
-        message:
-          "Informe a transportadora ou código de rastreio (mínimo 3 caracteres).",
+        message: reasonMessageForFulfillmentField("tracking_note", r.reason),
       };
     }
+    trackingNoteSanitized = r.value;
   }
   if (target === "cancelled") {
-    const reason = (input.cancelledReason ?? "").trim();
-    if (reason.length < 3) {
+    const r = sanitizeFreeText(input.cancelledReason ?? "", {
+      maxLen: FULFILLMENT_TEXT_LIMITS.cancelledReasonMaxLen,
+      maxLines: FULFILLMENT_TEXT_LIMITS.cancelledReasonMaxLines,
+      minLen: FULFILLMENT_TEXT_LIMITS.minLen,
+      allowEmpty: false,
+    });
+    if (!r.ok) {
       return {
         ok: false,
         code: "invalid_payload",
-        message: "Informe o motivo do cancelamento (mínimo 3 caracteres).",
+        message: reasonMessageForFulfillmentField("cancelled_reason", r.reason),
       };
     }
+    cancelledReasonSanitized = r.value;
   }
 
-  if (input.actor === "patient" && target !== "delivered") {
-    return {
-      ok: false,
-      code: "forbidden_actor",
-      message: "Paciente só pode confirmar recebimento.",
-    };
+  if (input.actor === "patient") {
+    // Paciente só pode: confirmar entrega OU cancelar oferta pré-pagamento.
+    // A restrição de `status atual` pra cancelamento é reforçada depois
+    // do SELECT (precisamos do `currentStatus` em mãos).
+    if (target !== "delivered" && target !== "cancelled") {
+      return {
+        ok: false,
+        code: "forbidden_actor",
+        message:
+          "Paciente só pode confirmar recebimento ou cancelar oferta pendente.",
+      };
+    }
   }
   if (input.actor === "admin" && target === "paid") {
     return {
@@ -160,6 +216,23 @@ export async function transitionFulfillment(
     };
   }
   const currentStatus = (ffRes.data as { id: string; status: FulfillmentStatus }).status;
+
+  // 2.5) Guard específico: paciente só cancela antes de pagar.
+  // Pós `paid`, cancelar envolve refund — admin resolve.
+  if (
+    input.actor === "patient" &&
+    target === "cancelled" &&
+    currentStatus !== "pending_acceptance" &&
+    currentStatus !== "pending_payment"
+  ) {
+    return {
+      ok: false,
+      code: "forbidden_actor",
+      message:
+        "Após confirmar o pagamento, cancelamento precisa ser solicitado ao Instituto.",
+      currentStatus,
+    };
+  }
 
   // 3) Idempotência: já está no alvo
   if (currentStatus === target) {
@@ -195,14 +268,14 @@ export async function transitionFulfillment(
       break;
     case "shipped":
       patch.shipped_at = now;
-      patch.tracking_note = (input.trackingNote ?? "").trim();
+      patch.tracking_note = trackingNoteSanitized;
       break;
     case "delivered":
       patch.delivered_at = now;
       break;
     case "cancelled":
       patch.cancelled_at = now;
-      patch.cancelled_reason = (input.cancelledReason ?? "").trim();
+      patch.cancelled_reason = cancelledReasonSanitized;
       break;
     default:
       // pending_acceptance / pending_payment / paid: não caem aqui

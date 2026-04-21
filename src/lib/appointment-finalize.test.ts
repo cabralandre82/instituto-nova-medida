@@ -55,11 +55,26 @@ const declinedInput: FinalizeInput = {
 
 describe("validateFinalizeInput", () => {
   it("aceita payload declined mínimo", () => {
-    expect(validateFinalizeInput({ decision: "declined" })).toBeNull();
+    const r = validateFinalizeInput({ decision: "declined" });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.sanitized.decision).toBe("declined");
+      expect(r.sanitized.hipotese).toBe(null);
+      expect(r.sanitized.conduta).toBe(null);
+      expect(r.sanitized.anamnese).toBe(null);
+    }
   });
 
-  it("aceita payload prescribed completo", () => {
-    expect(validateFinalizeInput(prescribedInput)).toBeNull();
+  it("aceita payload prescribed completo e devolve sanitized", () => {
+    const r = validateFinalizeInput(prescribedInput);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.sanitized.hipotese).toBe("Obesidade grau I");
+      expect(r.sanitized.conduta).toBe("Iniciar tirzepatida 2,5mg semanal");
+      expect(r.sanitized.anamnese).toMatchObject({
+        text: "Paciente relata fome constante.",
+      });
+    }
   });
 
   it("rejeita decision ausente ou inválida", () => {
@@ -110,20 +125,106 @@ describe("validateFinalizeInput", () => {
     });
   });
 
-  it("rejeita campos de texto que excedem 8000 chars", () => {
+  it("rejeita hipotese acima de 4000 chars (limite clínico)", () => {
     expect(
       validateFinalizeInput({
         ...declinedInput,
-        hipotese: "x".repeat(8001),
+        hipotese: "x".repeat(4001),
       })
     ).toMatchObject({ code: "invalid_payload", field: "hipotese" });
+  });
 
+  it("rejeita conduta acima de 4000 chars", () => {
     expect(
       validateFinalizeInput({
         ...declinedInput,
-        conduta: "x".repeat(8001),
+        conduta: "x".repeat(4001),
       })
     ).toMatchObject({ code: "invalid_payload", field: "conduta" });
+  });
+
+  it("rejeita controle (NULL, ESC, zero-width) em hipotese", () => {
+    expect(
+      validateFinalizeInput({ ...declinedInput, hipotese: "ok\0bad" })
+    ).toMatchObject({ code: "invalid_payload", field: "hipotese" });
+    expect(
+      validateFinalizeInput({ ...declinedInput, hipotese: "IGN\u200BORE" })
+    ).toMatchObject({ code: "invalid_payload", field: "hipotese" });
+  });
+
+  it("rejeita bidi override (Trojan Source) em conduta", () => {
+    expect(
+      validateFinalizeInput({ ...declinedInput, conduta: "ok\u202Ebad" })
+    ).toMatchObject({ code: "invalid_payload", field: "conduta" });
+  });
+
+  it("aceita multi-linha legítimo em hipotese/conduta", () => {
+    const r = validateFinalizeInput({
+      decision: "declined",
+      hipotese: "Linha 1\nLinha 2\nLinha 3",
+      conduta: "Plano:\n- Consulta nutricional\n- Atividade física",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.sanitized.hipotese).toBe("Linha 1\nLinha 2\nLinha 3");
+      expect(r.sanitized.conduta).toContain("Plano:");
+    }
+  });
+
+  it("sanitiza anamnese.text: normaliza CRLF e remove tab", () => {
+    const r = validateFinalizeInput({
+      decision: "declined",
+      anamnese: { text: "relato\r\ncom\tcolunas" },
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect((r.sanitized.anamnese as { text: string }).text).toBe(
+        "relato\ncom colunas"
+      );
+    }
+  });
+
+  it("rejeita anamnese com tipo errado (array)", () => {
+    expect(
+      validateFinalizeInput({
+        decision: "declined",
+        anamnese: ["x"] as unknown as Record<string, unknown>,
+      })
+    ).toMatchObject({ code: "invalid_payload", field: "anamnese" });
+  });
+
+  it("rejeita anamnese com controle no text", () => {
+    expect(
+      validateFinalizeInput({
+        decision: "declined",
+        anamnese: { text: "relato\0malicioso" },
+      })
+    ).toMatchObject({ code: "invalid_payload", field: "anamnese" });
+  });
+
+  it("rejeita anamnese acima do limite serializado (32 KB)", () => {
+    expect(
+      validateFinalizeInput({
+        decision: "declined",
+        anamnese: { text: "a".repeat(15000), extra: "b".repeat(20000) },
+      })
+    ).toMatchObject({ code: "invalid_payload", field: "anamnese" });
+  });
+
+  it("rejeita anamnese.text acima do limite (16k chars)", () => {
+    expect(
+      validateFinalizeInput({
+        decision: "declined",
+        anamnese: { text: "a".repeat(17000) },
+      })
+    ).toMatchObject({ code: "invalid_payload", field: "anamnese" });
+  });
+
+  it("rejeita hipotese com muitas linhas (> 80)", () => {
+    const manyLines = Array.from({ length: 81 }, (_, i) => `l${i}`).join("\n");
+    expect(
+      validateFinalizeInput({ decision: "declined", hipotese: manyLines })
+    ).toMatchObject({ code: "invalid_payload", field: "hipotese" });
   });
 });
 

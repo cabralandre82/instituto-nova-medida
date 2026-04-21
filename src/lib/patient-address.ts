@@ -1,24 +1,31 @@
 /**
- * Validação e normalização de endereço do paciente (D-044 · onda 2.C).
+ * Validação e normalização de endereço do paciente (D-044 · onda 2.C,
+ * endurecido em PR-035 · D-053).
  *
  * Código PURO — sem I/O, sem Supabase, sem fetch. Isso é o que
  * transforma entrada de formulário em shape canônico pra gravar
  * em `customers.address_*` e `fulfillments.shipping_*`, e pra
  * derivar o `shipping_snapshot` que entra no hash do aceite.
  *
- * ViaCEP: não chamamos daqui. O CheckoutForm e o OfferForm fazem
- * o fetch client-side (UX melhor — mostra "buscando CEP" enquanto
- * digita). A lib só valida o resultado final que o usuário submete.
+ * ViaCEP: não chamamos daqui. Os formulários agora consultam o proxy
+ * `/api/cep/[cep]` (ver `src/lib/cep.ts` + `src/app/api/cep/[cep]/
+ * route.ts`). Esta lib só valida o que volta pra `accept`.
  *
  * Regras fortes:
  *   - CEP: 8 dígitos após `\D`-strip. Só dígitos são gravados.
  *   - UF: 2 letras maiúsculas (validado contra lista de estados).
- *   - Recipient, street, district, city: >= 2 caracteres não-espaço.
- *   - Number: obrigatório (pra "sem número" use "S/N" explícito).
- *   - Complement: opcional; null quando vazio.
+ *   - Recipient, street, district, city: >= 2 caracteres não-espaço +
+ *     charset allowlist (PR-035 · audit [22.1]) — bloqueia `<`, `>`,
+ *     `{`, `}`, `\n`, `\r`, tags HTML, placeholders de template.
+ *   - Number: obrigatório. Aceita `S/N`. Charset alfanumérico + `/-`.
+ *   - Complement: opcional; null quando vazio. Mesmo charset de street.
+ *   - Tamanhos máximos batem com `CEP_FIELD_LIMITS` (cep.ts) — assim o
+ *     que o ViaCEP devolver nunca excede o que o form aceita.
  */
 
 import type { ShippingSnapshot } from "./fulfillments";
+import { CEP_CHARSET_PATTERNS, CEP_FIELD_LIMITS } from "./cep";
+import { cleanText, hasControlChars } from "./text-sanitize";
 
 // ────────────────────────────────────────────────────────────────────────
 // Tipos
@@ -68,6 +75,26 @@ const BR_STATES: ReadonlySet<string> = new Set([
   "RS", "RO", "RR", "SC", "SP", "SE", "TO",
 ]);
 
+/**
+ * Charset e limites específicos de inputs de formulário (diferentes dos
+ * campos retornados pelo ViaCEP porque o usuário digita coisas como
+ * número de apartamento, nome de destinatário, "S/N").
+ *
+ * Usamos espaço LITERAL (U+0020) — não `\s` — pra bloquear `\n`, `\r`,
+ * `\t` e outros whitespace que sejam vetores de injection.
+ */
+// Recipient aceita parênteses além do básico, porque brasileiros
+// costumam anotar "Maria Silva (vizinha)" pra orientar o entregador.
+const PATTERN_RECIPIENT = /^[\p{L} .,'()\-]+$/u;
+const PATTERN_NUMBER = /^[\p{L}\p{N} .'\-/]+$/u;
+const PATTERN_COMPLEMENT = /^[\p{L}\p{N} .,'()\-/ºª°]*$/u;
+
+const FIELD_LIMITS = {
+  recipient: 120,
+  number: 20,
+  complement: 120,
+} as const;
+
 // ────────────────────────────────────────────────────────────────────────
 // Normalizações
 // ────────────────────────────────────────────────────────────────────────
@@ -80,10 +107,9 @@ export function normalizeState(raw: string): string {
   return raw.trim().toUpperCase();
 }
 
-/** Remove espaços duplos, trim, e normaliza Unicode pra NFC. */
-function cleanText(raw: string): string {
-  return raw.normalize("NFC").replace(/\s+/g, " ").trim();
-}
+// `cleanText` e `hasControlChars` agora vivem em `text-sanitize.ts`
+// (PR-036 · D-054) pra serem reutilizados por `/api/lead` e outros
+// endpoints. Importados no topo deste arquivo.
 
 // ────────────────────────────────────────────────────────────────────────
 // Validação
@@ -110,21 +136,37 @@ export function validateAddress(
   const street = cleanText(input.street);
   if (street.length < 2) {
     errors.street = "Informe o nome da rua.";
+  } else if (street.length > CEP_FIELD_LIMITS.street) {
+    errors.street = `Rua acima de ${CEP_FIELD_LIMITS.street} caracteres.`;
+  } else if (hasControlChars(input.street) || !CEP_CHARSET_PATTERNS.street.test(street)) {
+    errors.street = "Rua contém caracteres não permitidos.";
   }
 
   const number = cleanText(input.number);
   if (number.length < 1) {
     errors.number = "Informe o número (use S/N se não houver).";
+  } else if (number.length > FIELD_LIMITS.number) {
+    errors.number = `Número acima de ${FIELD_LIMITS.number} caracteres.`;
+  } else if (hasControlChars(input.number) || !PATTERN_NUMBER.test(number)) {
+    errors.number = "Número contém caracteres não permitidos.";
   }
 
   const district = cleanText(input.district);
   if (district.length < 2) {
     errors.district = "Informe o bairro.";
+  } else if (district.length > CEP_FIELD_LIMITS.district) {
+    errors.district = `Bairro acima de ${CEP_FIELD_LIMITS.district} caracteres.`;
+  } else if (hasControlChars(input.district) || !CEP_CHARSET_PATTERNS.district.test(district)) {
+    errors.district = "Bairro contém caracteres não permitidos.";
   }
 
   const city = cleanText(input.city);
   if (city.length < 2) {
     errors.city = "Informe a cidade.";
+  } else if (city.length > CEP_FIELD_LIMITS.city) {
+    errors.city = `Cidade acima de ${CEP_FIELD_LIMITS.city} caracteres.`;
+  } else if (hasControlChars(input.city) || !CEP_CHARSET_PATTERNS.city.test(city)) {
+    errors.city = "Cidade contém caracteres não permitidos.";
   }
 
   const state = normalizeState(input.state);
@@ -139,10 +181,22 @@ export function validateAddress(
   const recipient = cleanText(recipientRaw);
   if (recipient.length < 3) {
     errors.recipient_name = "Nome do destinatário muito curto.";
+  } else if (recipient.length > FIELD_LIMITS.recipient) {
+    errors.recipient_name = `Destinatário acima de ${FIELD_LIMITS.recipient} caracteres.`;
+  } else if (hasControlChars(recipientRaw) || !PATTERN_RECIPIENT.test(recipient)) {
+    errors.recipient_name = "Nome do destinatário contém caracteres não permitidos.";
   }
 
   const complementRaw = input.complement ?? "";
   const complement = cleanText(complementRaw);
+  if (complement.length > FIELD_LIMITS.complement) {
+    errors.complement = `Complemento acima de ${FIELD_LIMITS.complement} caracteres.`;
+  } else if (
+    complement.length > 0 &&
+    (hasControlChars(complementRaw) || !PATTERN_COMPLEMENT.test(complement))
+  ) {
+    errors.complement = "Complemento contém caracteres não permitidos.";
+  }
 
   if (Object.keys(errors).length > 0) {
     return { ok: false, errors };

@@ -90,11 +90,32 @@ médica, com `effective_from` e `effective_to` pra histórico).
 
 | Evento | Ação |
 |---|---|
-| Daily `meeting.ended` (consulta agendada) | Cria `consultation` no valor regra |
-| Daily `meeting.ended` (consulta on-demand) | Cria `consultation` + `on_demand_bonus` |
+| Asaas `PAYMENT_RECEIVED` (consulta agendada) | Cria `consultation` no valor regra |
+| Asaas `PAYMENT_RECEIVED` (consulta on-demand) | Cria `consultation` + `on_demand_bonus` |
+| Asaas `PAYMENT_RECEIVED_IN_CASH` | Idem (pagamento em dinheiro marcado manualmente) |
 | pg_cron horário (médica em "verde") | Cria `plantao_hour` proporcional |
 | Asaas `PAYMENT_REFUNDED` ou `_CHARGEBACK` | Cria `refund_clawback` negativo do valor da consulta |
 | Admin clica "ajustar" em /admin/doctors/[id] | Cria `adjustment` com motivo |
+
+> **Earning = dinheiro liquidado, não cartão aprovado** (PR-014 · D-050).
+>
+> O evento `PAYMENT_CONFIRMED` (cartão aprovado pelo adquirente mas ainda
+> não compensado na conta do Instituto) **não cria earning**. Ele só ativa
+> o lado UX: appointment sai de `pending_payment`, sala Daily é
+> provisionada e paciente recebe "pagamento confirmado" no WhatsApp.
+>
+> A earning só é criada no segundo webhook (`PAYMENT_RECEIVED`), quando
+> o Asaas confirma que o dinheiro caiu. Para PIX e boleto isso é
+> instantâneo (não passam pelo `CONFIRMED`). Para cartão, há atraso de
+> D+2 (débito) ou D+30 (crédito).
+>
+> **Motivo:** proteger o Instituto contra chargeback. Se earning fosse
+> criado em `CONFIRMED`, a médica poderia sacar no repasse mensal antes
+> de o cartão compensar; um chargeback posterior viraria prejuízo
+> operacional (earning já saiu, e clawback só ativa no próximo ciclo).
+>
+> Implementação: `src/lib/payment-event-category.ts` + uso em
+> `src/app/api/asaas/webhook/route.ts`.
 
 ### Quando uma earning vira `available`
 

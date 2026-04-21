@@ -22,12 +22,31 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { sanitizeFreeText } from "./text-sanitize";
 
 // ────────────────────────────────────────────────────────────────────────
 // Tipos
 // ────────────────────────────────────────────────────────────────────────
 
 export type PrescriptionDecision = "prescribed" | "declined";
+
+// Limites pra campos clínicos livres. Ajustados pro caso clínico real
+// (anamnese pode ser longa quando a médica cola relato; hipotese/conduta
+// são mais concisas). Usados também como base das CHECK constraints no
+// banco (migration `20260503000000_clinical_text_hardening.sql`).
+export const APPOINTMENT_TEXT_LIMITS = {
+  hipoteseMaxLen: 4000,
+  hipoteseMaxLines: 80,
+  condutaMaxLen: 4000,
+  condutaMaxLines: 80,
+  anamneseTextMaxLen: 16000,
+  anamneseTextMaxLines: 400,
+  /**
+   * Limite do JSONB `anamnese` serializado (todos campos). Usado pro
+   * CHECK (pg_column_size) no banco. Com folga pra evolução futura.
+   */
+  anamneseJsonMaxBytes: 32768,
+} as const;
 
 /**
  * Payload que chega da UI. Campos opcionais viram null/undefined
@@ -69,6 +88,25 @@ export type FinalizeFailure = {
 };
 
 export type FinalizeResult = FinalizeSuccess | FinalizeFailure;
+
+/**
+ * Versão do payload após `validateFinalizeInput`. Campos de texto livre
+ * passaram por `sanitizeFreeText` (controles removidos, linhas
+ * normalizadas), e `anamnese.text` foi sanitizada (quando presente). É
+ * essa forma que é gravada no banco.
+ */
+export type FinalizeInputSanitized = Omit<
+  FinalizeInput,
+  "hipotese" | "conduta" | "anamnese"
+> & {
+  hipotese: string | null;
+  conduta: string | null;
+  anamnese: Record<string, unknown> | null;
+};
+
+export type FinalizeValidationResult =
+  | FinalizeFailure
+  | { ok: true; sanitized: FinalizeInputSanitized };
 
 type AppointmentRow = {
   id: string;
@@ -112,20 +150,56 @@ function shouldMarkCompleted(currentStatus: string): boolean {
   );
 }
 
+function reasonMessageForClinicalField(
+  field: "hipotese" | "conduta" | "anamnese",
+  reason: "empty" | "too_long" | "too_many_lines" | "control_chars"
+): string {
+  const labels = {
+    hipotese: "Hipótese",
+    conduta: "Conduta",
+    anamnese: "Anamnese",
+  } as const;
+  const label = labels[field];
+  switch (reason) {
+    case "empty":
+      return `${label} inválida.`;
+    case "too_long":
+      return `${label} excede o tamanho permitido.`;
+    case "too_many_lines":
+      return `${label} tem muitas linhas. Condense ou divida em seções.`;
+    case "control_chars":
+      return `${label} contém caracteres não permitidos (controle, zero-width ou bidi override).`;
+    default:
+      return `${label} inválida.`;
+  }
+}
+
 /**
- * Valida forma do payload. Checagens que não dependem do banco.
+ * Valida forma do payload + sanitiza campos de texto livre.
  *
  * Regras:
  *   - `decision` obrigatório.
  *   - Se prescribed: `prescribed_plan_id` e `memed_prescription_url`
  *     são obrigatórios. A URL precisa ser http(s).
  *   - `prescribed_plan_id` em formato UUID quando presente.
- *   - Campos de texto livre não podem exceder 8000 chars (evita
- *     payload maligno sem precisar de limite hard no banco).
+ *   - `hipotese` / `conduta`: texto livre multi-linha, ≤ 4000 chars e
+ *     ≤ 80 linhas cada. Rejeita controles malignos (NULL, ESC, DEL,
+ *     zero-width, bidi override, line/paragraph separator).
+ *   - `anamnese`: jsonb opcional. Quando presente, é um objeto cujo
+ *     único campo conhecido é `text` (string). O `text` também passa
+ *     por `sanitizeFreeText` com limites mais generosos (16k / 400
+ *     linhas). Campos extras no objeto são PRESERVADOS (schema futuro
+ *     de anamnese estruturada), mas o JSON inteiro não pode exceder
+ *     o limite total. Outras chaves-valor não são sanitizadas aqui —
+ *     virá em iteração futura quando o schema estruturado existir.
+ *
+ * Retorno: em sucesso, devolve `{ ok: true, sanitized }` com os textos
+ * já normalizados (NFC, trim right por linha, collapse de blank runs).
+ * É essa forma sanitizada que é gravada.
  */
 export function validateFinalizeInput(
   input: FinalizeInput
-): FinalizeFailure | null {
+): FinalizeValidationResult {
   if (input.decision !== "prescribed" && input.decision !== "declined") {
     return {
       ok: false,
@@ -135,26 +209,113 @@ export function validateFinalizeInput(
     };
   }
 
-  const maxLen = 8000;
-  if (typeof input.hipotese === "string" && input.hipotese.length > maxLen) {
+  // ───────── Sanitização de texto livre (PR-036-B · D-055) ─────────
+  const hipoteseResult = sanitizeFreeText(input.hipotese ?? "", {
+    maxLen: APPOINTMENT_TEXT_LIMITS.hipoteseMaxLen,
+    maxLines: APPOINTMENT_TEXT_LIMITS.hipoteseMaxLines,
+    allowEmpty: true,
+  });
+  if (!hipoteseResult.ok) {
     return {
       ok: false,
       code: "invalid_payload",
-      message: "Hipótese excede 8000 caracteres.",
+      message: reasonMessageForClinicalField("hipotese", hipoteseResult.reason),
       field: "hipotese",
     };
   }
-  if (typeof input.conduta === "string" && input.conduta.length > maxLen) {
+  const hipoteseSanitized = hipoteseResult.value || null;
+
+  const condutaResult = sanitizeFreeText(input.conduta ?? "", {
+    maxLen: APPOINTMENT_TEXT_LIMITS.condutaMaxLen,
+    maxLines: APPOINTMENT_TEXT_LIMITS.condutaMaxLines,
+    allowEmpty: true,
+  });
+  if (!condutaResult.ok) {
     return {
       ok: false,
       code: "invalid_payload",
-      message: "Conduta excede 8000 caracteres.",
+      message: reasonMessageForClinicalField("conduta", condutaResult.reason),
       field: "conduta",
     };
   }
+  const condutaSanitized = condutaResult.value || null;
+
+  let anamneseSanitized: Record<string, unknown> | null = null;
+  if (input.anamnese !== null && input.anamnese !== undefined) {
+    if (
+      typeof input.anamnese !== "object" ||
+      Array.isArray(input.anamnese)
+    ) {
+      return {
+        ok: false,
+        code: "invalid_payload",
+        message: "Anamnese precisa ser um objeto.",
+        field: "anamnese",
+      };
+    }
+    const rawAnamnese = input.anamnese as Record<string, unknown>;
+    // Hoje só `text` é consumido pela UI. Sanitiza-o; preserva o resto
+    // (o schema pode evoluir no futuro, mas sem bypassar a CHECK de
+    // tamanho total no banco).
+    const nextAnamnese: Record<string, unknown> = { ...rawAnamnese };
+    if (
+      rawAnamnese.text !== undefined &&
+      rawAnamnese.text !== null &&
+      rawAnamnese.text !== ""
+    ) {
+      const textResult = sanitizeFreeText(rawAnamnese.text, {
+        maxLen: APPOINTMENT_TEXT_LIMITS.anamneseTextMaxLen,
+        maxLines: APPOINTMENT_TEXT_LIMITS.anamneseTextMaxLines,
+        allowEmpty: true,
+      });
+      if (!textResult.ok) {
+        return {
+          ok: false,
+          code: "invalid_payload",
+          message: reasonMessageForClinicalField(
+            "anamnese",
+            textResult.reason
+          ),
+          field: "anamnese",
+        };
+      }
+      nextAnamnese.text = textResult.value;
+    }
+    // Defesa adicional: pgbyteasize-lite. Se o JSON serializado passou
+    // do limite pré-banco (32KB), rejeita antes de hit no CHECK.
+    try {
+      const serialized = JSON.stringify(nextAnamnese);
+      if (
+        Buffer.byteLength(serialized, "utf8") >
+        APPOINTMENT_TEXT_LIMITS.anamneseJsonMaxBytes
+      ) {
+        return {
+          ok: false,
+          code: "invalid_payload",
+          message: reasonMessageForClinicalField("anamnese", "too_long"),
+          field: "anamnese",
+        };
+      }
+    } catch {
+      return {
+        ok: false,
+        code: "invalid_payload",
+        message: "Anamnese não serializável.",
+        field: "anamnese",
+      };
+    }
+    anamneseSanitized = nextAnamnese;
+  }
+
+  const baseSanitized: FinalizeInputSanitized = {
+    ...input,
+    hipotese: hipoteseSanitized,
+    conduta: condutaSanitized,
+    anamnese: anamneseSanitized,
+  };
 
   if (input.decision === "declined") {
-    return null;
+    return { ok: true, sanitized: baseSanitized };
   }
 
   // Aqui em diante: prescribed.
@@ -179,7 +340,7 @@ export function validateFinalizeInput(
     };
   }
 
-  return null;
+  return { ok: true, sanitized: baseSanitized };
 }
 
 function isUuid(s: string): boolean {
@@ -228,7 +389,8 @@ export async function finalizeAppointment(
   }
 ): Promise<FinalizeResult> {
   const validation = validateFinalizeInput(params.input);
-  if (validation) return validation;
+  if (!validation.ok) return validation;
+  const sanitizedInput = validation.sanitized;
 
   // 1. Carrega appointment e valida ownership + estado
   const apptRes = await supabase
@@ -274,11 +436,11 @@ export async function finalizeAppointment(
   }
 
   // 2. Se prescribed, valida plano ativo
-  if (params.input.decision === "prescribed") {
+  if (sanitizedInput.decision === "prescribed") {
     const planRes = await supabase
       .from("plans")
       .select("id, slug, active")
-      .eq("id", params.input.prescribed_plan_id as string)
+      .eq("id", sanitizedInput.prescribed_plan_id as string)
       .maybeSingle();
     if (planRes.error) {
       return {
@@ -309,7 +471,7 @@ export async function finalizeAppointment(
   // 3. Upsert idempotente do fulfillment (só quando prescribed)
   let fulfillmentId: string | null = null;
 
-  if (params.input.decision === "prescribed") {
+  if (sanitizedInput.decision === "prescribed") {
     const existingRes = await supabase
       .from("fulfillments")
       .select("id, appointment_id")
@@ -333,7 +495,7 @@ export async function finalizeAppointment(
           appointment_id: appt.id,
           customer_id: appt.customer_id,
           doctor_id: appt.doctor_id,
-          plan_id: params.input.prescribed_plan_id,
+          plan_id: sanitizedInput.prescribed_plan_id,
           status: "pending_acceptance",
           updated_by_user_id: params.userId,
         })
@@ -359,18 +521,18 @@ export async function finalizeAppointment(
 
   const patch: Record<string, unknown> = {
     finalized_at: now,
-    prescription_status: params.input.decision,
+    prescription_status: sanitizedInput.decision,
     status: nextStatus,
     updated_at: now,
-    anamnese: params.input.anamnese ?? null,
-    hipotese: params.input.hipotese ?? null,
-    conduta: params.input.conduta ?? null,
+    anamnese: sanitizedInput.anamnese,
+    hipotese: sanitizedInput.hipotese,
+    conduta: sanitizedInput.conduta,
   };
 
-  if (params.input.decision === "prescribed") {
-    patch.prescribed_plan_id = params.input.prescribed_plan_id;
-    patch.memed_prescription_url = params.input.memed_prescription_url;
-    patch.memed_prescription_id = params.input.memed_prescription_id ?? null;
+  if (sanitizedInput.decision === "prescribed") {
+    patch.prescribed_plan_id = sanitizedInput.prescribed_plan_id;
+    patch.memed_prescription_url = sanitizedInput.memed_prescription_url;
+    patch.memed_prescription_id = sanitizedInput.memed_prescription_id ?? null;
   } else {
     patch.prescribed_plan_id = null;
     patch.memed_prescription_url = null;

@@ -34,6 +34,8 @@ import {
   isSlotAvailable,
 } from "@/lib/scheduling";
 import { signPatientToken, buildConsultationUrl } from "@/lib/patient-tokens";
+import { formatDateTimeBR } from "@/lib/datetime-br";
+import { sanitizeShortText, TEXT_PATTERNS } from "@/lib/text-sanitize";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -84,8 +86,21 @@ function parse(raw: unknown): Body | { error: string } {
   if (typeof b.scheduledAt !== "string" || Number.isNaN(Date.parse(b.scheduledAt)))
     return { error: "slot_invalid" };
 
-  if (typeof b.name !== "string" || b.name.trim().length < 3)
+  // PR-037 · D-056: sanitização apertada — nome entra em WhatsApp,
+  // logs e eventual prompt de LLM. Ver comentário idêntico em
+  // `/api/checkout/route.ts`.
+  const nameSanitization =
+    typeof b.name === "string"
+      ? sanitizeShortText(b.name, {
+          maxLen: 120,
+          minLen: 3,
+          pattern: TEXT_PATTERNS.personName,
+        })
+      : ({ ok: false as const, reason: "empty" as const });
+  if (!nameSanitization.ok) {
     return { error: "name_invalid" };
+  }
+  const sanitizedName = nameSanitization.value;
 
   const cpfDigits = typeof b.cpf === "string" ? b.cpf.replace(/\D/g, "") : "";
   if (cpfDigits.length !== 11) return { error: "cpf_invalid" };
@@ -123,7 +138,7 @@ function parse(raw: unknown): Body | { error: string } {
     scheduledAt: new Date(b.scheduledAt).toISOString(),
     doctorId: typeof b.doctorId === "string" ? b.doctorId : undefined,
     recordingConsent: Boolean(b.recordingConsent),
-    name: b.name.trim(),
+    name: sanitizedName,
     cpf: cpfDigits,
     email: b.email.trim().toLowerCase(),
     phone: phoneDigits,
@@ -363,7 +378,7 @@ export async function POST(req: Request) {
     .eq("id", appointmentId);
 
   // 8) Cria cobrança Asaas
-  const description = `${plan.name} — consulta em ${new Date(input.scheduledAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })} · Instituto Nova Medida`;
+  const description = `${plan.name} — consulta em ${formatDateTimeBR(input.scheduledAt)} · Instituto Nova Medida`;
   const created = await createPayment({
     customerId: asaasCustomerId,
     amountCents,
