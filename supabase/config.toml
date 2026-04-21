@@ -1,0 +1,68 @@
+# Supabase project configuration as code (Management API).
+#
+# This file reflects the desired state of settings we want to manage via git.
+# Apply with: `supabase config push`
+#
+# We intentionally keep this file minimal. Sections and keys omitted here are
+# left untouched on the remote project by `supabase config push` (so SMTP,
+# templates, providers, DB settings etc. remain whatever the dashboard has).
+#
+# Only Auth URL configuration is managed here today because:
+#   - magic-link redirects depend on exact URL whitelisting
+#   - we want dev (localhost), prod and preview deployments to all work
+#   - versioning the whitelist prevents drift between environments
+
+project_id = "instituto-nova-medida"
+
+[auth]
+# Canonical production URL. Supabase also uses this as the default fallback
+# redirect when `emailRedirectTo` is missing or not whitelisted.
+site_url = "https://instituto-nova-medida.vercel.app"
+
+# Exact-match + glob list of URLs auth is allowed to redirect to after email
+# magic-links, OAuth, recovery, etc. Entries must include the full scheme.
+#
+# Patterns covered:
+#   - local dev (Next.js on port 3000)
+#   - production canonical alias
+#   - Vercel preview deployments (per-branch and per-commit hashes)
+additional_redirect_urls = [
+  "http://localhost:3000",
+  "http://localhost:3000/**",
+  "https://instituto-nova-medida.vercel.app",
+  "https://instituto-nova-medida.vercel.app/**",
+  "https://instituto-nova-medida-*-cabralandre-3009s-projects.vercel.app/**",
+  "https://instituto-nova-medida-git-*-cabralandre-3009s-projects.vercel.app/**",
+]
+
+# The following blocks only mirror values already set on the remote project.
+# They exist to prevent `supabase config push` from resetting them to CLI
+# defaults (which differ from the defaults the Supabase dashboard applies at
+# project creation time). Update them consciously when the remote changes.
+
+[auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
+
+[auth.email]
+enable_confirmations = true
+max_frequency = "1m0s"
+otp_length = 8
+
+# Custom magic-link email template.
+#
+# Why we override the Supabase default: the default template points the
+# "Log In" link at `{{ .ConfirmationURL }}` (Supabase's /auth/v1/verify),
+# which in turn redirects to the app WITHOUT a `?code=` querystring when
+# the link was created by a non-PKCE client (our service-role admin).
+# The callback then sees no code and bails with error=invalid.
+#
+# The template below sends users straight to our /api/auth/callback with
+# `token_hash` + `type`. The callback calls `verifyOtp({ token_hash, type })`,
+# which does not need a PKCE verifier. Works from any browser.
+#
+# Exploits that `{{ .RedirectTo }}` already contains `?next=...`, so we
+# append extra params with `&` instead of `?` to avoid double-`?`.
+[auth.email.template.magic_link]
+subject = "Link de acesso · Instituto Nova Medida"
+content_path = "./supabase/templates/magic-link.html"

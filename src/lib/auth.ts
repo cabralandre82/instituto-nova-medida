@@ -16,6 +16,7 @@
 
 import { redirect } from "next/navigation";
 import { getSupabaseServer } from "@/lib/supabase-server";
+import { getSupabaseAdmin } from "@/lib/supabase";
 import type { User } from "@supabase/supabase-js";
 
 export type Role = "admin" | "doctor" | "patient";
@@ -122,7 +123,11 @@ export async function requirePatient(): Promise<{
     redirect("/paciente/login?error=forbidden");
   }
 
-  const supabase = getSupabaseServer();
+  // NOTE: usamos service role aqui porque a RLS da tabela `customers` é
+  // `deny authenticated all` (migration 20260419030000). A sessão já foi
+  // validada acima via `requireAuth` (JWT checado contra /auth/v1/user),
+  // então o lookup por `user_id = user.id` só retorna o próprio registro.
+  const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
     .from("customers")
     .select("id")

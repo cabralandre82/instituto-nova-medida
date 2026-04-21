@@ -1,27 +1,50 @@
 /**
- * GET /api/auth/callback?code=...&next=...
+ * GET /api/auth/callback?token_hash=...&type=...&next=...
+ *                        (fluxo preferencial — magic-link server-side)
  *
- * Endpoint que o magic link aponta. Troca o `code` (PKCE) por uma
- * sessão (cookie) e redireciona pro `next`.
+ * GET /api/auth/callback?code=...&next=...
+ *                        (fluxo PKCE — OAuth, ou SDK client-side com PKCE)
+ *
+ * Valida a credencial do link de e-mail e troca por uma sessão (cookie),
+ * depois redireciona pro `next`.
+ *
+ * Por que dois caminhos?
+ *   - `token_hash` + `type`: nosso template de magic-link aponta pra cá.
+ *     Funciona em qualquer browser (não precisa de code_verifier).
+ *     Usado com `signInWithOtp` chamado pelo admin client.
+ *   - `code`: fallback pra fluxos PKCE (OAuth providers, SDK JS com cookies
+ *     próprios). Mantido por compatibilidade e pra casos futuros.
  *
  * Doc: https://supabase.com/docs/guides/auth/server-side/nextjs
  */
 
 import { NextResponse } from "next/server";
+import type { EmailOtpType } from "@supabase/supabase-js";
 import { getSupabaseRouteHandler } from "@/lib/supabase-server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const VALID_OTP_TYPES: ReadonlySet<EmailOtpType> = new Set<EmailOtpType>([
+  "signup",
+  "invite",
+  "magiclink",
+  "recovery",
+  "email_change",
+  "email",
+]);
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
+  const tokenHash = url.searchParams.get("token_hash");
+  const type = url.searchParams.get("type");
   const code = url.searchParams.get("code");
   const rawNext = url.searchParams.get("next") ?? "/admin";
   const safeNext =
     rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "/admin";
 
   // Determina qual login receberia o erro com base no `next`.
-  // /medico/*  → /medico/login
+  // /medico/*   → /medico/login
   // /paciente/* → /paciente/login
   // qualquer outro (incl. /admin/*) → /admin/login
   const loginBase = safeNext.startsWith("/medico")
@@ -30,20 +53,40 @@ export async function GET(req: Request) {
       ? "/paciente/login"
       : "/admin/login";
 
-  if (!code) {
-    return NextResponse.redirect(new URL(`${loginBase}?error=invalid`, req.url));
-  }
+  const fail = (reason: "invalid" | "expired" | "callback") =>
+    NextResponse.redirect(new URL(`${loginBase}?error=${reason}`, req.url));
 
   const supabase = getSupabaseRouteHandler();
-  const { error } = await supabase.auth.exchangeCodeForSession(code);
 
-  if (error) {
-    console.error("[auth/callback] exchangeCodeForSession:", error);
-    const reason = error.message?.toLowerCase().includes("expired")
-      ? "expired"
-      : "callback";
-    return NextResponse.redirect(new URL(`${loginBase}?error=${reason}`, req.url));
+  if (tokenHash && type) {
+    if (!VALID_OTP_TYPES.has(type as EmailOtpType)) {
+      return fail("invalid");
+    }
+    const { error } = await supabase.auth.verifyOtp({
+      token_hash: tokenHash,
+      type: type as EmailOtpType,
+    });
+    if (error) {
+      console.error("[auth/callback] verifyOtp:", error);
+      const reason = error.message?.toLowerCase().includes("expired")
+        ? "expired"
+        : "callback";
+      return fail(reason);
+    }
+    return NextResponse.redirect(new URL(safeNext, req.url));
   }
 
-  return NextResponse.redirect(new URL(safeNext, req.url));
+  if (code) {
+    const { error } = await supabase.auth.exchangeCodeForSession(code);
+    if (error) {
+      console.error("[auth/callback] exchangeCodeForSession:", error);
+      const reason = error.message?.toLowerCase().includes("expired")
+        ? "expired"
+        : "callback";
+      return fail(reason);
+    }
+    return NextResponse.redirect(new URL(safeNext, req.url));
+  }
+
+  return fail("invalid");
 }
