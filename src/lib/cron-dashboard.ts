@@ -32,6 +32,11 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { logger } from "./logger";
+import {
+  clampWindowMinutes,
+  correlateErrorsInWindow,
+} from "./cron-correlation";
+import { loadErrorLog, type ErrorEntry } from "./error-log";
 
 const log = logger.with({ mod: "cron-dashboard" });
 
@@ -127,12 +132,49 @@ export type CronJobSummary = {
   /** Mensagem do último run com erro (se houver). */
   last_error_at: string | null;
   last_error_message: string | null;
+  /**
+   * PR-069 · D-077 · finding [17.5]. Correlação temporal: quantos
+   * outros erros (Asaas/Daily/WA) ocorreram em ±N min em torno do
+   * `last_error_at`. Populado apenas se `loadCronDashboard` receber
+   * `correlation: true` — caso contrário permanece `null` pra manter
+   * o dashboard leve quando não precisa.
+   */
+  last_error_correlation: CronLastErrorCorrelation | null;
   /** Buckets diários da janela (do mais antigo ao mais novo). */
   daily: DailyBucket[];
   /** Comparação semana atual vs anterior. */
   week_delta: WeekDelta;
   /** Últimas 20 execuções em ordem decrescente (mais recente primeiro). */
   recent_runs: CronRunRow[];
+};
+
+/**
+ * PR-069 · D-077: resumo da correlação temporal de um `last_error_at`
+ * com outras fontes de erro consolidadas em `error-log.ts`.
+ */
+export type CronLastErrorCorrelation = {
+  /** Raio da janela em min (default 15 → ±15min). */
+  window_minutes: number;
+  /** Total de erros correlatos (excluindo o próprio cron). */
+  total: number;
+  /** Quebra por fonte. Sempre presente, mesmo com 0. */
+  by_source: {
+    cron: number;
+    asaas_webhook: number;
+    daily_webhook: number;
+    notification: number;
+    whatsapp_delivery: number;
+  };
+  /**
+   * Até 5 entries mais próximas do anchor, ordenadas por proximidade.
+   * Mais que isso a UI manda o operador pra `/admin/errors?ts=...`.
+   */
+  top_entries: Array<{
+    source: "cron" | "asaas_webhook" | "daily_webhook" | "notification" | "whatsapp_delivery";
+    label: string;
+    occurred_at: string;
+    reference: string;
+  }>;
 };
 
 export type CronDashboardReport = {
@@ -338,6 +380,7 @@ function buildJobSummary(
     last_run,
     last_error_at,
     last_error_message,
+    last_error_correlation: null,
     daily,
     week_delta,
     recent_runs: sortedDesc.slice(0, 20),
@@ -487,13 +530,104 @@ function dateKey(ms: number): string {
  */
 export async function loadCronDashboard(
   supabase: SupabaseClient,
-  opts: { windowDays: number; expectedJobs?: string[] }
+  opts: {
+    windowDays: number;
+    expectedJobs?: string[];
+    /**
+     * PR-069 · D-077. Se `true`, carrega o error-log consolidado da
+     * janela e popula `last_error_correlation` pra cada job com
+     * `last_error_at`. Faz uma única query extra — não é N+1. Default
+     * `false` pra manter dashboards antigos não-afetados.
+     */
+    correlation?: boolean;
+    /** Raio da janela de correlação em min (default 15 → ±15min). */
+    correlationWindowMinutes?: number;
+  }
 ): Promise<CronDashboardReport> {
   const rows = await fetchCronRunsWindow(supabase, opts.windowDays);
-  return buildCronDashboard(rows, {
+  const report = buildCronDashboard(rows, {
     windowDays: opts.windowDays,
     expectedJobs: opts.expectedJobs,
   });
+
+  if (opts.correlation) {
+    const windowMinutes = clampWindowMinutes(opts.correlationWindowMinutes);
+    await attachErrorCorrelations(supabase, report, { windowMinutes });
+  }
+
+  return report;
+}
+
+/**
+ * PR-069 · D-077. Popula `last_error_correlation` em cada job do
+ * report que tenha `last_error_at`. Uma única query ao error-log
+ * cobrindo a janela do dashboard — evita N+1.
+ *
+ * Fail-soft: se a query ao error-log falhar, cada job fica com
+ * `last_error_correlation = null` e um log estruturado é emitido. A
+ * página ainda renderiza — a correlação é valor agregado, não
+ * bloqueante.
+ */
+export async function attachErrorCorrelations(
+  supabase: SupabaseClient,
+  report: CronDashboardReport,
+  opts: { windowMinutes?: number } = {}
+): Promise<void> {
+  const windowMinutes = clampWindowMinutes(opts.windowMinutes);
+  const jobsWithError = report.jobs.filter((j) => j.last_error_at);
+  if (jobsWithError.length === 0) return;
+
+  // Janela do error-log: a do dashboard, limitada em 720h (30d) pelo
+  // loader. Se dashboard pedir 90d, o error-log trunca em 30d e
+  // correlações mais antigas ficam sem contexto cruzado — aceito:
+  // operador que olha 90d quer tendência, não forensics de 2 meses
+  // atrás. Pra isso existe `/admin/errors?h=720`.
+  let entries: readonly ErrorEntry[] = [];
+  try {
+    const log = await loadErrorLog(supabase, {
+      windowHours: report.window_days * 24,
+      perSourceLimit: 500,
+    });
+    entries = log.entries;
+  } catch (err) {
+    log.error("attachErrorCorrelations · loadErrorLog falhou", {
+      err: err instanceof Error ? err.message : String(err),
+      window_days: report.window_days,
+    });
+    return;
+  }
+
+  for (const job of jobsWithError) {
+    if (!job.last_error_at) continue;
+    const lastErrRun = job.recent_runs.find(
+      (r) => r.status === "error" && (r.finished_at ?? r.started_at) === job.last_error_at
+    );
+    const excludeRef = lastErrRun ? `cron_runs:${lastErrRun.id}` : null;
+
+    const corr = correlateErrorsInWindow(entries, {
+      anchorAt: job.last_error_at,
+      windowMinutes,
+      excludeReference: excludeRef,
+    });
+
+    job.last_error_correlation = {
+      window_minutes: corr.windowMinutes,
+      total: corr.total,
+      by_source: {
+        cron: corr.bySource.cron,
+        asaas_webhook: corr.bySource.asaas_webhook,
+        daily_webhook: corr.bySource.daily_webhook,
+        notification: corr.bySource.notification,
+        whatsapp_delivery: corr.bySource.whatsapp_delivery,
+      },
+      top_entries: corr.entries.slice(0, 5).map((e) => ({
+        source: e.source,
+        label: e.label,
+        occurred_at: e.occurredAt,
+        reference: e.reference,
+      })),
+    };
+  }
 }
 
 // Exporta só pra testes que queiram cobrir os helpers diretamente.

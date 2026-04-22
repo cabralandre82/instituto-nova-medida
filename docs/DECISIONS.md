@@ -5,6 +5,194 @@
 
 ---
 
+## D-077 · Correlação temporal entre falhas de cron e demais fontes de erro, sem tabela física nova (PR-069 · finding 17.5) · 2026-04-20
+
+**Contexto.** O operador solo via `/admin/crons` consegue ver que um
+cron específico falhou N vezes na janela, com `last_error_at` e
+`last_error_message`. Mas ao investigar, ficava a pergunta crítica:
+*"foi bug do cron ou dependência externa fora do ar?"*. Responder
+exigia abrir `/admin/errors` em outra aba, lembrar o horário exato,
+raciocinar por proximidade temporal. Finding [17.5 🟡 MÉDIO] da
+auditoria capturou isso: "`cron_runs.error_message` texto simples vs
+`error-log.ts` — duas fontes não cruzadas → admin solo não vê relação
+'cron X falhou na mesma janela que Y deu erro'".
+
+A sugestão original do audit era unificar em uma tabela `error_log`
+com colunas `source: 'cron', job, run_id`. Rejeitada depois de
+inspecionar a arquitetura vigente.
+
+**Alternativas.**
+
+- **A. Tabela física `error_log` consolidada.** Rejeitado. `error-log.ts`
+  (D-045 · 3.G) já consolida as 5 fontes (cron_runs, asaas_events,
+  daily_events, appointment_notifications, whatsapp_events) como
+  **view lógica em memória** — chama 5 queries em paralelo e
+  devolve `ErrorEntry[]` unificado. Duplicar isso em tabela física
+  geraria:
+  1. Doubled writes (cron_runs + error_log) com risco de divergência
+     e retenção por tabela independente.
+  2. Perda da fonte da verdade — hoje cada erro vive só na tabela
+     origem, que tem política de retenção dedicada (cron_runs: eterno
+     por auditoria; asaas_events: 180d por PR-052 · D-069).
+  3. FK `cron_runs.error_log_id` tornaria o próprio `cron_runs`
+     dependente do consolidador — acoplamento inverso ao desejado.
+
+- **B. Coluna `cron_runs.related_error_refs jsonb`.** Rejeitado.
+  Exige escrita síncrona durante o cron (ou cron de reconciliação
+  assíncrona), e só atende um sentido — operador abrindo OUTRA fonte
+  não veria correlação com cron. Assimétrico e frágil.
+
+- **C. Correlação temporal computada on-demand, zero migration.**
+  **ESCOLHIDA.** O gap real do audit é *correlação temporal cruzada*,
+  não consolidação. `loadErrorLog` já entrega as 5 fontes ordenadas
+  por tempo — basta uma função pura que, dado um anchor e raio em
+  minutos, filtra e devolve estatísticas. Sem mudança de schema, sem
+  cron extra, sem duplicação de dados. Custo: 1 query adicional ao
+  carregar o dashboard de crons (só quando `correlation: true`).
+
+**Decisão.** Correlação temporal *computed view* com 3 peças:
+
+1. **Lib pura `src/lib/cron-correlation.ts`.**
+   - `correlateErrorsInWindow(entries, { anchorAt, windowMinutes,
+     excludeReference? })` — zero IO, totalmente testável.
+     - Filtra `entries` pra `[anchor − window, anchor + window]`.
+     - Exclui opcional por `reference` (formato `tabela:uuid` do
+       próprio `error-log.ts`) — default exclui o cron de origem
+       pra não se contar.
+     - Ordena por proximidade ao anchor; empates por `occurredAt`
+       descendente.
+     - Fail-safe: `occurredAt` inválido ignorado; `anchor` inválido
+       devolve no-op (total 0).
+   - `clampWindowMinutes(n)` — bordas em [1, 1440], default 15.
+   - `formatCorrelationSummary(bySource)` — compõe "2 Asaas · 1 envio
+     WA"; omite fontes com 0; ordem determinística (cron, Asaas,
+     Daily, envio WA, entrega WA); string vazia se tudo zero.
+
+2. **Orquestrador em `src/lib/cron-dashboard.ts`.**
+   - `loadCronDashboard(supabase, { ..., correlation?: boolean,
+     correlationWindowMinutes? })` — param opt-in. Default `false`
+     pra preservar comportamento legado.
+   - `attachErrorCorrelations(supabase, report, { windowMinutes })`
+     — uma única query ao error-log cobrindo a janela inteira do
+     dashboard (evita N+1), aí itera sobre jobs com `last_error_at`
+     e popula `job.last_error_correlation` via `correlateErrorsInWindow`.
+   - Fail-soft: se `loadErrorLog` explodir, cada job fica com
+     `last_error_correlation = null` e um `log.error` estruturado
+     é emitido. Dashboard continua renderizando — correlação é
+     valor agregado, não bloqueante.
+   - Exclui automaticamente a referência `cron_runs:{last_error_run_id}`
+     pra não contar o próprio cron na sua correlação.
+
+3. **UI em `/admin/crons` + `/admin/errors`.**
+   - No bloco "Último erro" de cada card em `/admin/crons`,
+     renderiza `<CorrelationInline>`:
+     - `total > 0`: "± 15min: 2 Asaas · 1 envio WA. ver correlação →"
+       — link leva pra `/admin/errors?ts={last_error_at}&w=15`.
+     - `total == 0`: "± 15min: sem outros erros. Provável bug deste
+       cron, não dependência externa." — confirma ao operador o
+       que é igualmente valioso: isolamento da falha.
+   - `/admin/errors` ganha params `?ts=ISO&w=minutos`:
+     - Amplia automaticamente a janela do error-log pra cobrir ao
+       menos o dobro do raio (evita perda de contexto na borda).
+     - Filtra entries via `correlateErrorsInWindow`.
+     - Banner terracotta no topo mostra "Modo correlação: ±15min em
+       torno de DD/MM HH:MM" + contagem + link "limpar filtro".
+     - Filtros existentes (`?h=`, `?source=`) preservam `ts`/`w`.
+
+**Campos novos em `CronJobSummary`.**
+
+```ts
+last_error_correlation: {
+  window_minutes: number;          // raio efetivo após clamp
+  total: number;                    // total de erros correlatos
+  by_source: {                      // quebra por fonte (sempre presente)
+    cron: number; asaas_webhook: number; daily_webhook: number;
+    notification: number; whatsapp_delivery: number;
+  };
+  top_entries: Array<{              // até 5 mais próximas
+    source: ErrorSource;
+    label: string;
+    occurred_at: string;
+    reference: string;              // formato `tabela:uuid`
+  }>;
+} | null;
+```
+
+`null` quando `loadCronDashboard` não foi chamado com `correlation: true`,
+quando `last_error_at` é null, ou quando a query ao error-log falhou.
+
+**Invariantes.**
+
+- I1. Correlação **nunca** conta o próprio cron (excludeReference).
+- I2. Clamping da janela: `[1, 1440]` minutos. Evita janela
+  degenerada (0) ou abuso (janela enorme pra tabela grande).
+- I3. Fail-soft: erro de IO em `loadErrorLog` não quebra o dashboard.
+- I4. Pureza: `correlateErrorsInWindow` não muta input. Teste
+  "não muta o input" cobre isso.
+- I5. Ordem determinística em `formatCorrelationSummary` — cron,
+  Asaas, Daily, envio WA, entrega WA — pra UI estável.
+- I6. Query única no orquestrador — não N+1 mesmo com 8 crons
+  errados na janela.
+
+**Trade-offs.**
+
+- **Precisão vs amplitude.** Janela de 15min capta incidente
+  sistêmico típico (Meta/Asaas fora 5-30min). Incidente longo ou
+  curto desvia — mas sparkline + `/admin/errors` já cobrem esses
+  casos.
+- **Sem reprocessamento automático.** Esta lib **detecta**
+  correlação, não age. Um cron que falha durante incidente Asaas
+  fica `cron_runs.status='error'` até o operador decidir reexecutar
+  manualmente (se aplicável). Mantém humano no loop — decisão
+  consciente de D-045.
+- **Janela do error-log = janela do dashboard.** Se operador pedir
+  30d no dashboard, o error-log carrega 30d × 5 fontes × 500 linhas
+  = 75k linhas máximo por chamada. Aceitável no caso esperado
+  (~200/fonte). Se volume crescer, a query já tem `perSourceLimit`
+  em `loadErrorLog` pra cap.
+
+**Consequências.**
+
+- Finding [17.5 🟡 MÉDIO] fechado sem tabela física nova.
+- 20 testes novos cobrindo lib pura (total: 1335, vs 1315 pre-PR).
+- `/admin/crons` ganha sinal diagnóstico em cada cron com erro —
+  operador decide em 1 olhada se é bug isolado ou sintoma
+  sistêmico.
+- `/admin/errors` ganha modo "correlação" reutilizável — qualquer
+  outro surface (futuro `/admin/errors?ts=X&w=10` linkado de
+  qualquer lugar) herda o filtro temporal.
+- Zero mudança em callers existentes de `loadCronDashboard` —
+  `correlation` é opt-in; chamadas sem o flag continuam idênticas.
+
+**Tests.**
+
+- `src/lib/cron-correlation.test.ts` (20 testes):
+  - `clampWindowMinutes`: default/NaN/Infinity, arredondamento,
+    bordas [1, 1440], passthrough.
+  - `correlateErrorsInWindow`: lista vazia, anchor inválido,
+    janela ±, exclude por reference, exclude null, datas inválidas
+    ignoradas, clampagem de janela, Date como anchor, sinceIso/
+    untilIso coerentes, não muta input, contagem múltipla por
+    source.
+  - `formatCorrelationSummary`: tudo zero → "", omissão de zeros,
+    ordem determinística, contagem alta.
+- Suíte global: 71 arquivos, 1335 testes. Tempo: 3.18s.
+
+**Artefatos.**
+
+- `src/lib/cron-correlation.ts` · novo
+- `src/lib/cron-correlation.test.ts` · novo
+- `src/lib/cron-dashboard.ts` · `last_error_correlation` em
+  `CronJobSummary`, orquestrador `attachErrorCorrelations`, opção
+  `correlation` em `loadCronDashboard`.
+- `src/app/admin/(shell)/crons/page.tsx` · `<CorrelationInline>`
+  + chamada com `correlation: true`.
+- `src/app/admin/(shell)/errors/page.tsx` · suporte a `?ts=&w=`,
+  banner de modo correlação, preservação do filtro nos links
+  existentes.
+
+---
+
 ## D-076 · Log granular de confiabilidade do paciente em `patient_reliability_events` (PR-068 · finding 17.6) · 2026-04-20
 
 **Contexto.** A plataforma já mantinha `doctor_reliability_events`

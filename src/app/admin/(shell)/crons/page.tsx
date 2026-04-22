@@ -23,6 +23,7 @@ import {
   type CronRunStatus,
   type DailyBucket,
 } from "@/lib/cron-dashboard";
+import { formatCorrelationSummary } from "@/lib/cron-correlation";
 import { formatDateBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
@@ -84,6 +85,12 @@ export default async function CronsDashboardPage({
   const report = await loadCronDashboard(supabase, {
     windowDays: days,
     expectedJobs: [...EXPECTED_JOBS],
+    // PR-069 · D-077 · finding [17.5]: pra cada cron que falhou,
+    // anexa resumo de quantos erros de OUTRAS fontes caíram em ±15min.
+    // Operador solo vê num lance se foi bug do cron ou incidente
+    // sistêmico (Meta/Asaas/Daily fora).
+    correlation: true,
+    correlationWindowMinutes: 15,
   });
 
   const jobsWithError = report.jobs.filter((j) => j.error_count > 0).length;
@@ -292,6 +299,12 @@ function JobCard({ job, windowDays }: { job: CronJobSummary; windowDays: number 
               </>
             )}
           </p>
+          {job.last_error_correlation && (
+            <CorrelationInline
+              at={job.last_error_at}
+              correlation={job.last_error_correlation}
+            />
+          )}
         </div>
       )}
 
@@ -482,6 +495,55 @@ function Sparkline({ daily }: { daily: DailyBucket[] }) {
         <span>{daily[daily.length - 1]?.date ?? ""}</span>
       </div>
     </div>
+  );
+}
+
+/**
+ * PR-069 · D-077 · finding [17.5]. Banner inline dentro do bloco
+ * "Último erro" que mostra quantos erros de outras fontes caíram em
+ * ±N min, com link direto pra `/admin/errors` filtrado na mesma janela.
+ *
+ * Design intencional:
+ *   - Se `total == 0`, renderiza uma linha "só este cron errou na
+ *     janela" — ÚTIL porque confirma que o bug é do próprio cron
+ *     (não dependência externa), em vez de deixar o operador em
+ *     dúvida "será que a Meta caiu?".
+ *   - Se `total > 0`, mostra breakdown legível + link.
+ */
+function CorrelationInline({
+  at,
+  correlation,
+}: {
+  at: string;
+  correlation: NonNullable<CronJobSummary["last_error_correlation"]>;
+}) {
+  const { total, by_source, window_minutes } = correlation;
+  const summary = formatCorrelationSummary(by_source);
+
+  if (total === 0) {
+    return (
+      <p className="mt-1.5 text-xs text-terracotta-700/80">
+        ± {window_minutes}min: <span className="font-medium">sem outros erros.</span>{" "}
+        <span className="italic">Provável bug deste cron, não dependência externa.</span>
+      </p>
+    );
+  }
+
+  const q = new URLSearchParams();
+  q.set("ts", at);
+  q.set("w", String(window_minutes));
+  const href = `/admin/errors?${q.toString()}`;
+
+  return (
+    <p className="mt-1.5 text-xs text-terracotta-800">
+      ± {window_minutes}min: <span className="font-medium">{summary}.</span>{" "}
+      <a
+        href={href}
+        className="underline decoration-terracotta-400 hover:decoration-terracotta-700 hover:text-terracotta-900"
+      >
+        ver correlação →
+      </a>
+    </p>
   );
 }
 

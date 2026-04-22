@@ -26,6 +26,10 @@ import {
   type ErrorEntry,
   type ErrorSource,
 } from "@/lib/error-log";
+import {
+  clampWindowMinutes,
+  correlateErrorsInWindow,
+} from "@/lib/cron-correlation";
 import { formatDateBR } from "@/lib/datetime-br";
 
 export const dynamic = "force-dynamic";
@@ -33,6 +37,14 @@ export const dynamic = "force-dynamic";
 type SearchParams = {
   h?: string;
   source?: string;
+  /**
+   * PR-069 · D-077 · finding [17.5]. ISO do timestamp âncora pra
+   * filtrar a timeline em ±`w` minutos em torno dele. Usado no link
+   * "ver correlação →" de `/admin/crons`.
+   */
+  ts?: string;
+  /** Raio da janela de correlação em min (default 15). */
+  w?: string;
 };
 
 const SOURCE_LABEL: Record<ErrorSource, string> = {
@@ -69,6 +81,17 @@ function parseSource(raw: string | undefined): ErrorSource | null {
   if (!raw) return null;
   if ((ALL_SOURCES as string[]).includes(raw)) return raw as ErrorSource;
   return null;
+}
+
+/**
+ * PR-069 · D-077. Valida o parâmetro `?ts=` — aceita só ISO 8601
+ * parseável. String inválida → ignora (volta pro modo sem âncora).
+ */
+function parseAnchor(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const t = new Date(raw).getTime();
+  if (!Number.isFinite(t)) return null;
+  return new Date(t).toISOString();
 }
 
 function fmtDateTime(iso: string): string {
@@ -108,13 +131,34 @@ export default async function AdminErrorsPage({
 }) {
   const windowHours = parseWindow(searchParams?.h);
   const sourceFilter = parseSource(searchParams?.source);
+  const anchorIso = parseAnchor(searchParams?.ts);
+  const windowMinutes = anchorIso
+    ? clampWindowMinutes(Number(searchParams?.w))
+    : null;
 
   const supabase = getSupabaseAdmin();
-  const log = await loadErrorLog(supabase, { windowHours });
+  // Se tem âncora, amplia a janela pro error-log cobrir ao menos o
+  // dobro do raio solicitado (em horas). Evita caso em que o operador
+  // pede ±60min mas a janela padrão é só 24h e o erro estava na
+  // borda — manteria dados faltando silenciosamente.
+  const effectiveHours =
+    anchorIso && windowMinutes != null
+      ? Math.max(windowHours, Math.ceil((windowMinutes * 2) / 60))
+      : windowHours;
 
-  const entries = sourceFilter
-    ? log.entries.filter((e) => e.source === sourceFilter)
-    : log.entries;
+  const log = await loadErrorLog(supabase, { windowHours: effectiveHours });
+
+  let entries = log.entries;
+  if (anchorIso && windowMinutes != null) {
+    const correlation = correlateErrorsInWindow(entries, {
+      anchorAt: anchorIso,
+      windowMinutes,
+    });
+    entries = correlation.entries;
+  }
+  if (sourceFilter) {
+    entries = entries.filter((e) => e.source === sourceFilter);
+  }
 
   return (
     <div>
@@ -132,13 +176,42 @@ export default async function AdminErrorsPage({
         </p>
       </header>
 
+      {/* Banner de correlação temporal (PR-069 · D-077) */}
+      {anchorIso && windowMinutes != null && (
+        <div className="mb-5 rounded-xl border border-terracotta-200 bg-terracotta-50 px-4 py-3 text-sm text-terracotta-800 flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <p className="font-medium">
+              Modo correlação: ±{windowMinutes}min em torno de{" "}
+              <span className="font-mono text-xs">
+                {fmtDateTime(anchorIso)}
+              </span>
+            </p>
+            <p className="text-xs mt-0.5 text-terracotta-700">
+              {entries.length} erro{entries.length === 1 ? "" : "s"} na janela
+              {sourceFilter ? ` (fonte: ${SOURCE_LABEL[sourceFilter]})` : ""}.
+            </p>
+          </div>
+          <Link
+            href={buildQuery({ h: windowHours, source: sourceFilter, ts: null, w: null })}
+            className="text-xs underline hover:text-terracotta-900"
+          >
+            limpar filtro temporal →
+          </Link>
+        </div>
+      )}
+
       {/* Janela temporal */}
       <section className="mb-4 flex flex-wrap items-center gap-2">
         <span className="text-[0.78rem] uppercase tracking-wider text-ink-500 font-medium mr-1">
           Janela:
         </span>
         {[6, 24, 72, 168, 720].map((h) => {
-          const href = buildQuery({ h, source: sourceFilter });
+          const href = buildQuery({
+            h,
+            source: sourceFilter,
+            ts: anchorIso,
+            w: windowMinutes,
+          });
           const active = windowHours === h;
           return (
             <Link
@@ -162,7 +235,12 @@ export default async function AdminErrorsPage({
           Fonte:
         </span>
         <Link
-          href={buildQuery({ h: windowHours, source: null })}
+          href={buildQuery({
+            h: windowHours,
+            source: null,
+            ts: anchorIso,
+            w: windowMinutes,
+          })}
           className={`px-3 py-1.5 rounded-full border text-xs font-medium transition-colors ${
             !sourceFilter
               ? "bg-ink-800 text-white border-ink-800"
@@ -173,7 +251,12 @@ export default async function AdminErrorsPage({
         </Link>
         {ALL_SOURCES.map((s) => {
           const count = log.sourceCounts[s];
-          const href = buildQuery({ h: windowHours, source: s });
+          const href = buildQuery({
+            h: windowHours,
+            source: s,
+            ts: anchorIso,
+            w: windowMinutes,
+          });
           const active = sourceFilter === s;
           return (
             <Link
@@ -279,10 +362,14 @@ function ErrorCard({ entry }: { entry: ErrorEntry }) {
 function buildQuery(params: {
   h: number;
   source: ErrorSource | null;
+  ts?: string | null;
+  w?: number | null;
 }): string {
   const qs = new URLSearchParams();
   if (params.h !== 24) qs.set("h", String(params.h));
   if (params.source) qs.set("source", params.source);
+  if (params.ts) qs.set("ts", params.ts);
+  if (params.w != null) qs.set("w", String(params.w));
   const s = qs.toString();
   return s ? `/admin/errors?${s}` : "/admin/errors";
 }

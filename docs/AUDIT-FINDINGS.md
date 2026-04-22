@@ -1454,12 +1454,26 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 - **Observador:** DPO, CISO, auditor financeiro.
 - **Resolução (2026-04-20).** PR-055 · D-066. Tabela imutável `document_access_log` (migration `20260508000000_document_access_log.sql`) com `actor_user_id`/`actor_kind in ('admin','doctor','system')` + binding constraint, `resource_type in ('payout_proof','billing_document')`, `resource_id` (doctor_payouts uuid), `doctor_id` denormalizado, `storage_path`, `signed_url_expires_at`, `action in ('signed_url_issued','external_url_returned')`, `ip inet`, `user_agent`, `route`, `metadata jsonb`; 4 índices forenses (created_at, doctor_id, actor_user_id, resource); RLS deny-all. Lib `src/lib/signed-url-log.ts` com `logSignedUrlIssued()` failSoft (nunca bloqueia a entrega da URL — log perdido é menos grave que privar a médica de baixar o próprio RPA) e helper `buildSignedUrlContext`. Integrado nos 4 call-sites: admin/medico × proof/billing-document. URLs externas legadas também logadas (action=`external_url_returned`). TTL mantido em 60s. **14 testes novos; suíte 1031/1031.** **Bullets (b) e (c) já estavam implementadas (TTL 60s, on-demand).** Bullet (a) proxy stream fica como follow-up opcional **PR-055-B** — requer mudar UI de `<a href>` pra fetch+blob.
 
-### [17.5 🟡 MÉDIO] `cron_runs` sem correlação com `error-log`
+### [17.5 🟡 MÉDIO] ~~`cron_runs` sem correlação com `error-log`~~ ✅ RESOLVIDO (PR-069 · D-077 · 2026-04-20)
 
 - **Onde:** `cron_runs.error_message` texto simples vs `error-log.ts`.
 - **Achado:** cron falha, mensagem em `cron_runs.error_message`. Mas `error-log.ts` (D-045 · 3.G) consolida erros de outros fluxos. Duas fontes não cruzadas → admin solo não vê relação "cron X falhou na mesma janela que Y deu erro".
 - **Correção:** unificar em `error_log` com `source: 'cron', job: X, run_id: UUID`.
 - **Observador:** admin solo.
+
+**Resolução · PR-069 · D-077 · 2026-04-20**
+
+Correlação temporal *computed view*, **sem migration** (a sugestão
+original era tabela física — rejeitada pra não duplicar dados, já que
+`error-log.ts` já é a view lógica das 5 fontes):
+
+- **Lib pura** `src/lib/cron-correlation.ts` · `correlateErrorsInWindow(entries, { anchorAt, windowMinutes, excludeReference? })` filtra `ErrorEntry[]` de `error-log.ts` pra `[anchor ± N min]`, ordena por proximidade, exclui a própria linha do cron (`cron_runs:{id}`). Clamp em `[1, 1440]` min; default 15. Fail-safe a datas inválidas. `formatCorrelationSummary` compõe "2 Asaas · 1 envio WA" pra UI.
+- **Orquestrador** em `cron-dashboard.ts` · `loadCronDashboard(..., { correlation: true, correlationWindowMinutes: 15 })` chama UMA query ao error-log cobrindo a janela do dashboard (evita N+1) e popula `CronJobSummary.last_error_correlation` com `{ window_minutes, total, by_source, top_entries }`. Fail-soft: se `loadErrorLog` falhar, cada job fica com `null` + `log.error` estruturado — dashboard continua renderizando.
+- **UI `/admin/crons`** · `<CorrelationInline>` dentro do bloco "Último erro": `total > 0` → "± 15min: 2 Asaas · 1 envio WA. **ver correlação →**" (link pra `/admin/errors?ts={last_error_at}&w=15`); `total == 0` → "± 15min: sem outros erros. *Provável bug deste cron, não dependência externa.*" — confirma isolamento, igualmente valioso.
+- **UI `/admin/errors`** · aceita `?ts=ISO&w=minutos`. Amplia a janela do loader pra cobrir 2×raio, filtra entries via `correlateErrorsInWindow`, mostra banner terracotta "Modo correlação: ±15min em torno de DD/MM HH:MM" + botão "limpar filtro". Links de janela/fonte preservam `ts`/`w`.
+- **Invariantes:** nunca conta o próprio cron; janela clampada; pureza garantida (teste "não muta input"); ordem determinística do summary.
+
+**20 testes novos cobrindo a lib pura; suíte global 1335/1335.**
 
 ### [17.6 🟡 MÉDIO] ~~Paciente sem `reliability_events` (só médica tem)~~ ✅ RESOLVIDO (PR-068 · D-076 · 2026-04-20)
 
@@ -1518,7 +1532,7 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 |---|---|---|
 | 🔴 CRÍTICO | **3** | 10.1, 17.1 (+ uma menção forte a 9.1 dependendo do horizonte; **9.1 resolvido em Ondas 2C+2D+2E**) |
 | 🟠 ALTO | **5** | ~~9.1~~, ~~9.2~~, ~~22.1~~, ~~22.2~~, 10.2, 10.3, 17.2, 17.3, 17.4 (conta: 9 original; 4 resolvidos) |
-| 🟡 MÉDIO | **7** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4 (parcial PR-061 · D-071; escopo app-gerado fechado, webhooks externos → 10.4-B), ~~10.5 (PR-059 · D-070)~~, ~~10.6 (onda A PR-064 · D-072; onda B → 10.6-B)~~, ~~10.7 (já tinha UNIQUE)~~, ~~10.8 (PR-066 · D-074)~~, 17.5, ~~17.6 (PR-068 · D-076)~~, ~~17.7 (PR-067 · D-075)~~, 17.8 |
+| 🟡 MÉDIO | **6** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4 (parcial PR-061 · D-071; escopo app-gerado fechado, webhooks externos → 10.4-B), ~~10.5 (PR-059 · D-070)~~, ~~10.6 (onda A PR-064 · D-072; onda B → 10.6-B)~~, ~~10.7 (já tinha UNIQUE)~~, ~~10.8 (PR-066 · D-074)~~, ~~17.5 (PR-069 · D-077)~~, ~~17.6 (PR-068 · D-076)~~, ~~17.7 (PR-067 · D-075)~~, 17.8 |
 | 🟢 SEGURO | **4** | 9.7, 22.7, 10.9, 17.9 |
 
 **Interpretação:** toda família 9.x (prompt-injection + AI-agents) está efetivamente fechada pra superfície atual. Quando LLM externo for plugado, seguir o check-list de 9 itens em `AGENTS.md` — as primitivas (`prompt-envelope`, `prompt-redact`, `customer-display`) já estão prontas. Backlog atual migra 100% pra findings não-AI (observabilidade, financeiro, LGPD).
