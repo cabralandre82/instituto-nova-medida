@@ -96,6 +96,7 @@ describe("markRefundProcessed", () => {
       externalRef: "REF-123",
       notes: "estornado no painel Asaas",
       processedBy: "admin-1",
+      processedByEmail: "admin@example.com",
     });
 
     expect(res.ok).toBe(true);
@@ -116,9 +117,55 @@ describe("markRefundProcessed", () => {
     expect((payload as Record<string, unknown>).refund_external_ref).toBe(
       "REF-123"
     );
+    // PR-064 · D-072: snapshot imutável de email do admin que processou.
+    expect((payload as Record<string, unknown>).refund_processed_by_email).toBe(
+      "admin@example.com"
+    );
 
     // Verifica que o update tem a trava `.is('refund_processed_at', null)`.
     expect(updateCall!.chain).toContain("is");
+  });
+
+  it("PR-064 · processedByEmail ausente → snapshot null", async () => {
+    supa.enqueue("appointments", { data: apptWithRefund, error: null });
+    supa.enqueue("appointments", { data: null, error: null });
+
+    const res = await markRefundProcessed({
+      appointmentId: "ap-1",
+      method: "manual",
+      processedBy: "admin-1",
+      // sem processedByEmail
+    });
+
+    expect(res.ok).toBe(true);
+    const updateCall = supa.calls.find(
+      (c) => c.table === "appointments" && c.chain.includes("update")
+    );
+    const [payload] = updateCall!.args[updateCall!.chain.indexOf("update")];
+    expect((payload as Record<string, unknown>).refund_processed_by_email).toBeNull();
+  });
+
+  it("PR-064 · processedByEmail 'system:asaas-webhook' passa direto (automação)", async () => {
+    supa.enqueue("appointments", { data: apptWithRefund, error: null });
+    supa.enqueue("appointments", { data: null, error: null });
+
+    const res = await markRefundProcessed({
+      appointmentId: "ap-1",
+      method: "asaas_api",
+      externalRef: "pay_123",
+      processedBy: null,
+      processedByEmail: "system:asaas-webhook",
+    });
+
+    expect(res.ok).toBe(true);
+    const updateCall = supa.calls.find(
+      (c) => c.table === "appointments" && c.chain.includes("update")
+    );
+    const [payload] = updateCall!.args[updateCall!.chain.indexOf("update")];
+    expect((payload as Record<string, unknown>).refund_processed_by).toBeNull();
+    expect((payload as Record<string, unknown>).refund_processed_by_email).toBe(
+      "system:asaas-webhook"
+    );
   });
 
   it("retorna refund_not_required se flag é false", async () => {

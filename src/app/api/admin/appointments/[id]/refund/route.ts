@@ -125,6 +125,7 @@ export async function POST(
     result = await processRefundViaAsaas({
       appointmentId: id,
       processedBy: admin.id,
+      processedByEmail: admin.email,
     });
   } else {
     result = await markRefundProcessed({
@@ -133,6 +134,7 @@ export async function POST(
       externalRef: body.external_ref ?? null,
       notes: body.notes ?? null,
       processedBy: admin.id,
+      processedByEmail: admin.email,
     });
   }
 

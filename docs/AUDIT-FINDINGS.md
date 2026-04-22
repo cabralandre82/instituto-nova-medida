@@ -1365,11 +1365,21 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 - **Plano de promoção a `enforce`.** Observar `appointment_state_transition_log` por 1-2 semanas. Quando 7 dias seguidos sem warning, `ALTER DATABASE postgres SET app.appointment_state_machine.mode='enforce'` (próxima atualização do RUNBOOK).
 - **Validação.** 1133 testes verde (1120+13 novos), `tsc` + `eslint` clean.
 
-### [10.6 🟡 MÉDIO] `on delete set null` em campos de responsabilidade perde audit
+### [10.6 🟡 MÉDIO → ✅ RESOLVIDO onda A (PR-064 · D-072)] `on delete set null` em campos de responsabilidade perde audit
 
-- **Onde:** `fulfillments.updated_by_user_id`, `plan_acceptances.user_id`, `appointments.cancelled_by_user_id` (se existir).
-- **Achado:** se `auth.users` for removido (LGPD self-service delete), `updated_by_user_id` vira null. Histórico perde "quem editou". CFM/LGPD: melhor `on delete restrict` e anonymize o user em vez de deletar.
-- **Correção:** mudar para `on delete restrict` nesses FKs; implementar "anonymize user" (similar a `anonymize customer` já criada em P2).
+- **Onde:** `fulfillments.updated_by_user_id`, `plan_acceptances.user_id`, `appointments.refund_processed_by`, `doctor_payouts.approved_by` (+ outros em onda B).
+- **Achado original:** se `auth.users` for removido (LGPD self-service delete), FKs viram null. Histórico perde "quem editou". CFM/LGPD: auditoria sugeriu `on delete restrict`.
+- **Correção adotada (PR-064 · D-072):** a proposta original de `restrict` foi **rejeitada** — bloquearia LGPD Art. 18 (direito ao esquecimento). A estratégia adotada é "snapshot pareado", padrão "Ghost user" do GitHub:
+  - Mantém `on delete set null` (LGPD-friendly).
+  - Adiciona coluna SNAPSHOT `*_email` em cada tabela audit, preenchida no INSERT/UPDATE com o email do actor no momento.
+  - UUID serve pra JOIN enquanto o user existir; email sobrevive à deleção.
+  - `anonymizeUserAccount` helper disponível em `src/lib/user-retention.ts` (anonimiza `auth.users` in-place sem deletar) pra operações futuras (médica sai da plataforma, admin substituído).
+- **Status onda A (PR-064):**
+  - ✅ `plan_acceptances.user_email` — prova legal imutável.
+  - ✅ `fulfillments.updated_by_email` — audit operacional (aceite, transições, finalização, mudança de endereço).
+  - ✅ `appointments.refund_processed_by_email` — audit financeiro.
+  - ✅ `doctor_payouts.approved_by_email` — audit financeiro.
+- **Onda B aberta (backlog PR-064-B):** `doctor_billing_documents.{uploaded_by,validated_by}`, `doctors.reliability_paused_by`, `doctor_reliability_events.dismissed_by`, `doctor_payment_methods.replaced_by`, `appointments.{created_by,cancelled_by_user_id}`, `lgpd_requests.{fulfilled_by_user_id,rejected_by_user_id}`, `plans.created_by`. Baixo volume em produção, defer até haver uso concreto.
 - **Observador:** DPO, CFM.
 
 ### [10.7 ✅ RESOLVED — falso positivo da auditoria] `customers.cpf` já tem `UNIQUE`
@@ -1480,7 +1490,7 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 |---|---|---|
 | 🔴 CRÍTICO | **3** | 10.1, 17.1 (+ uma menção forte a 9.1 dependendo do horizonte; **9.1 resolvido em Ondas 2C+2D+2E**) |
 | 🟠 ALTO | **5** | ~~9.1~~, ~~9.2~~, ~~22.1~~, ~~22.2~~, 10.2, 10.3, 17.2, 17.3, 17.4 (conta: 9 original; 4 resolvidos) |
-| 🟡 MÉDIO | **10** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4 (parcial PR-061 · D-071; escopo app-gerado fechado, webhooks externos → 10.4-B), ~~10.5 (PR-059 · D-070)~~, 10.6, ~~10.7 (já tinha UNIQUE)~~, 10.8, 17.5, 17.6, 17.7, 17.8 |
+| 🟡 MÉDIO | **9** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4 (parcial PR-061 · D-071; escopo app-gerado fechado, webhooks externos → 10.4-B), ~~10.5 (PR-059 · D-070)~~, ~~10.6 (onda A PR-064 · D-072; onda B → 10.6-B)~~, ~~10.7 (já tinha UNIQUE)~~, 10.8, 17.5, 17.6, 17.7, 17.8 |
 | 🟢 SEGURO | **4** | 9.7, 22.7, 10.9, 17.9 |
 
 **Interpretação:** toda família 9.x (prompt-injection + AI-agents) está efetivamente fechada pra superfície atual. Quando LLM externo for plugado, seguir o check-list de 9 itens em `AGENTS.md` — as primitivas (`prompt-envelope`, `prompt-redact`, `customer-display`) já estão prontas. Backlog atual migra 100% pra findings não-AI (observabilidade, financeiro, LGPD).

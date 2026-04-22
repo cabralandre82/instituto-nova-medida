@@ -357,6 +357,64 @@ describe("acceptFulfillment · happy path", () => {
     expect(res.fulfillmentStatus).toBe("pending_payment");
   });
 
+  it("PR-064 · D-072 · grava user_email em plan_acceptances + updated_by_email em fulfillments", async () => {
+    const supa = createSupabaseMock();
+    supa.enqueue("fulfillments", { data: FULL_FF_ROW, error: null });
+    supa.enqueue("customers", { data: null, error: null });
+    supa.enqueue("plan_acceptances", { data: { id: "acc-1" }, error: null });
+    supa.enqueue("fulfillments", { data: null, error: null });
+
+    const res = await acceptFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      userId: "user-1",
+      userEmail: "  MARIA@Example.COM  ",
+      input: validInput(),
+    });
+    expect(res.ok).toBe(true);
+
+    const paInsertCall = supa.calls.find(
+      (c) => c.table === "plan_acceptances" && c.chain.includes("insert")
+    );
+    const paRow = paInsertCall!.args[
+      paInsertCall!.chain.indexOf("insert")
+    ][0] as Record<string, unknown>;
+    // Snapshot normalizado: trim + lowercase.
+    expect(paRow.user_email).toBe("maria@example.com");
+    expect(paRow.user_id).toBe("user-1");
+
+    // E no fulfillment também é registrado.
+    const ffUpdCall = supa.calls
+      .filter((c) => c.table === "fulfillments" && c.chain.includes("update"))
+      .pop();
+    const ffPatch = ffUpdCall!.args[
+      ffUpdCall!.chain.indexOf("update")
+    ][0] as Record<string, unknown>;
+    expect(ffPatch.updated_by_email).toBe("maria@example.com");
+  });
+
+  it("PR-064 · userEmail omitido → snapshots null (legado/compat)", async () => {
+    const supa = createSupabaseMock();
+    supa.enqueue("fulfillments", { data: FULL_FF_ROW, error: null });
+    supa.enqueue("customers", { data: null, error: null });
+    supa.enqueue("plan_acceptances", { data: { id: "acc-1" }, error: null });
+    supa.enqueue("fulfillments", { data: null, error: null });
+
+    const res = await acceptFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      userId: "user-1",
+      input: validInput(),
+    });
+    expect(res.ok).toBe(true);
+
+    const paInsertCall = supa.calls.find(
+      (c) => c.table === "plan_acceptances" && c.chain.includes("insert")
+    );
+    const paRow = paInsertCall!.args[
+      paInsertCall!.chain.indexOf("insert")
+    ][0] as Record<string, unknown>;
+    expect(paRow.user_email).toBeNull();
+  });
+
   it("snapshot fica com recipient_name = nome do paciente quando não informado", async () => {
     const supa = createSupabaseMock();
     supa.enqueue("fulfillments", { data: FULL_FF_ROW, error: null });

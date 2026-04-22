@@ -185,6 +185,15 @@ export async function acceptFulfillment(
   params: {
     fulfillmentId: string;
     userId: string | null;
+    /**
+     * Email do paciente no momento do aceite. Gravado como snapshot
+     * imutável em `plan_acceptances.user_email` e também em
+     * `fulfillments.updated_by_email` (PR-064 · D-072). Sobrevive a
+     * eventual anonimização da conta — prova legal independente da
+     * FK `user_id` que pode virar null via `on delete set null`.
+     * Default: null (caller antigo sem email; o snapshot fica vazio).
+     */
+    userEmail?: string | null;
     customerId?: string | null; // usado quando não há userId (rota via token)
     input: AcceptFulfillmentInput;
     now?: Date;
@@ -429,6 +438,14 @@ export async function acceptFulfillment(
     };
   }
 
+  // Normaliza o email pra snapshot imutável (PR-064 · D-072).
+  // Trim + lowercase + empty→null. Não usamos actor-snapshot aqui
+  // porque só precisamos do email — userId já vem validado acima.
+  const userEmailSnapshot =
+    typeof params.userEmail === "string" && params.userEmail.trim().length > 0
+      ? params.userEmail.trim().toLowerCase()
+      : null;
+
   const accIns = await supabase
     .from("plan_acceptances")
     .insert({
@@ -442,6 +459,7 @@ export async function acceptFulfillment(
       terms_version: termsVersion,
       shipping_snapshot: shippingVal.value,
       user_id: params.userId,
+      user_email: userEmailSnapshot,
       ip_address: params.input.ip_address ?? null,
       user_agent: params.input.user_agent ?? null,
     })
@@ -485,6 +503,7 @@ export async function acceptFulfillment(
     status: "pending_payment" as FulfillmentStatus,
     accepted_at: now,
     updated_by_user_id: params.userId,
+    updated_by_email: userEmailSnapshot,
     ...snapshotToFulfillmentPatch(shipping),
   };
 

@@ -499,6 +499,7 @@ async function handleEarningsLifecycle(
             ? "Fechado via webhook — chargeback do paciente."
             : "Fechado via webhook — estorno concluído no Asaas.",
         processedBy: null, // null = sem admin humano direto nesta ação
+        processedByEmail: "system:asaas-webhook", // PR-064 · D-072
       });
       if (!markResult.ok) {
         log.error("markRefundProcessed via webhook falhou", {

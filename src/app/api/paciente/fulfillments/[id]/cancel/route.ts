@@ -92,6 +92,7 @@ export async function POST(req: Request, { params }: RouteParams) {
     to: "cancelled",
     actor: "patient",
     actorUserId: user.id,
+    actorEmail: user.email,
     cancelledReason,
   });
 

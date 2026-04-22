@@ -103,6 +103,7 @@ export async function POST(req: Request, { params }: RouteParams) {
   const acc = await acceptFulfillment(supabase, {
     fulfillmentId,
     userId: user.id,
+    userEmail: user.email,
     customerId,
     input: {
       terms_version: termsVersion,

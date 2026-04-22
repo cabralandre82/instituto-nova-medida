@@ -256,12 +256,13 @@ describe("finalizeAppointment", () => {
   function runFinalize(
     mock: ReturnType<typeof createSupabaseMock>,
     input: FinalizeInput,
-    opts: { doctorId?: string } = {}
+    opts: { doctorId?: string; userEmail?: string | null } = {}
   ) {
     return finalizeAppointment(mock.client as unknown as SupabaseClient, {
       appointmentId: APPT_ID,
       doctorId: opts.doctorId ?? DOCTOR_ID,
       userId: USER_ID,
+      userEmail: opts.userEmail,
       input,
       now: new Date("2026-04-20T15:00:00Z"),
     });
@@ -356,6 +357,32 @@ describe("finalizeAppointment", () => {
     const updateCall = mock.calls[mock.calls.length - 1];
     expect(updateCall.chain).toContain("update");
     expect(updateCall.chain).toContain("eq");
+  });
+
+  it("PR-064 · D-072 · grava updated_by_email no INSERT do fulfillment", async () => {
+    const mock = createSupabaseMock();
+    setupAppt(mock);
+    mock.enqueue("plans", {
+      data: { id: PLAN_ID, slug: "tirzepatida-90", active: true },
+      error: null,
+    });
+    mock.enqueue("fulfillments", { data: null, error: null }); // select
+    mock.enqueue("fulfillments", { data: { id: FULFILL_ID }, error: null }); // insert
+    mock.enqueue("appointments", { data: null, error: null }); // update
+
+    const result = await runFinalize(mock, prescribedInput, {
+      userEmail: "  DOCTOR@Example.COM  ",
+    });
+    expect(result.ok).toBe(true);
+
+    const ffInsertCall = mock.calls.find(
+      (c) => c.table === "fulfillments" && c.chain.includes("insert")
+    );
+    const ffRow = ffInsertCall!.args[
+      ffInsertCall!.chain.indexOf("insert")
+    ][0] as Record<string, unknown>;
+    expect(ffRow.updated_by_user_id).toBe(USER_ID);
+    expect(ffRow.updated_by_email).toBe("doctor@example.com");
   });
 
   it("idempotência: se fulfillment já existe, reusa id sem tentar INSERT", async () => {

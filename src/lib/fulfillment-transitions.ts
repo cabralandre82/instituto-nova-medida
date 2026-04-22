@@ -80,6 +80,13 @@ export type TransitionInput = {
   to: FulfillmentStatus;
   actor: TransitionActor;
   actorUserId: string | null;
+  /**
+   * Email do ator no momento da transição. Gravado em
+   * `fulfillments.updated_by_email` como snapshot imutável
+   * (PR-064 · D-072). Sobrevive a eventual delete/anonimização
+   * da conta. Default null (legado/compat).
+   */
+  actorEmail?: string | null;
   /** Obrigatório quando `to === 'shipped'`. Transportadora + código ou texto livre. */
   trackingNote?: string | null;
   /** Obrigatório quando `to === 'cancelled'`. */
@@ -257,9 +264,15 @@ export async function transitionFulfillment(
 
   // 5) Patch
   const now = (input.now ?? new Date()).toISOString();
+  // Snapshot de email imutável (PR-064 · D-072) — trim+lowercase+empty→null.
+  const actorEmailSnapshot =
+    typeof input.actorEmail === "string" && input.actorEmail.trim().length > 0
+      ? input.actorEmail.trim().toLowerCase()
+      : null;
   const patch: Record<string, unknown> = {
     status: target,
     updated_by_user_id: input.actorUserId,
+    updated_by_email: actorEmailSnapshot,
   };
 
   switch (target) {

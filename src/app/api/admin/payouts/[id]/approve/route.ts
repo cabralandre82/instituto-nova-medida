@@ -44,6 +44,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       status: "approved",
       approved_at: new Date().toISOString(),
       approved_by: admin.id,
+      approved_by_email: admin.email?.trim().toLowerCase() || null,
     })
     .eq("id", id);
   if (error) {

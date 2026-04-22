@@ -173,7 +173,7 @@ describe("updateFulfillmentShipping", () => {
 
     const r = await updateFulfillmentShipping(
       supa.client as unknown as SupabaseClient,
-      baseInput()
+      baseInput({ actorEmail: "  MARIA@Example.COM  " })
     );
 
     expect(r.ok).toBe(true);
@@ -201,6 +201,15 @@ describe("updateFulfillmentShipping", () => {
     expect(insertArgs.after_snapshot).toMatchObject({
       shipping_street: "Avenida Paulista",
     });
+
+    // PR-064 · D-072: o fulfillment recebe updated_by_email (snapshot imutável).
+    const ffUpdCall = supa.calls.find(
+      (c) => c.table === "fulfillments" && c.chain.includes("update")
+    );
+    const ffPatch = ffUpdCall!.args[
+      ffUpdCall!.chain.indexOf("update")
+    ][0] as Record<string, unknown>;
+    expect(ffPatch.updated_by_email).toBe("maria@example.com");
   });
 
   it("before_snapshot é null quando não havia endereço prévio", async () => {

@@ -86,6 +86,7 @@ export async function POST(req: Request, { params }: RouteParams) {
     appointmentId,
     doctorId,
     userId: user.id,
+    userEmail: user.email,
     input,
   });
 

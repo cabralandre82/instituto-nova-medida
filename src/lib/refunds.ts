@@ -56,6 +56,15 @@ export type RefundInput = {
   notes?: string | null;
   /** auth.user.id do admin que acionou. Null se for automação. */
   processedBy?: string | null;
+  /**
+   * Email do admin no momento do processamento. Gravado em
+   * `appointments.refund_processed_by_email` como snapshot
+   * imutável (PR-064 · D-072). Sobrevive a eventual delete/anonimização
+   * da conta. Quando processado por automação, o caller passa
+   * `"system:<job>"` (ex: "system:asaas-webhook") — assim o audit
+   * diferencia ações de sistema de ações humanas.
+   */
+  processedByEmail?: string | null;
 };
 
 export type RefundErrorCode =
@@ -157,6 +166,12 @@ export async function markRefundProcessed(
   }
 
   const now = new Date().toISOString();
+  // Snapshot imutável de email (PR-064 · D-072). Trim+lowercase+empty→null.
+  const processedByEmailSnapshot =
+    typeof input.processedByEmail === "string" &&
+    input.processedByEmail.trim().length > 0
+      ? input.processedByEmail.trim().toLowerCase()
+      : null;
   const { error: upErr } = await supabase
     .from("appointments")
     .update({
@@ -165,6 +180,7 @@ export async function markRefundProcessed(
       refund_external_ref: input.externalRef?.trim() || null,
       refund_processed_notes: input.notes?.trim() || null,
       refund_processed_by: input.processedBy ?? null,
+      refund_processed_by_email: processedByEmailSnapshot,
     })
     .eq("id", row.id)
     .is("refund_processed_at", null); // segunda trava de idempotência (race)
@@ -244,6 +260,8 @@ type AppointmentForRefundRow = {
 export async function processRefundViaAsaas(input: {
   appointmentId: string;
   processedBy: string;
+  /** Email snapshot do admin (PR-064 · D-072). */
+  processedByEmail?: string | null;
 }): Promise<RefundResult> {
   if (!isAsaasRefundsEnabled()) {
     return {
@@ -361,6 +379,7 @@ export async function processRefundViaAsaas(input: {
     externalRef: asaasPaymentId,
     notes: `Estorno automático via Asaas API. Status Asaas após request: ${asaas.data.status}.`,
     processedBy: input.processedBy,
+    processedByEmail: input.processedByEmail ?? null,
   });
 
   if (!mark.ok) {

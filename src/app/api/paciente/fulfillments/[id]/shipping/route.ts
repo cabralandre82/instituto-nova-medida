@@ -134,6 +134,7 @@ export async function PUT(req: Request, { params }: RouteParams) {
     fulfillmentId,
     customerId,
     actorUserId: user.id,
+    actorEmail: user.email,
     source: "patient",
     address,
     recipientFallback,

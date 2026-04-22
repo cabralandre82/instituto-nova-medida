@@ -5,6 +5,99 @@
 
 ---
 
+## D-072 · Snapshot de identidade do ator em campos de audit (PR-064 · finding 10.6) · 2026-04-20
+
+**Contexto.** A plataforma tem ~15 colunas que referenciam `auth.users(id)` com `on delete set null`. Algumas dessas colunas são campos de audit com semântica imutável — "quem aprovou este payout?", "quem aceitou este plano?", "quem editou o endereço de entrega?". Especificamente:
+
+- `plan_acceptances.user_id` — prova legal do aceite (tabela imutável por trigger).
+- `fulfillments.updated_by_user_id` — audit operacional das transições.
+- `appointments.refund_processed_by` — audit financeiro do processamento de refund.
+- `doctor_payouts.approved_by` — audit financeiro da aprovação.
+- `appointments.cancelled_by_user_id`, `appointments.created_by` — audit de ciclo de vida (nem todos populados hoje).
+- `doctor_billing_documents.{uploaded_by,validated_by}` — audit fiscal.
+- `doctor_payment_methods.replaced_by` — audit de mudança de PIX.
+- `doctor_reliability_events.dismissed_by`, `doctors.reliability_paused_by` — audit operacional.
+- `lgpd_requests.{fulfilled_by_user_id,rejected_by_user_id}` — audit LGPD.
+- `plans.created_by` — audit de criação de plano.
+
+O problema estrutural (finding 10.6 · 🟡 MÉDIO) é que todas essas FKs são `on delete set null`. Se um admin/médica for removido de `auth.users` (LGPD Art. 18 — direito ao esquecimento, ou simplesmente desativação operacional), toda a audit trail que os referencia perde identidade. "Quem aprovou este payout?" passa a responder `NULL`.
+
+**Alternativas consideradas.**
+
+1. **`on delete restrict` (proposta original da auditoria).** Bloquear a deleção do `auth.users` enquanto houver FK apontando. Rejeitada porque:
+   - Conflita com o direito LGPD Art. 18 do titular admin/médica (se eles pedirem pra sair, tem que poder sair).
+   - Transfere a complexidade pro operador — toda exclusão passaria a falhar com erro críptico de FK.
+   - Não resolve o problema real: mesmo com `restrict`, se um dia precisarmos deletar (ex: admin comprometido), perdemos audit de qualquer forma.
+
+2. **`on delete cascade`.** Obviamente pior — apagaria o audit trail inteiro.
+
+3. **Snapshot de identidade pareado com FK (escolhida, padrão "Ghost user" do GitHub).** Cada coluna audit passa a ser PAR de `(*_user_id, *_email)`. O UUID serve pra JOIN enquanto o user existir; o email é um snapshot imutável no momento do INSERT/UPDATE que **sobrevive a eventual delete/anonimização**. Mantém `on delete set null` (LGPD-friendly), mas a perda é só do UUID, não da identidade.
+
+4. **Tabela separada de audit log (ex: `admin_audit_log`).** Já existe pra ações MUTATIONAIS. Mas não cobre campos audit-em-row (ex: "quem aceitou este plano?" é um campo, não uma ação — o user pode revogar consentimento depois, mas o fato do aceite original vira um campo da `plan_acceptances`). Snapshot é complementar ao `admin_audit_log`, não substituto.
+
+**Decisão.** Adotar a **estratégia 3 (snapshot pareado)** com escopo em ondas:
+
+- **Onda A (PR-064 · este ADR):** cobre 4 colunas de MAIOR criticidade do ponto de vista CFM/LGPD/financeiro:
+  - `plan_acceptances.user_email` (prova legal imutável do aceite).
+  - `fulfillments.updated_by_email` (audit operacional de transições e mudanças de endereço).
+  - `appointments.refund_processed_by_email` (audit financeiro de refund).
+  - `doctor_payouts.approved_by_email` (audit financeiro de aprovação).
+
+- **Onda B (PR-064-B · futuro, baixa prioridade):** cobre o resto (documents, reliability, lgpd_requests, plans). Deferred pq baixo volume em produção.
+
+**Invariantes dos snapshots.**
+
+1. **Imutável após INSERT/UPDATE.** Os valores são gravados uma vez — subsequentes UPDATEs do row podem re-preencher o snapshot, mas isso reflete a NOVA ação auditada (ex: nova transição de fulfillment). Nunca limpamos o snapshot pra null.
+2. **Normalizado.** `trim + lowercase + empty→null`. Consistência entre Supabase Auth (que já armazena lowercase) e snapshot.
+3. **Não-unique.** Dois actors podem ter o mesmo email histórico (caso raro, mas possível em emails genéricos tipo `admin@clinica.com`). Não queremos colidir.
+4. **Nullable.** Rows legados (pré-migration) e ações de sistema sem user humano ficam com NULL. Identificar esses casos via FK=`null` ou via prefix `system:<job>`.
+
+**Implementação.**
+
+- Migration `20260510000000_actor_audit_snapshots.sql`:
+  - `ADD COLUMN IF NOT EXISTS` pra cada snapshot nas 4 tabelas.
+  - Backfill via JOIN com `auth.users`.
+  - `plan_acceptances` precisa desabilitar temporariamente o trigger `trg_plan_acceptances_immutable` pra permitir o backfill (reativado ao final da migration, dentro da mesma transação).
+  - Sem mudanças nas FKs. Sem novos checks `NOT NULL`.
+  - Comentários SQL explicam o contrato e apontam pro D-072.
+
+- `src/lib/actor-snapshot.ts`: lib utilitária pra normalização (`normalizeActorSnapshot`, `actorSnapshotFromSession`, `systemActorSnapshot`). Zero deps.
+
+- `src/lib/user-retention.ts`: helper `anonymizeUserAccount(userId)` pra anonimizar uma conta `auth.users` in-place (zera PII, bane login, preserva UUID). Usa email placeholder determinístico (`anon-<hash>@deleted.local`) pra não colidir com UNIQUE. Disponível mas ainda não acionado por cron — o caller registra a intenção explicitamente (futuro PR-064-C com UI admin).
+
+- Call-sites atualizados pra passar email:
+  - `acceptFulfillment(params.userEmail)` — `plan_acceptances.user_email` + `fulfillments.updated_by_email`.
+  - `transitionFulfillment(input.actorEmail)` — `fulfillments.updated_by_email`.
+  - `updateFulfillmentShipping(input.actorEmail)` — `fulfillments.updated_by_email`.
+  - `finalizeAppointment(params.userEmail)` — `fulfillments.updated_by_email`.
+  - `markRefundProcessed(input.processedByEmail)` — `appointments.refund_processed_by_email`. Webhook Asaas passa `"system:asaas-webhook"`.
+  - `processRefundViaAsaas(input.processedByEmail)` — delega pra `markRefundProcessed`.
+  - `/api/admin/payouts/[id]/approve` — adiciona `approved_by_email: admin.email` no UPDATE.
+
+**Por que não centralizar `system_actor` num enum?** Conservador: hoje usamos convenção de string `"system:<job>"` no snapshot email. É buscável via LIKE, auto-documentado, e não força migration se precisarmos adicionar um novo tipo de actor de sistema. Se vier a dor operacional de N jobs distintos, aí consideramos tabela de tipos. YAGNI por enquanto.
+
+**Trade-offs aceitos.**
+
+- Adiciona 4 colunas `text` nullable — custo de armazenamento desprezível (4 emails por row em tabelas que já têm 30+ colunas).
+- Duplicação aparente do dado (`user_id` + `email`) é intencional: um é FK viva, outro é snapshot morto. Negar um pelo outro é o objetivo do D-072.
+- Backfill em `plan_acceptances` desabilita trigger temporariamente — operação controlada em transação, rollback automático em falha. Em produção com volume, migration rodar em ~1s pra 1000s de linhas.
+
+**Consequências.**
+
+- Audit trail passa a sobreviver à deleção/anonimização do user. "Quem aceitou este plano em 2026-05-10?" vira query deterministicamente resolvível 20 anos depois (retenção CFM).
+- Helpers `anonymizeUserAccount` disponível pra operações futuras (médica que sai da plataforma, admin substituído) SEM perder audit trail.
+- Rotas paciente (`/api/paciente/fulfillments/*`) e rotas admin/médica passam a propagar `user.email` da sessão pra libs — inócuo pra comportamento, apenas enriquece o audit.
+- Ondas futuras (B) apenas replicam o padrão nos demais campos.
+
+**Testes.**
+- `actor-snapshot.test.ts` (20 testes) cobre normalização, invariantes kind/userId, system actor labels.
+- `user-retention.test.ts` (10 testes) cobre anonymize: not_found, update_failed, idempotência (re-anonimizar não-op), determinismo do email placeholder, ban correto.
+- Testes de fulfillment-transitions, refunds, fulfillment-acceptance, patient-update-shipping, appointment-finalize atualizados pra assertar gravação correta dos novos campos (10 novos asserts).
+
+**Findings cobertos.** [10.6] (parcial onda A — 4 colunas). Onda B permanece aberta como backlog.
+
+---
+
 ## D-071 · Schemas defensivos pra colunas `jsonb` app-geradas (PR-061 · finding 10.4) · 2026-04-20
 
 **Contexto.** A plataforma tem ~18 colunas `jsonb` no schema. A auditoria (finding 10.4) observou que payloads JSONB não têm schema/contract test — o Postgres aceita praticamente qualquer coisa via cast implícito, mas o resultado fica irrecuperável na leitura. Os riscos concretos:

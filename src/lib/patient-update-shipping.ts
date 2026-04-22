@@ -63,6 +63,13 @@ export type UpdateShippingInput = {
   fulfillmentId: string;
   customerId: string;
   actorUserId: string | null;
+  /**
+   * Email do actor no momento da mudança. Gravado em
+   * `fulfillments.updated_by_email` como snapshot imutável
+   * (PR-064 · D-072). Sobrevive a eventual delete/anonimização
+   * do user. Default null.
+   */
+  actorEmail?: string | null;
   source: "patient" | "admin";
   address: AddressInput;
   recipientFallback: string;
@@ -199,12 +206,19 @@ export async function updateFulfillmentShipping(
 
   const now = (input.now ?? new Date()).toISOString();
 
+  // Snapshot de email do ator (PR-064 · D-072) — trim+lowercase+empty→null.
+  const actorEmailSnapshot =
+    typeof input.actorEmail === "string" && input.actorEmail.trim().length > 0
+      ? input.actorEmail.trim().toLowerCase()
+      : null;
+
   if (!noChanges) {
     const upd = await supabase
       .from("fulfillments")
       .update({
         ...afterPatch,
         updated_by_user_id: input.actorUserId,
+        updated_by_email: actorEmailSnapshot,
       })
       .eq("id", input.fulfillmentId)
       .eq("status", "paid")

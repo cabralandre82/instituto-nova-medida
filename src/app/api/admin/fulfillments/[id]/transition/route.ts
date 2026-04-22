@@ -102,6 +102,7 @@ export async function POST(req: Request, { params }: RouteParams) {
     to,
     actor: "admin",
     actorUserId: admin.id,
+    actorEmail: admin.email,
     trackingNote: asString(body.tracking_note),
     cancelledReason: asString(body.cancelled_reason),
   };

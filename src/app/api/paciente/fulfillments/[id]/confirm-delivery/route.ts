@@ -90,6 +90,7 @@ export async function POST(_req: Request, { params }: RouteParams) {
     to: "delivered",
     actor: "patient",
     actorUserId: user.id,
+    actorEmail: user.email,
   });
 
   if (!result.ok) {

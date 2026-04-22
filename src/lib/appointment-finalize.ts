@@ -384,6 +384,12 @@ export async function finalizeAppointment(
     appointmentId: string;
     doctorId: string;
     userId: string | null;
+    /**
+     * Email da médica no momento da finalização. Gravado como
+     * snapshot em `fulfillments.updated_by_email` quando criarmos
+     * o fulfillment (PR-064 · D-072). Null se legacy/desconhecido.
+     */
+    userEmail?: string | null;
     input: FinalizeInput;
     now?: Date;
   }
@@ -489,6 +495,12 @@ export async function finalizeAppointment(
     if (existingRes.data) {
       fulfillmentId = (existingRes.data as FulfillmentRow).id;
     } else {
+      // Snapshot de email da médica (PR-064 · D-072).
+      const finalizeActorEmail =
+        typeof params.userEmail === "string" &&
+        params.userEmail.trim().length > 0
+          ? params.userEmail.trim().toLowerCase()
+          : null;
       const insertRes = await supabase
         .from("fulfillments")
         .insert({
@@ -498,6 +510,7 @@ export async function finalizeAppointment(
           plan_id: sanitizedInput.prescribed_plan_id,
           status: "pending_acceptance",
           updated_by_user_id: params.userId,
+          updated_by_email: finalizeActorEmail,
         })
         .select("id")
         .single();

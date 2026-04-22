@@ -29,6 +29,7 @@ describe("transitionFulfillment · happy path", () => {
       to: "pharmacy_requested",
       actor: "admin",
       actorUserId: "admin-1",
+      actorEmail: "admin@example.com",
       now: NOW,
     });
 
@@ -49,6 +50,64 @@ describe("transitionFulfillment · happy path", () => {
     expect(patch.status).toBe("pharmacy_requested");
     expect(patch.pharmacy_requested_at).toBe(NOW.toISOString());
     expect(patch.updated_by_user_id).toBe("admin-1");
+    // PR-064 · D-072: snapshot de email imutável.
+    expect(patch.updated_by_email).toBe("admin@example.com");
+  });
+
+  it("PR-064 · normaliza email (trim + lowercase) pro snapshot", async () => {
+    const supa = createSupabaseMock();
+    supa.enqueue("fulfillments", mkSelect("paid"));
+    supa.enqueue("fulfillments", {
+      data: { id: "ff-1", status: "pharmacy_requested" },
+      error: null,
+    });
+
+    const res = await transitionFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      to: "pharmacy_requested",
+      actor: "admin",
+      actorUserId: "admin-1",
+      actorEmail: "  ADMIN@Example.COM  ",
+      now: NOW,
+    });
+
+    expect(res.ok).toBe(true);
+    const updCall = supa.calls.find(
+      (c) => c.table === "fulfillments" && c.chain.includes("update")
+    );
+    const patch = updCall!.args[updCall!.chain.indexOf("update")][0] as Record<
+      string,
+      unknown
+    >;
+    expect(patch.updated_by_email).toBe("admin@example.com");
+  });
+
+  it("PR-064 · email ausente ou vazio → snapshot null", async () => {
+    const supa = createSupabaseMock();
+    supa.enqueue("fulfillments", mkSelect("paid"));
+    supa.enqueue("fulfillments", {
+      data: { id: "ff-1", status: "pharmacy_requested" },
+      error: null,
+    });
+
+    const res = await transitionFulfillment(supa.client as never, {
+      fulfillmentId: "ff-1",
+      to: "pharmacy_requested",
+      actor: "admin",
+      actorUserId: "admin-1",
+      actorEmail: "   ",
+      now: NOW,
+    });
+
+    expect(res.ok).toBe(true);
+    const updCall = supa.calls.find(
+      (c) => c.table === "fulfillments" && c.chain.includes("update")
+    );
+    const patch = updCall!.args[updCall!.chain.indexOf("update")][0] as Record<
+      string,
+      unknown
+    >;
+    expect(patch.updated_by_email).toBeNull();
   });
 
   it("pharmacy_requested → shipped grava tracking_note limpo", async () => {
