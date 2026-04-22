@@ -610,12 +610,14 @@ _Fim da PARTE 1. Seguir pra PARTE 2 (Lentes 5 Dinheiro + 6 LGPD/CFM)._
 
 ### [5.6] `/api/checkout` — consentimento LGPD não é persistido
 
-- **Veredicto:** 🟠 ALTO (toca Lente 5 pela monetização direta + Lente 6 pela violação de base legal)
-- **Achado:** `src/app/api/checkout/route.ts:49-51` define `CONSENT_TEXT_CHECKOUT` (constante) mas **nunca usa** — só valida `b.consent === true` e descarta. Nenhum registro em `legal_consents` ou similar. Além disso, a rota **segue existindo** mesmo após D-044 remover `/planos` da home: rota viva → superfície de ataque viva.
-- **Risco:** (a) paciente questiona juridicamente "eu nunca aceitei nada" — a plataforma não tem prova. (b) ANPD pede comprovação → controller incapaz de responder.
-- **Correção (PR):**
-  1. Se `/api/checkout` está descontinuada, remover o endpoint (`git rm`) + retornar 410 Gone + redirect na UI.
-  2. Se fica como canal alternativo (pacientes B2B, por ex), criar tabela `legal_consents(id, customer_id, kind, text_version, text_hash, ip, user_agent, accepted_at)` versionada e gravar aí toda vez.
+- **Veredicto:** ✅ RESOLVED em 2026-04-20 via PR-053 · D-064.
+- **Achado original:** `src/app/api/checkout/route.ts:49-51` define `CONSENT_TEXT_CHECKOUT` mas **nunca usa** — só valida `b.consent === true` e descarta. Nenhum registro em banco. Rota continua viva mesmo após D-044 remover `/planos` da home.
+- **Solução aplicada:**
+  1. Tabela `checkout_consents` (migration `20260507000000_checkout_consents.sql`) espelha `plan_acceptances` (D-044): `customer_id`, `payment_id`, `text_version`, `text_snapshot`, `text_hash` (SHA-256 canonical), `ip_address`, `user_agent`, `payment_method`. Imutável via trigger `BEFORE UPDATE/DELETE → raise exception` (cobre service_role). RLS deny-by-default.
+  2. Lib `src/lib/checkout-consent-terms.ts` versiona o texto legal (`v1-2026-05`, menciona LGPD art. 11 II "a" + finalidade + farmácia). Versões nunca são editadas — só adicionadas (teste unitário snapshota v1).
+  3. Lib `src/lib/checkout-consent.ts` com `recordCheckoutConsent()` **server-authoritative**: cliente envia apenas `consentTextVersion`; server carrega o texto da versão, hasheia e grava. `extractClientIp()` respeita precedência Vercel → CF → XFF.
+  4. `/api/checkout` rejeita versão desconhecida. Após `payments.insert`, antes de chamar Asaas, grava o consent. Se o insert falhar → aborta o checkout + marca `payments.status='DELETED'` (preferível frustrar do que cobrar sem base legal).
+  5. `CheckoutForm.tsx` envia `consentTextVersion: CHECKOUT_CONSENT_TEXT_VERSION`. 21 testes novos (hash determinístico/sensível, versão válida/inválida, insert_failed, IP precedência).
 - **Observador:** DPO, advogado, admin solo.
 
 ### [5.7] `POST /api/checkout` — DoS financeiro via boleto
@@ -1881,7 +1883,7 @@ Ordem recomendada de ataque (1 = primeiro):
 ### Financeiro (5)
 - ~~5.2 Earning em PAYMENT_CONFIRMED sem compensação financeira~~ — ✅ RESOLVED na Onda 1D (PR-014, D-050).
 - ~~5.5 Clawback não recalcula payout~~ — ✅ RESOLVED em 2026-04-20 (PR-051, D-062).
-- 5.6 Checkout consent não persiste
+- ~~5.6 Checkout consent não persiste~~ — ✅ RESOLVED em 2026-04-20 (PR-053, D-064).
 - 5.8 Customer takeover no checkout/reserve sem auth
 - ~~5.12 PII em `asaas_events`~~ — ✅ RESOLVED em 2026-04-20 (PR-052, D-063).
 - 22.3 CPF fake gerado por LLM → DoS de slots

@@ -5,6 +5,66 @@
 
 ---
 
+## D-064 · Persistência server-authoritative do aceite LGPD em `/api/checkout` (finding 5.6) · 2026-04-20
+
+**Contexto.** Finding [5.6 🟠 ALTO]: `src/app/api/checkout/route.ts` definia `CONSENT_TEXT_CHECKOUT` mas **nunca usava** — só validava `body.consent === true` e descartava. Nenhum registro em banco. A plataforma ficava sem prova jurídica de que o paciente leu/aceitou os termos. LGPD Art. 8º §1º exige demonstração da manifestação de vontade; Art. 9º exige comprovação da base legal. ANPD pode requerer a qualquer momento: "mostre-me o consentimento do Fulano de Tal em 2026-05-03" — controller incapaz de responder.
+
+A rota persiste viva (fluxo back-office pós-D-044 pra links manuais, renovações excepcionais, clientes B2B eventuais). Duas opções: (1) retirar a rota + redirect; (2) registrar o aceite igual ao fluxo `/paciente/oferta/[appointment_id]`. Escolhida a **(2)** — a rota tem uso residual legítimo e desligá-la cria fricção sem eliminar o finding estrutural ("aceites ad-hoc sem prova").
+
+**Decisão.**
+
+1. **Tabela `checkout_consents`** (migration `20260507000000_checkout_consents.sql`):
+
+   - Espelha `plan_acceptances` (D-044): `customer_id`, `payment_id`, `accepted_at`, `text_version`, `text_snapshot`, `text_hash`, `ip_address`, `user_agent`, `payment_method`.
+   - **Imutável** via trigger `checkout_consents_immutable` (BEFORE UPDATE/DELETE → raise exception). Cobre service_role também — prova legal exige proteção absoluta contra mutação.
+   - RLS deny-by-default.
+   - FK `payment_id` é nullable `on delete set null` — um consent pode existir mesmo que o payment venha a ser purgado por retention futura.
+
+2. **Lib `src/lib/checkout-consent-terms.ts`**: texto legal versionado (mesmo padrão de `acceptance-terms.ts`). Versão atual: `v1-2026-05`. Nunca edita — só adiciona. Teste unitário trava o snapshot do texto v1 (bump de versão exige edição do teste → review).
+
+3. **Lib `src/lib/checkout-consent.ts`**:
+
+   - **Server-authoritative**: o cliente envia só `consentTextVersion` (string). O server chama `getCheckoutConsentText(version)` pra obter o texto EXATO que seria exibido, e grava esse texto como `text_snapshot`. O cliente **não dita** o texto — só escolhe a versão vigente na tela dele.
+   - **Hash canonical**: `SHA-256(JSON.stringify({customerId, paymentId, textSnapshot[normalizado NFC+whitespace], textVersion}))` com chaves em ordem alfabética. Auditoria re-calcula e compara.
+   - **IP extraction**: `extractClientIp()` respeita precedência `x-vercel-forwarded-for` → `cf-connecting-ip` → `x-forwarded-for`, sempre pegando o primeiro hop.
+
+4. **Integração no endpoint**:
+
+   - `parseAndValidate`: rejeita `consentTextVersion` desconhecida (defesa contra `?consentTextVersion=ignora-lgpd`).
+   - Após inserir `payments` local (PENDING), ANTES de chamar Asaas, `recordCheckoutConsent()` grava a prova. Se esse insert falhar → **aborta o checkout**: marca `payments.status = 'DELETED'` e retorna 500. Rationale: preferível frustrar um checkout legítimo a cobrar sem base legal LGPD.
+   - IP + user-agent gravados a partir dos headers da request.
+
+5. **UI (`src/components/CheckoutForm.tsx`)**: envia `consentTextVersion: CHECKOUT_CONSENT_TEXT_VERSION` junto no body. O checkbox continua no front (UX), mas o texto exibido é meramente orientativo — o que vale juridicamente é o snapshot retornado pelo server.
+
+**Por que consent gravado DEPOIS do `payments.insert` e não antes.** A tabela é imutável (trigger). Se gravássemos antes com `payment_id = null` e depois tentássemos UPDATE pra preencher, o trigger explode. Inserir após o payment garante que a row já nasce com FK completo e nunca precisa mutar. O custo: se `payments.insert` falhar, o consent **não** é gravado — o que é correto (consent sem cobrança associada é órfão e polui a trilha).
+
+**Por que NÃO generalizar pra `legal_consents` (com coluna `kind`).** O audit sugeriu a generalização. Optei pela tabela dedicada:
+
+- Escopo atual é único (checkout legacy). Generalizar prematuramente cria API que ninguém usa.
+- `plan_acceptances` (D-044) é outra tabela dedicada — se generalizar, teria que absorver plan_acceptances também (ripple grande, fora de escopo).
+- Se emergir 3ª modalidade (newsletter, recontrato), aí vira ADR próprio pra extrair o padrão.
+
+**Por que NÃO usar `auth.users.id` em vez de `customer_id`.** O fluxo `/api/checkout` não exige login (D-044 item 2.C — paciente compra direto). O único identificador confiável no momento do aceite é o `customer_id` criado/atualizado a partir do CPF. Quando o finding **5.8** (customer takeover) for endereçado, a rota passará a exigir login — aí o `user_id` pode ser adicionado sem migration destrutiva (coluna nullable).
+
+**Consequências.**
+
+- LGPD Art. 8º §1º e Art. 9º §1º endereçados pra esse canal: toda compra gera prova imutável com snapshot + hash + circunstâncias.
+- Auditoria futura: SELECT em `checkout_consents` WHERE customer_id='...' retorna histórico completo. Re-hashar o snapshot com a canônica valida integridade.
+- 21 testes unitários novos (12 hash/record + 7 terms + 2 IP extractor). Suíte 998/998.
+- Audit finding [5.6] ✅ RESOLVED. ALTOs não-AI restantes: 2 → 1 (5.8 customer takeover, 17.4 signed URL log).
+
+**Escopo NÃO incluído.**
+
+- **Finding 5.8** (takeover no upsert `customers`): finding distinto; exige fluxo de login antes de permitir update de PII. Próximo PR.
+- **Backfill de consents legados**: não há rows históricas (o endpoint nunca gravou) — não há nada pra migrar.
+- **Retention dos consents**: prova legal é pra vida útil do contrato + prazos prescricionais (5 anos CDC). `checkout_consents` não entra na política de purge — aí é outra ADR quando o horizonte chegar.
+
+**Referências:** `supabase/migrations/20260507000000_checkout_consents.sql`, `src/lib/checkout-consent.ts`, `src/lib/checkout-consent-terms.ts`, `src/app/api/checkout/route.ts` (integração), `src/components/CheckoutForm.tsx` (envio da versão).
+
+**Supersedes:** nenhum. Estende D-044 (padrão de acceptance hash/versioned legal text) pro canal de checkout legacy.
+
+---
+
 ## D-063 · Retenção + redação de PII em `asaas_events` (finding 5.12) · 2026-04-20
 
 **Contexto.** Finding [5.12 🟠 ALTO]: a tabela `asaas_events` acumulava todo webhook recebido do Asaas com o payload bruto (`jsonb not null`) sem TTL. Cada payload inclui PII completa: nome, CPF, email, phone, endereço do customer Asaas, dados de cartão (holderInfo), descrições livres. Sem purge automático, em 12 meses o banco tem gigabytes de PII desnecessária pra qualquer finalidade operacional — violação LGPD Art. 16 (eliminação após término do tratamento) + princípio da adequação à finalidade.

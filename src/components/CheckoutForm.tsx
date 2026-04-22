@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { formatDateBR } from "@/lib/datetime-br";
+import { CHECKOUT_CONSENT_TEXT_VERSION } from "@/lib/checkout-consent-terms";
 
 export type CheckoutPlan = {
   id: string;
@@ -290,6 +291,7 @@ export function CheckoutForm({ plan, slot }: CheckoutFormProps) {
             state: form.state,
           },
           consent: form.consent,
+          consentTextVersion: CHECKOUT_CONSENT_TEXT_VERSION,
           leadId,
           ...(reserveMode && slot
             ? { scheduledAt: slot.startsAt, recordingConsent: false }

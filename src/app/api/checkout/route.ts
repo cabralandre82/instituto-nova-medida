@@ -7,6 +7,14 @@ import {
   type AsaasBillingType,
 } from "@/lib/asaas";
 import { sanitizeShortText, TEXT_PATTERNS } from "@/lib/text-sanitize";
+import {
+  recordCheckoutConsent,
+  extractClientIp,
+} from "@/lib/checkout-consent";
+import {
+  CHECKOUT_CONSENT_TEXT_VERSION,
+  isKnownCheckoutConsentVersion,
+} from "@/lib/checkout-consent-terms";
 import { logger } from "@/lib/logger";
 
 const log = logger.with({ route: "/api/checkout" });
@@ -47,13 +55,21 @@ type CheckoutBody = {
     state: string;
   };
   consent: boolean;
+  /**
+   * Versão do texto legal exibido na checkbox. O SERVER não aceita
+   * texto vindo do cliente — só a versão. O texto canonical fica em
+   * `src/lib/checkout-consent-terms.ts` (D-064). Se ausente, usa o
+   * `CHECKOUT_CONSENT_TEXT_VERSION` vigente.
+   */
+  consentTextVersion?: string;
   leadId?: string | null;
 };
 
-const CONSENT_TEXT_CHECKOUT =
-  "Li e aceito os Termos de Uso e a Política de Privacidade do Instituto Nova Medida.";
+type ParsedCheckout = Omit<CheckoutBody, "consentTextVersion"> & {
+  consentTextVersion: string;
+};
 
-function parseAndValidate(raw: unknown): CheckoutBody | { error: string } {
+function parseAndValidate(raw: unknown): ParsedCheckout | { error: string } {
   if (!raw || typeof raw !== "object") return { error: "Body inválido" };
   const b = raw as Partial<CheckoutBody>;
 
@@ -126,6 +142,17 @@ function parseAndValidate(raw: unknown): CheckoutBody | { error: string } {
 
   if (b.consent !== true) return { error: "Aceite dos termos é obrigatório" };
 
+  // PR-053 · D-064 · finding 5.6: versão do texto legal. Cliente pode
+  // omitir → server usa a vigente. Se enviar uma desconhecida, rejeita
+  // (defesa contra `?consentTextVersion=ignora-lgpd`).
+  const consentTextVersion =
+    typeof b.consentTextVersion === "string" && b.consentTextVersion.length > 0
+      ? b.consentTextVersion
+      : CHECKOUT_CONSENT_TEXT_VERSION;
+  if (!isKnownCheckoutConsentVersion(consentTextVersion)) {
+    return { error: "Versão do termo de aceite desconhecida" };
+  }
+
   return {
     planSlug: b.planSlug,
     paymentMethod: b.paymentMethod,
@@ -143,6 +170,7 @@ function parseAndValidate(raw: unknown): CheckoutBody | { error: string } {
       state: a.state.trim().toUpperCase(),
     },
     consent: true,
+    consentTextVersion,
     leadId: b.leadId ?? null,
   };
 }
@@ -335,6 +363,43 @@ export async function POST(req: Request) {
     log.error("payment insert error", { err: payInsertErr });
     return NextResponse.json(
       { ok: false, error: "Erro ao registrar cobrança" },
+      { status: 500 }
+    );
+  }
+
+  // PR-053 · D-064 · finding 5.6: grava prova legal do aceite ANTES
+  // da chamada Asaas. Se o insert falhar, abortamos a cobrança — é
+  // preferível frustrar um checkout legítimo a cobrar sem base legal
+  // LGPD (Art. 8º §1º exige prova do consentimento). O payment local
+  // fica PENDING; cron de cleanup ou retry do usuário resolve.
+  const ipAddress = extractClientIp(req);
+  const userAgent = req.headers.get("user-agent");
+  const consentResult = await recordCheckoutConsent(supabase, {
+    customerId: localCustomerId,
+    paymentId: localPayment.id,
+    textVersion: input.consentTextVersion,
+    ipAddress,
+    userAgent,
+    paymentMethod: input.paymentMethod,
+  });
+
+  if (!consentResult.ok) {
+    log.error("consent insert falhou — abortando checkout", {
+      code: consentResult.code,
+      message: consentResult.message,
+      payment_id: localPayment.id,
+    });
+    // Marca o payment como DELETED pra não ficar órfão no banco.
+    await supabase
+      .from("payments")
+      .update({ status: "DELETED" })
+      .eq("id", localPayment.id);
+    return NextResponse.json(
+      {
+        ok: false,
+        error:
+          "Não foi possível registrar o aceite dos termos. Tente novamente.",
+      },
       { status: 500 }
     );
   }
