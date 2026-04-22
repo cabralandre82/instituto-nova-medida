@@ -35,6 +35,13 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 // ────────────────────────────────────────────────────────────────────────
 
 export const SLA_HOURS = {
+  /**
+   * appointment em `pending_payment` (LEGADO D-044) > 24h — watchdog
+   * do PR-071 · D-079 · finding [1.4]. Novo modelo não cria appointments
+   * nesse estado; se ficar velho, é resíduo/ghost e paciente vê
+   * "Aguardando confirmação" sem ação possível.
+   */
+  appointment_pending_payment_stale: 24,
   /** paid → pharmacy_requested: o Instituto tem 1 dia útil pra acionar farmácia */
   paid_to_pharmacy: 24,
   /** pharmacy_requested → shipped: farmácia + recebimento pelo Instituto */
@@ -73,7 +80,13 @@ export type InboxCategory =
   | "finance_critical"
   | "finance_warning"
   | "doctor_pending"
-  | "lgpd_pending";
+  | "lgpd_pending"
+  /**
+   * PR-071 · D-079 · finding 1.4. Appointment LEGADO preso em
+   * `pending_payment` — nenhum novo deveria existir no modelo D-044.
+   * Alerta acima de 24h: provavelmente ghost do fluxo antigo ou bug.
+   */
+  | "appointment_pending_payment_stale";
 
 export type InboxItem = {
   /** Chave única estável (categoria). Usada como React key e id de notificação. */
@@ -247,6 +260,7 @@ export async function loadAdminInbox(
     reconcile,
     doctorPending,
     lgpdPending,
+    apptPendingPayment,
   ] = await Promise.all([
     countWithOldest(
       supabase
@@ -331,6 +345,19 @@ export async function loadAdminInbox(
         .eq("kind", "anonymize")
         .eq("status", "pending"),
       "requested_at",
+      now
+    ),
+    // PR-071 · D-079: watchdog de appointments LEGADO presas em
+    // pending_payment. Usa `created_at` como proxy de idade (não
+    // `pending_payment_expires_at` porque essa coluna existe justo
+    // pra expiração em 15min e não reflete "há quanto tempo o
+    // appointment está ghost"). Em produção estável esse count é 0.
+    countWithOldest(
+      supabase
+        .from("appointments")
+        .select("created_at", { count: "exact" })
+        .eq("status", "pending_payment"),
+      "created_at",
       now
     ),
   ]);
@@ -443,6 +470,16 @@ export async function loadAdminInbox(
       age: lgpdPending.oldestAgeHours,
       sla: SLA_HOURS.lgpd_pending,
       href: "/admin/lgpd-requests",
+    },
+    {
+      category: "appointment_pending_payment_stale",
+      title: "Consulta LEGADO parada em 'pending_payment'",
+      description:
+        "Appointment ficou preso no fluxo antigo (pré-D-044). Verifique se é ghost ou se o paciente precisa de suporte — nenhum novo deveria surgir com LEGACY_PURCHASE_ENABLED=false.",
+      count: apptPendingPayment.count,
+      age: apptPendingPayment.oldestAgeHours,
+      sla: SLA_HOURS.appointment_pending_payment_stale,
+      href: "/admin/health",
     },
   ];
 

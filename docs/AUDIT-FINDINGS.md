@@ -872,12 +872,17 @@ _Fim da PARTE 2. Seguir pra PARTE 3 (Lentes 1+2 Paciente/Médica + 7+8 Produto/O
 - **Correção:** ver `[2.1]` e `[8.2]` — fix global: criar helper `src/lib/datetime-br.ts` com `fmtDate/fmtTime/fmtDateTime` forçando `timeZone: "America/Sao_Paulo"` e substituir todas as 50+ chamadas `toLocale*` por ele. Adicionar `TZ=America/Sao_Paulo` também em `vercel.json` (`env`) como defesa em profundidade.
 - **Observador:** paciente, médica, admin.
 
-### [1.4 🟡 MÉDIO] Mensagem "Aguardando confirmação do pagamento" aparece para consultas que não deveriam ter pagamento (resíduo do fluxo antigo)
+### [1.4 🟡 MÉDIO → ✅ RESOLVIDO (PR-071 · D-079 · 2026-04-20)] Mensagem "Aguardando confirmação do pagamento" aparece para consultas que não deveriam ter pagamento (resíduo do fluxo antigo)
 
-- **Onde:** `src/app/paciente/(shell)/page.tsx:272-276` (`isPendingPayment = upcoming.status === "pending_payment"`).
+- **Onde:** `src/app/paciente/(shell)/page.tsx:231` (`isPendingPayment = upcoming.status === "pending_payment"`).
 - **Achado:** no novo modelo D-044, **consulta inicial é gratuita**. Mas o status `pending_payment` ainda existe (herdado do fluxo antigo — era usado por `/agendar/[plano]` quando paciente agendava + pagava mas pagamento ainda não confirmado). Quando o fluxo antigo é usado ([1.1]), paciente vê a mensagem legítima. Se um slot é criado pela médica com `status=scheduled` e um edge case marca `pending_payment`, o paciente fica travado em "Aguardando confirmação" sem entender por quê.
 - **Risco:** UX misteriosa, suporte inundado de "minha consulta não libera".
-- **Correção:** (a) na mesma onda de `[1.1]`, deprecar `pending_payment` em appointments quando o fluxo antigo for removido; (b) adicionar link "Fale com a equipe" explícito no card pending_payment; (c) no admin inbox, alertar qualquer appointment `pending_payment > 24h`.
+- **Resolução (PR-071 · D-079 · 2026-04-20):** deprecação **suave** do estado. Enum permanece (remover quebraria RPC `book_pending_appointment_slot` + state machine D-070 + linhas históricas), mas:
+  - (a) `supabase/migrations/20260515000000_pending_payment_deprecation.sql` adiciona `COMMENT ON COLUMN appointments.status` e `pending_payment_expires_at` marcando o estado como LEGACY D-044 (próximo agente entende o contexto só olhando o schema) + índice parcial `idx_appointments_pending_payment_legacy(pending_payment_expires_at asc) where status='pending_payment'` (custo desprezível porque a lista tende a 0 em produção estável; serve o watchdog abaixo).
+  - (b) `src/app/paciente/(shell)/page.tsx` · card `isPendingPayment` recebe CTA "Fale com a equipe pelo WhatsApp" (via `whatsappSupportUrl` da lib `contact.ts`) com mensagem pré-preenchida pra triagem rápida.
+  - (c) `src/lib/admin-inbox.ts` · nova categoria `appointment_pending_payment_stale` com `SLA_HOURS=24h` (conforme sugestão explícita do finding). Usa `appointments.created_at` como proxy de idade (não `pending_payment_expires_at`, que só vai 15min pra frente e não reflete "ghost há muito"). Aparece em `/admin` home com link pra `/admin/health`.
+  - **Invariante:** produção com `LEGACY_PURCHASE_ENABLED=false` (default desde PR-020 · D-048) **não cria novos** `pending_payment`. Se o watchdog dispara, é resíduo antigo ou bug sério — admin solo triage manualmente (não auto-cancelamos pra evitar duplo-estorno).
+  - **Testes:** `src/lib/admin-inbox.test.ts` +3 casos (overdue 36h, abaixo-de-50%-do-SLA, SLA=24h). Suíte global: 72 arquivos, 1370 testes (+3). TSC + ESLint limpos.
 - **Observador:** paciente, admin.
 
 ### [1.5 🟡 MÉDIO] Número de WhatsApp hardcoded em múltiplos lugares
@@ -1133,7 +1138,7 @@ _Fim da PARTE 2. Seguir pra PARTE 3 (Lentes 1+2 Paciente/Médica + 7+8 Produto/O
 |---|---|---|
 | 🔴 CRÍTICO | **3** | 1.1, 2.1, 7.1, 8.2 |
 | 🟠 ALTO | **7** | 1.2, 1.3, 2.2, 2.3, 7.2, 7.3, 8.3, 8.4 |
-| 🟡 MÉDIO | **6** | 1.4, 1.6, 1.7, 2.4, 7.4, 7.7, 8.1 (recalibrado), ~~1.5 (PR-057 · D-068)~~, ~~2.5 (PR-065 · D-073)~~, ~~7.5 (PR-020, confirmado PR-065 · D-073)~~, ~~7.6 (PR-065 · D-073)~~, ~~8.5 (PR-057 · D-068)~~, ~~8.6 (PR-040 · D-059)~~, ~~8.7 (PR-058 · D-069)~~ |
+| 🟡 MÉDIO | **5** | 1.6, 1.7, 2.4, 7.4, 7.7, 8.1 (recalibrado), ~~1.4 (PR-071 · D-079)~~, ~~1.5 (PR-057 · D-068)~~, ~~2.5 (PR-065 · D-073)~~, ~~7.5 (PR-020, confirmado PR-065 · D-073)~~, ~~7.6 (PR-065 · D-073)~~, ~~8.5 (PR-057 · D-068)~~, ~~8.6 (PR-040 · D-059)~~, ~~8.7 (PR-058 · D-069)~~ |
 | 🟢 SEGURO | **4** | 1.8, 2.6, 7.8, 8.8 |
 
 **Observação:** [8.1] foi **recalibrado de CRÍTICO para MÉDIO** em 2026-04-20: os crons já estão corretos em UTC e documentados nos `route.ts`. O problema remanescente é preferência operacional (horários matinais), não bug técnico.

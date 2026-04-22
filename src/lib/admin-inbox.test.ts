@@ -159,21 +159,25 @@ describe("sortInboxItems", () => {
 // ────────────────────────────────────────────────────────────────────────
 
 /**
- * Helper que enfileira 9 respostas (1 por query do loadAdminInbox).
+ * Helper que enfileira as 11 respostas esperadas por `loadAdminInbox`.
  * Todas são no-ops (count=0) por padrão, pra o teste habilitar só
  * as que importam.
+ *
+ * A ordem aqui TEM que casar com a ordem do Promise.all em
+ * `loadAdminInbox`:
+ *   1. fulfillments paid
+ *   2. fulfillments pharmacy_requested
+ *   3. fulfillments shipped
+ *   4. fulfillments pending_acceptance
+ *   5. fulfillments pending_payment
+ *   6. appointments refund_required
+ *   7. appointment_notifications status=failed
+ *   8. appointments reconcile stuck
+ *   9. doctors invited/pending
+ *  10. lgpd_requests pending
+ *  11. appointments pending_payment (LEGACY watchdog · PR-071 · D-079)
  */
 function enqueueEmptyAll(supa: ReturnType<typeof createSupabaseMock>) {
-  // A ordem aqui TEM que casar com a ordem no `loadAdminInbox`:
-  //   1. fulfillments paid
-  //   2. fulfillments pharmacy_requested
-  //   3. fulfillments shipped
-  //   4. fulfillments pending_acceptance
-  //   5. fulfillments pending_payment
-  //   6. appointments refund_required
-  //   7. appointment_notifications status=failed
-  //   8. appointments reconcile stuck
-  //   9. doctors invited/pending
   const tables = [
     "fulfillments",
     "fulfillments",
@@ -184,6 +188,8 @@ function enqueueEmptyAll(supa: ReturnType<typeof createSupabaseMock>) {
     "appointment_notifications",
     "appointments",
     "doctors",
+    "lgpd_requests",
+    "appointments",
   ];
   tables.forEach((t) =>
     supa.enqueue(t, { data: [], count: 0, error: null })
@@ -408,5 +414,85 @@ describe("loadAdminInbox", () => {
     const fixed = new Date("2026-05-01T08:30:00.000Z");
     const inbox = await loadAdminInbox(supa.client as never, fixed);
     expect(inbox.generatedAt).toBe(fixed.toISOString());
+  });
+
+  // ──────────────────────────────────────────────────────────────────
+  // PR-071 · D-079 · finding 1.4
+  // Watchdog: appointments LEGADO presas em pending_payment > 24h.
+  // ──────────────────────────────────────────────────────────────────
+
+  it("PR-071 · appointment LEGADO em pending_payment há 36h → overdue (SLA=24h)", async () => {
+    const supa = createSupabaseMock();
+    // 1-5. fulfillments vazios
+    for (let i = 0; i < 5; i++) {
+      supa.enqueue("fulfillments", { data: [], count: 0, error: null });
+    }
+    // 6. refund vazio
+    supa.enqueue("appointments", { data: [], count: 0, error: null });
+    // 7. notifs vazio
+    supa.enqueue("appointment_notifications", {
+      data: [],
+      count: 0,
+      error: null,
+    });
+    // 8. reconcile vazio
+    supa.enqueue("appointments", { data: [], count: 0, error: null });
+    // 9. doctors vazio
+    supa.enqueue("doctors", { data: [], count: 0, error: null });
+    // 10. lgpd vazio
+    supa.enqueue("lgpd_requests", { data: [], count: 0, error: null });
+    // 11. appointments pending_payment LEGADO: 2 linhas, mais antiga há 36h
+    supa.enqueue("appointments", {
+      data: [{ created_at: hoursAgoIso(36) }],
+      count: 2,
+      error: null,
+    });
+
+    const inbox = await loadAdminInbox(supa.client as never, NOW);
+    const legacy = inbox.items.find(
+      (i) => i.category === "appointment_pending_payment_stale",
+    );
+    expect(legacy).toBeDefined();
+    expect(legacy!.urgency).toBe("overdue");
+    expect(legacy!.count).toBe(2);
+    expect(legacy!.slaHours).toBe(
+      SLA_HOURS.appointment_pending_payment_stale,
+    );
+    expect(legacy!.oldestAgeHours).toBeGreaterThanOrEqual(35);
+    expect(legacy!.oldestAgeHours).toBeLessThanOrEqual(37);
+    expect(legacy!.href).toBe("/admin/health");
+    expect(legacy!.title).toContain("LEGADO");
+  });
+
+  it("PR-071 · appointment em pending_payment há 4h (<50% SLA) → NÃO entra na inbox", async () => {
+    const supa = createSupabaseMock();
+    for (let i = 0; i < 5; i++) {
+      supa.enqueue("fulfillments", { data: [], count: 0, error: null });
+    }
+    supa.enqueue("appointments", { data: [], count: 0, error: null });
+    supa.enqueue("appointment_notifications", {
+      data: [],
+      count: 0,
+      error: null,
+    });
+    supa.enqueue("appointments", { data: [], count: 0, error: null });
+    supa.enqueue("doctors", { data: [], count: 0, error: null });
+    supa.enqueue("lgpd_requests", { data: [], count: 0, error: null });
+    supa.enqueue("appointments", {
+      data: [{ created_at: hoursAgoIso(4) }],
+      count: 1,
+      error: null,
+    });
+
+    const inbox = await loadAdminInbox(supa.client as never, NOW);
+    expect(
+      inbox.items.find(
+        (i) => i.category === "appointment_pending_payment_stale",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("PR-071 · SLA_HOURS.appointment_pending_payment_stale é 24h", () => {
+    expect(SLA_HOURS.appointment_pending_payment_stale).toBe(24);
   });
 });

@@ -27,6 +27,7 @@ import {
   formatTimeBR,
   formatWeekdayLongBR,
 } from "@/lib/datetime-br";
+import { whatsappSupportUrl } from "@/lib/contact";
 import { ActiveFulfillmentCard } from "./_ActiveFulfillmentCard";
 import { PendingOfferCard } from "./_PendingOfferCard";
 
@@ -261,9 +262,26 @@ function UpcomingCard({
       <p className="text-ink-500 text-sm mt-1">{whenHint}</p>
 
       {isPendingPayment && (
-        <p className="mt-4 text-sm text-ink-600">
-          Aguardando confirmação do pagamento. Quando confirmar, esta sala libera.
-        </p>
+        <div className="mt-4 rounded-xl bg-white/60 border border-sage-200 p-4 space-y-2">
+          <p className="text-sm text-ink-700">
+            Aguardando confirmação do pagamento desta consulta. Assim que o
+            pagamento cair, a sala libera automaticamente.
+          </p>
+          <p className="text-sm text-ink-600">
+            Está parado há mais de 1 dia ou você pagou e continua aqui?{" "}
+            <a
+              href={whatsappSupportUrl(
+                "Olá! Minha consulta está em 'Aguardando confirmação do pagamento'. Podem verificar?",
+              )}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline decoration-sage-400 hover:text-ink-800 font-medium"
+            >
+              Fale com a equipe pelo WhatsApp
+            </a>
+            .
+          </p>
+        </div>
       )}
 
       {!isPendingPayment && (

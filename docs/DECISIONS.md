@@ -5,6 +5,171 @@
 
 ---
 
+## D-079 · Deprecação suave de `appointments.status='pending_payment'` (PR-071 · finding 1.4) · 2026-04-20
+
+**Contexto.** `appointments.status='pending_payment'` é resíduo do fluxo
+antigo ("agendar + pagar antes da consulta") descontinuado em **D-044**:
+no modelo canônico consulta inicial é **gratuita**, e pagamento só
+acontece depois, em `fulfillments` (plano/medicação prescrita após a
+consulta médica).
+
+O estado `pending_payment` ainda é criado por:
+
+- RPC `book_pending_appointment_slot()` (migration `20260419070000`)
+- Invocada por `/api/agendar/reserve` (rota legada)
+- **Gate**: `isLegacyPurchaseEnabled()` em `src/lib/legacy-purchase-gate.ts` —
+  default `false` em produção desde PR-020 · D-048. Rotas `/checkout/[plano]`
+  e `/agendar/[plano]` redirecionam pra home antes de qualquer render.
+
+Portanto em produção estável **nenhum novo appointment `pending_payment`
+deveria ser criado**. Mas o enum permanece ativo porque:
+
+1. Desabilitá-lo quebraria a RPC caso o operador reative `LEGACY_PURCHASE_ENABLED`
+   excepcionalmente (ex: emitir link manual).
+2. Linhas históricas (pré-PR-020) continuam existindo e precisam ser
+   renderizáveis em UI / queries analíticas.
+3. State machine D-070 contempla transições a partir de `pending_payment`.
+
+**Riscos captados pelo finding [1.4 🟡 MÉDIO]:**
+
+- **UX ghost.** Appointment preso em `pending_payment` (bug, gateway
+  flaky, edge case) faz paciente ver "Aguardando confirmação do pagamento"
+  sem ação possível. Sem rastro no admin inbox.
+- **Confusão conceitual.** A mesma string `pending_payment` existe
+  também em `fulfillments.status` com semântica **ativa e legítima**
+  (paciente aceitou plano, cobrança emitida, aguarda webhook Asaas).
+  Devs futuros confundem.
+
+**Alternativas.**
+
+- **A. Remover o enum value.** Rejeitado. Quebra RPC legada, state
+  machine D-070, linhas históricas. Remoção só é aceitável após ≥180
+  dias consecutivos com `LEGACY_PURCHASE_ENABLED=false` sem exceção,
+  via migration dedicada.
+- **B. Retabular `pending_payment` para `legacy_pending_payment`
+  (rename).** Rejeitado. Exige update simultâneo de RPC + TS + UI +
+  state machine + docs; risco alto pra valor quase nenhum (a confusão
+  já está mitigada por este D-079).
+- **C. Deprecação suave com COMMENT + watchdog + CTA de suporte.**
+  **ESCOLHIDA.** Não quebra nada; marca textualmente o estado como
+  LEGADO; aciona admin quando ghost aparece; dá caminho pro paciente
+  pedir ajuda.
+
+**Decisão.** Três peças complementares, todas aditivas:
+
+1. **Documentação estrutural (migration `20260515000000`)**
+
+   - `COMMENT ON COLUMN appointments.status` listando valores ativos
+     e marcando `pending_payment` como LEGACY D-044.
+   - `COMMENT ON COLUMN appointments.pending_payment_expires_at`
+     idem.
+   - Próximo agente/dev que grep-ar `pending_payment` no schema vê
+     imediatamente o contexto.
+
+2. **Índice parcial `idx_appointments_pending_payment_legacy`**
+
+   ```sql
+   CREATE INDEX idx_appointments_pending_payment_legacy
+     ON appointments (pending_payment_expires_at ASC)
+     WHERE status = 'pending_payment';
+   ```
+
+   Partial: em produção estável, 0 linhas → custo de manutenção
+   desprezível. Serve o watchdog abaixo.
+
+3. **Watchdog no admin-inbox (`src/lib/admin-inbox.ts`)**
+
+   Nova categoria `appointment_pending_payment_stale` com SLA 24h
+   (conforme sugestão explícita do finding item (c): "alertar qualquer
+   appointment `pending_payment > 24h`"). Aparece no `/admin` home
+   quando há linhas antigas, linka pra `/admin/health`. Usa
+   `appointments.created_at` como proxy de idade (não
+   `pending_payment_expires_at`, que só vai 15min à frente do
+   `created_at` e não reflete "ghost há muito tempo").
+
+4. **UI do paciente (`/paciente` dashboard)**
+
+   Card "Aguardando confirmação do pagamento" ganha CTA explícito
+   "Fale com a equipe pelo WhatsApp" via `whatsappSupportUrl(...)`
+   (lib `src/lib/contact.ts`). Mensagem pré-preenchida pra acelerar
+   triagem. Conforme finding item (b).
+
+**Não-objetivos.**
+
+- Não remover enum value (ver alternativa A).
+- Não modificar state machine D-070 (transições continuam válidas
+  pra reativação legacy).
+- Não criar página `/admin/appointments` nova — `/admin/health` já
+  agrega operacional e é o link natural.
+- Não automatizar resolução do ghost (cron que cancela automaticamente).
+  Admin solo precisa intervir manualmente pra distinguir "paciente
+  esqueceu + quer mesmo" de "gateway bugou + o dinheiro caiu". Cancelar
+  automaticamente tem risco de duplo-estorno.
+
+**Invariantes.**
+
+- I1. `pending_payment` nunca é criado em fluxo canônico (gated por
+  `isLegacyPurchaseEnabled()=false`).
+- I2. Watchdog só dispara acima de 12h (50% do SLA 24h → `due_soon`)
+  e overdue acima de 24h.
+- I3. Linhas históricas continuam renderizáveis em todas UIs (backward
+  compat total; testes existentes não alterados).
+
+**Trade-offs.**
+
+- **Proxy `created_at` vs `pending_payment_expires_at`.** Usamos
+  `created_at`. `pending_payment_expires_at = created_at + 15min`
+  é o TTL da reserva atomic; depois dele o cron
+  `expire_abandoned_reservations` deveria ter movido pra
+  `cancelled_by_admin`. Se não moveu, a idade real é
+  `now - created_at`, não `now - expires_at`.
+- **SLA 24h.** Sugestão direta do finding. Poderíamos ser mais
+  agressivos (4h?) mas preferimos sinalizar, não alarmar: gateway
+  lento / webhook atrasado pode justificar 1-4h; 24h é seguramente
+  "algo precisa de olho humano".
+- **Sem auto-cancelamento.** Risco de duplo-estorno > benefício
+  (admin solo trata em <24h de qualquer forma).
+
+**Consequências.**
+
+- Finding [1.4 🟡 MÉDIO] fechado.
+- `/admin` home sinaliza ghosts automaticamente; operador solo ganha
+  visibilidade sem precisar navegar.
+- Paciente vê caminho direto pra suporte sem enrolar.
+- Próximo dev / agente de IA entende o contexto LEGACY só olhando
+  o schema.
+- Zero breaking changes; zero risco em produção (partial index, COMMENT,
+  categoria aditiva no inbox, CTA extra na UI).
+
+**Limitações conhecidas.**
+
+- Não impede novos `pending_payment` se o operador setar
+  `LEGACY_PURCHASE_ENABLED=true` por descuido — essa é uma decisão
+  upstream (PR-020 · D-048). Este D-079 opera a partir da hipótese
+  de que o flag está em `false`.
+- Não cobre `fulfillments.status='pending_payment'` (fluxo ATIVO D-044,
+  categoria `offer_payment` já existia).
+
+**Testes.**
+
+- `src/lib/admin-inbox.test.ts` — 3 testes novos:
+  - `appointment LEGADO em pending_payment há 36h → overdue`.
+  - `appointment em pending_payment há 4h → NÃO entra na inbox`.
+  - `SLA_HOURS.appointment_pending_payment_stale é 24h`.
+- Testes existentes do inbox refatorados: `enqueueEmptyAll` atualizado
+  de 9 pra 11 respostas (agora contempla lgpd_requests + pending_payment
+  appointment).
+- Suíte global: 72 arquivos, 1370 testes (+3).
+
+**Artefatos.**
+
+- `supabase/migrations/20260515000000_pending_payment_deprecation.sql` · novo
+- `src/lib/admin-inbox.ts` · nova categoria `appointment_pending_payment_stale` + SLA
+- `src/lib/admin-inbox.test.ts` · +3 testes
+- `src/app/paciente/(shell)/page.tsx` · CTA WhatsApp no card pending_payment
+
+---
+
 ## D-078 · Trilha forense de emissões e verificações de magic-link em `magic_link_issued_log` (PR-070 · finding 17.8) · 2026-04-20
 
 **Contexto.** Magic-link é o único método de autenticação da plataforma
