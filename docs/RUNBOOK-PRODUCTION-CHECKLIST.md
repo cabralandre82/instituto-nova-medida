@@ -212,6 +212,7 @@ todo o ano hoje, já que o Brasil não usa horário de verão desde 2019).
 | 9 | `admin-digest` | `30 11 * * *` | 08:30 | Rollup diário do operador via WA | Você não recebe resumo (abra `/admin` manualmente) |
 | 10 | `retention-anonymize` | `0 4 * * 0` | 01:00 dom | LGPD Art. 16: anonimiza customers "ghost" > 24 meses | Backlog LGPD cresce |
 | 11 | `asaas-events-purge` | `0 5 * * 0` | 02:00 dom | LGPD: purga `asaas_events.payload` > 180d (PII) | PII persiste indefinidamente |
+| 12 | `expire-appointment-credits` | `0 12 * * *` | 09:00 | Sweep `appointment_credits` `active+expirado → expired` (D-083) | Relatórios SQL raw ficam menos limpos; UI segue honesta via compute-on-read |
 
 **pg_cron adicional** (roda no próprio Postgres, fora do Vercel):
 
@@ -275,7 +276,7 @@ curl -H "x-cron-secret: $CRON_SECRET" \
 
 - [ ] 🔴 `/admin/health` respondendo `overall: "ok"` no pré-release.
       Qualquer `error` trava o go-live.
-- [ ] 🔴 `/admin/crons` mostrando os 11 crons rodando nos últimos 7
+- [ ] 🔴 `/admin/crons` mostrando os 12 crons rodando nos últimos 7
       dias. Cron sem execução recente em janela > schedule × 2 =
       suspeita imediata.
 - [ ] 🟠 `/admin/errors` com janela 24h e filtro por `source` funcionando.

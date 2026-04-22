@@ -13,11 +13,14 @@ import {
   cancelCredit,
   computeCurrentStatus,
   CREDIT_EXPIRY_DAYS,
+  DEFAULT_SWEEP_BATCH_LIMIT,
+  MAX_SWEEP_BATCH_LIMIT,
   daysUntilExpiry,
   grantNoShowCredit,
   isCreditActive,
   listActiveCreditsForCustomer,
   markCreditConsumed,
+  sweepExpiredCredits,
   type AppointmentCreditRow,
 } from "./appointment-credits";
 import type { ActorSnapshot } from "./actor-snapshot";
@@ -528,5 +531,233 @@ describe("listActiveCreditsForCustomer", () => {
 describe("CREDIT_EXPIRY_DAYS", () => {
   it("é 90 dias (valor explícito em D-081)", () => {
     expect(CREDIT_EXPIRY_DAYS).toBe(90);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────
+// sweepExpiredCredits (PR-073-B · D-083)
+// ────────────────────────────────────────────────────────────────────
+//
+// Stub dedicado — o `makeClient` acima não cobre
+// `select().eq().lte().order().limit()` e `update().in().eq().select()`
+// na mesma chain. Um stub separado mantém cada bloco de teste simples.
+// ────────────────────────────────────────────────────────────────────
+
+function makeSweepClient(opts: {
+  candidates?: Array<{ id: string; expires_at: string }>;
+  selectError?: { message: string };
+  updatedIds?: string[];
+  updateError?: { message: string };
+  onSelect?: (params: {
+    status: string;
+    expiresLte: string;
+    limit: number;
+  }) => void;
+  onUpdate?: (params: { ids: string[]; status: string }) => void;
+}) {
+  const candidates = opts.candidates ?? [];
+  const updatedIds =
+    opts.updatedIds ?? candidates.map((c) => c.id);
+
+  return {
+    from(_table: string) {
+      return {
+        select(_cols: string) {
+          return {
+            eq(_col: string, status: string) {
+              return {
+                lte(_col2: string, expiresLte: string) {
+                  return {
+                    order(_col3: string, _opts: unknown) {
+                      return {
+                        limit: (limit: number) => {
+                          opts.onSelect?.({ status, expiresLte, limit });
+                          return Promise.resolve({
+                            data: opts.selectError ? null : candidates,
+                            error: opts.selectError ?? null,
+                          });
+                        },
+                      };
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        update(payload: { status: string }) {
+          return {
+            in(_col: string, ids: string[]) {
+              return {
+                eq(_col2: string, _val2: string) {
+                  return {
+                    select: (_cols: string) => {
+                      opts.onUpdate?.({ ids, status: payload.status });
+                      if (opts.updateError) {
+                        return Promise.resolve({
+                          data: null,
+                          error: opts.updateError,
+                        });
+                      }
+                      return Promise.resolve({
+                        data: updatedIds.map((id) => ({ id })),
+                        error: null,
+                      });
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+}
+
+describe("sweepExpiredCredits", () => {
+  it("sem candidatos → report zerado e UPDATE não chamado", async () => {
+    let updateCalled = false;
+    const supa = makeSweepClient({
+      candidates: [],
+      onUpdate: () => {
+        updateCalled = true;
+      },
+    });
+    const r = await sweepExpiredCredits(supa as unknown as SupabaseClient, {
+      now: NOW,
+    });
+    expect(r.candidatesFound).toBe(0);
+    expect(r.expired).toBe(0);
+    expect(r.errors).toBe(0);
+    expect(r.oldestExpiredAt).toBeNull();
+    expect(r.newestExpiredAt).toBeNull();
+    expect(updateCalled).toBe(false);
+  });
+
+  it("feliz: 3 candidatos → expired=3, report preenche oldest/newest", async () => {
+    const candidates = [
+      { id: "a1", expires_at: "2026-05-10T00:00:00Z" },
+      { id: "a2", expires_at: "2026-05-12T00:00:00Z" },
+      { id: "a3", expires_at: "2026-05-15T00:00:00Z" },
+    ];
+    let capturedSelect: { status: string; expiresLte: string } | null = null;
+    let capturedUpdate: { ids: string[]; status: string } | null = null;
+    const supa = makeSweepClient({
+      candidates,
+      onSelect: (p) => {
+        capturedSelect = { status: p.status, expiresLte: p.expiresLte };
+      },
+      onUpdate: (p) => {
+        capturedUpdate = p;
+      },
+    });
+
+    const r = await sweepExpiredCredits(supa as unknown as SupabaseClient, {
+      now: NOW,
+    });
+
+    expect(r.candidatesFound).toBe(3);
+    expect(r.expired).toBe(3);
+    expect(r.errors).toBe(0);
+    expect(r.dryRun).toBe(false);
+    expect(r.oldestExpiredAt).toBe("2026-05-10T00:00:00Z");
+    expect(r.newestExpiredAt).toBe("2026-05-15T00:00:00Z");
+    expect(capturedSelect).not.toBeNull();
+    expect(capturedSelect!.status).toBe("active");
+    expect(capturedSelect!.expiresLte).toBe(NOW.toISOString());
+    expect(capturedUpdate).not.toBeNull();
+    expect(capturedUpdate!.ids).toEqual(["a1", "a2", "a3"]);
+    expect(capturedUpdate!.status).toBe("expired");
+  });
+
+  it("dryRun=true → reporta candidatos mas não chama UPDATE", async () => {
+    let updateCalled = false;
+    const supa = makeSweepClient({
+      candidates: [{ id: "a1", expires_at: "2026-05-10T00:00:00Z" }],
+      onUpdate: () => {
+        updateCalled = true;
+      },
+    });
+    const r = await sweepExpiredCredits(supa as unknown as SupabaseClient, {
+      now: NOW,
+      dryRun: true,
+    });
+    expect(r.candidatesFound).toBe(1);
+    expect(r.expired).toBe(0);
+    expect(r.dryRun).toBe(true);
+    expect(r.oldestExpiredAt).toBe("2026-05-10T00:00:00Z");
+    expect(r.newestExpiredAt).toBe("2026-05-10T00:00:00Z");
+    expect(updateCalled).toBe(false);
+  });
+
+  it("erro no SELECT → report com errors=1 e expired=0", async () => {
+    const supa = makeSweepClient({
+      selectError: { message: "boom-select" },
+    });
+    const r = await sweepExpiredCredits(supa as unknown as SupabaseClient, {
+      now: NOW,
+    });
+    expect(r.errors).toBe(1);
+    expect(r.expired).toBe(0);
+    expect(r.errorDetails.some((d) => d.includes("boom-select"))).toBe(true);
+  });
+
+  it("erro no UPDATE → report com errors=1", async () => {
+    const supa = makeSweepClient({
+      candidates: [{ id: "a1", expires_at: "2026-05-10T00:00:00Z" }],
+      updateError: { message: "boom-update" },
+    });
+    const r = await sweepExpiredCredits(supa as unknown as SupabaseClient, {
+      now: NOW,
+    });
+    expect(r.errors).toBe(1);
+    expect(r.expired).toBe(0);
+    expect(r.errorDetails.some((d) => d.includes("boom-update"))).toBe(true);
+  });
+
+  it("parcial: candidatos=3 mas update devolve 2 rows → report honesto", async () => {
+    const supa = makeSweepClient({
+      candidates: [
+        { id: "a1", expires_at: "2026-05-10T00:00:00Z" },
+        { id: "a2", expires_at: "2026-05-11T00:00:00Z" },
+        { id: "a3", expires_at: "2026-05-12T00:00:00Z" },
+      ],
+      updatedIds: ["a1", "a2"],
+    });
+    const r = await sweepExpiredCredits(supa as unknown as SupabaseClient, {
+      now: NOW,
+    });
+    expect(r.candidatesFound).toBe(3);
+    expect(r.expired).toBe(2);
+  });
+
+  it("limit é clampado em [1, MAX_SWEEP_BATCH_LIMIT]", async () => {
+    let capturedLimit: number | null = null;
+    const supa = makeSweepClient({
+      candidates: [],
+      onSelect: (p) => {
+        capturedLimit = p.limit;
+      },
+    });
+    await sweepExpiredCredits(supa as unknown as SupabaseClient, {
+      now: NOW,
+      limit: 999_999,
+    });
+    expect(capturedLimit).toBe(MAX_SWEEP_BATCH_LIMIT);
+
+    capturedLimit = null;
+    await sweepExpiredCredits(supa as unknown as SupabaseClient, {
+      now: NOW,
+      limit: -5,
+    });
+    expect(capturedLimit).toBe(1);
+
+    capturedLimit = null;
+    await sweepExpiredCredits(supa as unknown as SupabaseClient, {
+      now: NOW,
+      limit: Number.NaN,
+    });
+    expect(capturedLimit).toBe(DEFAULT_SWEEP_BATCH_LIMIT);
   });
 });

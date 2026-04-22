@@ -5,6 +5,165 @@
 
 ---
 
+## D-083 · Sweep físico de `appointment_credits` expirados + UI admin dedicada (PR-073-B/C · follow-up finding 2.4) · 2026-04-20
+
+**Contexto.** D-081 instalou `appointment_credits` com status terminal
+persistido (`active`, `consumed`, `cancelled`) e status **computado
+on-read** pra `expired` via `computeCurrentStatus()`. Na época, a
+ausência de sweep físico foi decisão consciente — produção funciona sem
+ele porque toda UI do paciente, `/admin/reliability` e `admin-inbox`
+consomem a função pura e enxergam a expiração honestamente.
+
+Dois resíduos ficaram em aberto:
+
+1. **Relatórios SQL raw ficam mentirosos.**
+   `select count(*) from appointment_credits where status='active'`
+   conta créditos expirados como vivos. Um dia, numa auditoria tributária,
+   alguém vai rodar essa query e tirar conclusão errada. O workaround
+   (`AND expires_at > now()`) existe, mas é um knowhow que vive só na
+   cabeça de quem implementou.
+2. **Admin sem UI dedicada.**
+   Marcar `consumed` ou `cancelled` exigia SQL direto via Supabase Studio
+   ou chamar `markCreditConsumed` de outra page. `/admin/reliability`
+   lista os eventos que *geraram* o crédito, não os créditos em si. Sem
+   surface operacional, o operador solo tem que lembrar da mecânica
+   inteira — e quando o stress aumenta, esse tipo de memória é o
+   primeiro a falhar.
+
+**Decisão.** Fechar ambos os loops num único PR:
+
+### Parte B · cron `expire_appointment_credits`
+
+- Rota nova `/api/internal/cron/expire-appointment-credits/route.ts`
+  com `assertCronRequest`, `startCronRun`/`finishCronRun` e
+  `cron_runs.payload` estruturado.
+- Schedule `0 12 * * *` (UTC) ≈ 09:00 BRT. Horário livre na grade
+  (depois do admin-digest às 11:30 UTC; antes do pico admin real).
+  Rodar depois do digest garante que o digest matinal viu o estado
+  pré-sweep — irrelevante operacionalmente (digest já usa
+  compute-on-read) mas mantém semântica cronológica limpa pra
+  retrospectivas futuras.
+- Lib `sweepExpiredCredits({ limit, now, dryRun })` no mesmo arquivo
+  `appointment-credits.ts`, estratégia SELECT → UPDATE em 2 passos
+  espelhando `asaas-events-retention.ts::purgeAsaasEventsPayload`:
+    - SELECT com `status='active' AND expires_at <= now`
+      + `ORDER BY expires_at ASC LIMIT ?`;
+    - UPDATE com `in(ids) AND status='active'` — guard contra
+      concorrência + contra sobrescrita de `consumed/cancelled`;
+    - `dryRun` usa só o SELECT, sem efeito colateral;
+    - report estruturado (`SweepExpiredCreditsReport`) vai pro
+      `cron_runs.payload` pra observability no `/admin/crons`.
+- Limit clampado em `[1, 10_000]` (DEFAULT=500) pra evitar
+  `?limit=1_000_000` acidental travar o DB ou `?limit=-1` virar
+  zero silencioso.
+- Integrado em `/admin/crons` (`EXPECTED_JOBS` + `JOB_LABELS`) e em
+  `CronJob` union (`src/lib/cron-runs.ts`).
+
+### Parte C · UI `/admin/credits`
+
+- Nova página `src/app/admin/(shell)/credits/page.tsx` com duas seções:
+    - **Ativos** (cards expandidos): créditos com `status='active'`,
+      ordenados por `created_at ASC` (fila FIFO). Badge especial pra
+      créditos active-mas-já-expirados ("sweep pendente") quando
+      `effectiveStatus === 'active_expired'` via `computeCurrentStatus`.
+      Card mostra paciente, telefone, consulta de origem, validade,
+      UUID do credit — tudo que o admin precisa pra ligar pro paciente e
+      criar o novo appointment.
+    - **Histórico** (tabela compacta): `status IN {consumed, expired,
+      cancelled}` com filtros canônicos via `admin-list-filters.ts`:
+      busca por nome do paciente, status, razão, intervalo de datas em
+      BRT. Resolve pacientes por nome via subconsulta (mesmo padrão de
+      `/admin/refunds` e `/admin/payouts` — evita `.or()` em coluna
+      relacionada, que é frágil).
+- Componente client `_Actions.tsx` com duas modalidades (UUID-form
+  pra consumir, textarea pra cancelar) — uma ativa por vez. Em
+  sucesso, `router.refresh()` recarrega o SSR.
+- API routes novas:
+    - `POST /api/admin/credits/[id]/consume` — body
+      `{ consumed_appointment_id }`. Usa `markCreditConsumed` da lib,
+      audit log em `admin_audit_log` só na transição real (idempotente
+      no-op não polui o log).
+    - `POST /api/admin/credits/[id]/cancel` — body `{ reason }`
+      (4..500 chars, já pela CHECK constraint). Mesmo padrão de audit.
+- Navegação:
+    - Item "Créditos" adicionado ao `AdminNav` logo após "Estornos".
+    - Texto de intro em `/admin/reliability` aponta pra `/admin/credits`.
+    - `admin-inbox.ts` → `reschedule_credit_pending.href` passa de
+      `/admin/reliability` pra `/admin/credits` (destino operacional real).
+
+**Por que sweep se o código já tolera sem ele?**
+A correção estrutural é barata; a dívida técnica de manter "toda query
+SQL raw precisa lembrar do workaround `AND expires_at > now()`" não é.
+Sweep diário com limit 500 processa 15_000 rows/mês — suficiente pra
+horizonte de 2-3 anos de operação sem ajuste. Se algum dia o volume
+passar, o `limit` é parametrizável via query.
+
+**Por que 2 passos (SELECT → UPDATE) e não `UPDATE ... WHERE expires_at
+<= now()`?**
+PostgREST não suporta `LIMIT` em `UPDATE` direto. Alternativas:
+
+- RPC function no DB: custaria uma migration pra 1 cron simples.
+- UPDATE sem limit: processa tudo de uma vez — risco moderado em
+  spike (1_000+ rows expirando no mesmo dia após ramp-up).
+- 2 passos: espelha `asaas-events-retention.ts` (convenção da casa,
+  já testado, já observável em cron_runs).
+
+Escolhemos 2 passos pra consistência arquitetural.
+
+**Por que UI em `/admin/credits` em vez de estender `/admin/reliability`?**
+Bind semântico diferente: reliability é sobre **a médica** (quantos
+no-shows, pausa automática, etc.). Credit é sobre **o paciente** (tem
+direito a reagendar). Misturar os dois overloadea uma página já densa
+e cria confusão de contexto em momentos de stress. Custo de tela
+separada = 1 entrada no nav.
+
+**Por que audit log só em transição real (não em idempotência)?**
+Chamadas repetidas com mesmo payload são comportamento esperado
+(double-click, retry de rede) — logar todas polui o audit com ruído.
+O log registra o que **mudou o estado do sistema**; idempotência é
+invisibilidade intencional. Regra já aplicada em `/api/admin/appointments/
+[id]/refund` (D-033) — aqui só replicamos.
+
+**Trade-offs aceitos.**
+
+- Sweep diário = janela de até 24h entre `expires_at` e status=`expired`
+  no DB. Aceitável: compute-on-read já mostra a verdade em UI.
+- UI sem edição de `expires_at` (extender validade manualmente). Se
+  precisar (raro), admin cria um novo credit via `grantNoShowCredit`
+  + cancela o antigo. Menos botões, menos bugs.
+- UI sem bulk ops (consume/cancel em batch). Operador solo faz 1 por
+  vez na cadência atual; adicionar bulk cria problema de undo.
+
+**Artefatos.**
+- `src/lib/appointment-credits.ts` — `sweepExpiredCredits`,
+  `DEFAULT_SWEEP_BATCH_LIMIT`, `MIN_SWEEP_BATCH_LIMIT`,
+  `MAX_SWEEP_BATCH_LIMIT`.
+- `src/app/api/internal/cron/expire-appointment-credits/route.ts`.
+- `src/app/admin/(shell)/credits/page.tsx` + `_Actions.tsx`.
+- `src/app/api/admin/credits/[id]/{consume,cancel}/route.ts`.
+- `src/lib/cron-runs.ts` — union `CronJob` estendido.
+- `src/lib/admin-inbox.ts` — redirect do href.
+- `src/app/admin/(shell)/_components/AdminNav.tsx` — item "Créditos".
+- `src/app/admin/(shell)/crons/page.tsx` — `EXPECTED_JOBS`.
+- `src/app/admin/(shell)/reliability/page.tsx` — pointer copy.
+- `vercel.json` — cron schedule + function config.
+- `docs/RUNBOOK.md` §10 (tabela de crons) + §15 (consumir crédito
+  via UI como caminho primário).
+- `docs/PRS-PENDING.md` — PR-073-B/C marcados como concluídos.
+
+**Tests.**
+7 testes novos cobrindo `sweepExpiredCredits`: candidatos vazios,
+caminho feliz com 3 candidatos, dryRun, erro no SELECT, erro no
+UPDATE, parcial (race), clamp de limit. Mantém 1440 testes
+verdes na suite (era 1433).
+
+**Risco.** Baixo. Cron é idempotente (guard `status='active'` no UPDATE),
+dry-runnable via `?dryRun=1`, e a lib já é compute-on-read — se o cron
+estiver quebrado, nada da UI quebra junto. A UI admin é nova e isolada
+(0 call-sites externos dependem dela); bugs aqui não propagam.
+
+---
+
 ## D-082 · Runbook operacional consolidado + checklist pré-produção (PR-074) · 2026-04-20
 
 **Contexto.** Antes deste PR o conhecimento operacional estava

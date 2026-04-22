@@ -518,7 +518,7 @@ export async function loadAdminInbox(
       count: rescheduleCredit.count,
       age: rescheduleCredit.oldestAgeHours,
       sla: SLA_HOURS.reschedule_credit_pending,
-      href: "/admin/reliability",
+      href: "/admin/credits",
     },
   ];
 

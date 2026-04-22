@@ -58,7 +58,8 @@ export type CronJob =
   | "nudge_reconsulta"
   | "admin_digest"
   | "retention_anonymize"
-  | "asaas_events_purge";
+  | "asaas_events_purge"
+  | "expire_appointment_credits";
 
 export async function startCronRun(
   supabase: SupabaseClient,

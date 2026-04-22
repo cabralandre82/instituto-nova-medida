@@ -356,6 +356,7 @@ registrado pra auditoria.
 | `admin-digest` | `30 11 * * *` | 08:30 | Você não recebe resumo por WA (mas pode abrir `/admin` mesmo assim) |
 | `retention-anonymize` | `0 4 * * 0` | 01:00 dom | Backlog LGPD (Art. 16) cresce — customers "ghost" não anonimizados |
 | `asaas-events-purge` | `0 5 * * 0` | 02:00 dom | `asaas_events.payload` com PII não é purgado pós-180d |
+| `expire-appointment-credits` | `0 12 * * *` | 09:00 | `appointment_credits.status='active'` com `expires_at` no passado não vira `expired` fisicamente — UI segue honesta (compute-on-read), mas relatórios SQL raw ficam menos limpos |
 
 4. Ler `error_message` na UI. Causas comuns:
    - `timeout` → banco sob carga. Rodar novamente manualmente
@@ -376,9 +377,9 @@ registrado pra auditoria.
    `recalculate-earnings`, `generate-payouts`,
    `notify-pending-documents`, `auto-deliver-fulfillments`,
    `nudge-reconsulta`, `admin-digest`, `retention-anonymize`,
-   `asaas-events-purge`.
+   `asaas-events-purge`, `expire-appointment-credits`.
 
-   Crons de retenção aceitam flags:
+   Crons de retenção e de sweep aceitam flags:
    ```bash
    # Dry-run (não muta, só reporta):
    curl -H "x-cron-secret: $CRON_SECRET" \
@@ -387,6 +388,10 @@ registrado pra auditoria.
    # Threshold custom em dias:
    curl -H "x-cron-secret: $CRON_SECRET" \
      "https://.../api/internal/cron/asaas-events-purge?thresholdDays=365"
+
+   # Sweep de créditos com batch menor:
+   curl -H "x-cron-secret: $CRON_SECRET" \
+     "https://.../api/internal/cron/expire-appointment-credits?limit=100"
    ```
 6. Conferir novo run em `/admin/crons` (bloco do job específico →
    sparkline + últimos 20 runs).
@@ -527,14 +532,21 @@ desassistido + risco de reclamação regulatória.
 
 **Passos:**
 
-1. Abrir `/admin/reliability` (o card linka pra cá). Localizar o
-   paciente com crédito ativo.
+1. Abrir `/admin/credits` (o card `reschedule_credit_pending` linka pra
+   cá direto desde D-083). A seção "Ativos" mostra o paciente, telefone,
+   consulta de origem, dias restantes e UUID do crédito.
 2. **Escolher uma data/hora** com a médica — seja com a mesma ou
    outra — e criar um novo `appointment` (`scheduled`, sem cobrança).
 3. Avisar o paciente por WA (ele já viu o banner "Sua próxima
    consulta é por nossa conta" e clicou no CTA pré-preenchido).
-4. Marcar o crédito como consumido. Hoje sem UI dedicada
-   (backlog PR-073-C); no SQL editor do Supabase Studio:
+4. Marcar o crédito como consumido via UI: clicar **"Marcar como
+   consumido"** no card do crédito, colar o UUID do novo appointment
+   e confirmar. O `/admin/credits` faz `POST /api/admin/credits/[id]/consume`,
+   que chama `markCreditConsumed()` em `src/lib/appointment-credits.ts`
+   (idempotente via guard `status='active'`, audita em `admin_audit_log`
+   como `appointment_credit.consumed`).
+
+   **Fallback via SQL editor** (se a UI estiver indisponível):
 
    ```sql
    update public.appointment_credits
@@ -551,12 +563,8 @@ desassistido + risco de reclamação regulatória.
    campos `consumed_*` juntos. Para obter o UUID do admin:
    `select id from auth.users where email = 'cabralandre@yahoo.com.br'`.
 
-   Preferido no código do app: `markCreditConsumed({ creditId, actor, consumedAppointmentId })`
-   em `src/lib/appointment-credits.ts` (idempotente via guard
-   `status='active'` e faz log).
-
-5. Conferir: `/admin/reliability` deixa de mostrar o card; card
-   `reschedule_credit_pending` some do `/admin`.
+5. Conferir: o crédito sai da seção "Ativos" e aparece em "Histórico"
+   como `consumed`; card `reschedule_credit_pending` some do `/admin`.
 
 **Invariantes (D-081):**
 
@@ -565,17 +573,24 @@ desassistido + risco de reclamação regulatória.
 - Consumo de crédito **não** devolve refund — são ortogonais. Se o
   paciente pagou e médica faltou, ele recebe refund **e** ganha o
   crédito.
-- Expiração: 90 dias após emissão (`CREDIT_EXPIRY_DAYS`). Depois
-  disso `computeCurrentStatus` devolve `expired` on-read; cron de
-  sweep é PR-073-B (pendente).
+- Expiração: 90 dias após emissão (`CREDIT_EXPIRY_DAYS`). `computeCurrentStatus`
+  devolve `expired` on-read; o cron `expire_appointment_credits`
+  (D-083, 12:00 UTC) materializa isso no DB diariamente. Créditos
+  `active+expirado` aparecem com badge terracotta "sweep pendente"
+  em `/admin/credits` até o próximo run.
 - Idempotência estrutural: tentar emitir crédito pro mesmo `source_appointment_id`
   duas vezes faz o segundo virar `alreadyExisted=true` (UNIQUE partial
   `ux_appointment_credits_source_active`).
 
 **Casos excepcionais:**
 
-- **Paciente não quer reagendar** (quer desistir): cancele o
-  crédito com motivo:
+- **Paciente não quer reagendar** (quer desistir): em `/admin/credits`,
+  clicar **"Cancelar crédito"** no card, escrever a razão (4..500 chars,
+  ex: "Paciente optou por não reagendar (WA YYYY-MM-DD)") e confirmar.
+  Via API: `POST /api/admin/credits/[id]/cancel` com body `{ reason }`
+  usando `cancelCredit()` da lib. Terminal — não pode voltar a ativar.
+
+  **Fallback via SQL editor** (se a UI estiver indisponível):
   ```sql
   update appointment_credits
   set status = 'cancelled',
@@ -1017,5 +1032,6 @@ Sempre loga em `appointment_state_transition_log` com `action='bypassed'`.
 
 ---
 
-*Última revisão: 2026-04-20 · D-082 · PR-074 (adiciona seções 15–20 e
-atualiza tabela de crons com os 11 jobs reais do `vercel.json`)*
+*Última revisão: 2026-04-20 · D-083 · PR-073-B/C (adiciona cron
+`expire-appointment-credits` na tabela §10 e reescreve §15 pra usar
+`/admin/credits` como caminho primário, mantendo SQL fallback)*

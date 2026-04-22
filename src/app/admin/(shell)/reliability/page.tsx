@@ -84,6 +84,17 @@ export default async function ReliabilityPage() {
           agendamento público até você reativar. Appointments já marcadas
           seguem o curso normal.
         </p>
+        <p className="mt-2 text-sm text-ink-500">
+          Pra consultar/consumir/cancelar os créditos de reagendamento
+          emitidos pro paciente (D-081), veja{" "}
+          <a
+            href="/admin/credits"
+            className="underline decoration-ink-300 hover:decoration-ink-600"
+          >
+            /admin/credits
+          </a>
+          .
+        </p>
       </header>
 
       {/* Resumo */}

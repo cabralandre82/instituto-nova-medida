@@ -42,6 +42,7 @@ const EXPECTED_JOBS = [
   "admin_digest",
   "retention_anonymize",
   "asaas_events_purge",
+  "expire_appointment_credits",
 ] as const;
 
 const JOB_LABELS: Record<string, string> = {
@@ -53,6 +54,7 @@ const JOB_LABELS: Record<string, string> = {
   admin_digest: "Digest para o admin",
   retention_anonymize: "Retenção LGPD (anonimizar)",
   asaas_events_purge: "Purge LGPD (asaas_events.payload)",
+  expire_appointment_credits: "Expirar créditos de reagendamento",
 };
 
 /**

@@ -12,6 +12,7 @@ const NAV = [
   { href: "/admin/reliability", label: "Confiabilidade" },
   { href: "/admin/payouts", label: "Repasses" },
   { href: "/admin/refunds", label: "Estornos" },
+  { href: "/admin/credits", label: "Créditos" },
   { href: "/admin/lgpd-requests", label: "LGPD" },
   { href: "/admin/notifications", label: "Notificações" },
   { href: "/admin/financeiro", label: "Financeiro" },

@@ -43,6 +43,9 @@
     },
     "src/app/api/internal/cron/asaas-events-purge/route.ts": {
       "maxDuration": 60
+    },
+    "src/app/api/internal/cron/expire-appointment-credits/route.ts": {
+      "maxDuration": 30
     }
   },
   "crons": [
@@ -89,6 +92,10 @@
     {
       "path": "/api/internal/cron/asaas-events-purge",
       "schedule": "0 5 * * 0"
+    },
+    {
+      "path": "/api/internal/cron/expire-appointment-credits",
+      "schedule": "0 12 * * *"
     }
   ],
   "headers": [

@@ -490,6 +490,173 @@ export type CancelCreditResult =
       message?: string;
     };
 
+// ────────────────────────────────────────────────────────────────────
+// sweepExpiredCredits — cron diário (PR-073-B · D-083)
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * Bounds defensivos do cron de sweep. Evita que operador chute um
+ * `?limit=1_000_000` no endpoint manual e trave o banco. Também
+ * evita `?limit=-1` virando "zero" silencioso.
+ */
+export const DEFAULT_SWEEP_BATCH_LIMIT = 500;
+export const MIN_SWEEP_BATCH_LIMIT = 1;
+export const MAX_SWEEP_BATCH_LIMIT = 10_000;
+
+export type SweepExpiredCreditsParams = {
+  /** Default `new Date()`. Override pra teste determinístico. */
+  now?: Date;
+  /** Default 500. Clamped em [1, 10_000]. */
+  limit?: number;
+  /** Default false. Se true, SELECT sem UPDATE. */
+  dryRun?: boolean;
+};
+
+export type SweepExpiredCreditsReport = {
+  scannedAt: string;
+  dryRun: boolean;
+  candidatesFound: number;
+  expired: number;
+  errors: number;
+  errorDetails: string[];
+  oldestExpiredAt: string | null;
+  newestExpiredAt: string | null;
+};
+
+/**
+ * Materializa `active → expired` pras rows cujo `expires_at` já passou.
+ *
+ * O status `expired` JÁ é computado on-read via `computeCurrentStatus`
+ * (D-081), então produção funciona sem este cron — banner do paciente,
+ * admin-inbox e `/admin/reliability` todos usam compute-on-read.
+ *
+ * O sweep fecha o loop pra:
+ *
+ *   - Relatórios SQL raw (`select count(*) from appointment_credits where
+ *     status='active'`) ficarem honestos. Sem sweep, um crédito de 2
+ *     anos atrás aparece como `active` no SELECT cru.
+ *   - Auditorias externas não precisarem aplicar WHERE composto pra ver
+ *     "quantos créditos reais estão vivos".
+ *   - Índices parciais `WHERE status='active'` não carregarem peso
+ *     morto indefinidamente.
+ *
+ * Estratégia em 2 passos (SELECT → UPDATE) espelhando
+ * `asaas-events-retention.ts`:
+ *   - LIMIT determinístico (PostgREST não aceita LIMIT em UPDATE direto).
+ *   - `oldestExpiredAt` / `newestExpiredAt` sem round-trip extra.
+ *   - `dryRun` honesto sem efeito colateral.
+ *
+ * Idempotência: guard `status='active'` no UPDATE impede reversão
+ * acidental de `consumed`/`cancelled` por bug. Se dois pods rodarem
+ * o cron simultaneamente (Vercel cron é single-instance em regra, mas
+ * o guard é de graça), o segundo pega zero candidatos.
+ *
+ * Fail-soft: erro devolve o report com `errors > 0`; caller decide
+ * reportar `status='error'` no `cron_runs`.
+ *
+ * Por que TS e não função SQL?
+ *   - Batch limit é parâmetro que queremos variar sem migration.
+ *   - Testar com mock Supabase é mais barato que pg_tap.
+ *   - Report estruturado alimenta `cron_runs.payload`.
+ */
+export async function sweepExpiredCredits(
+  supabase: SupabaseClient,
+  params: SweepExpiredCreditsParams = {},
+): Promise<SweepExpiredCreditsReport> {
+  const now = params.now ?? new Date();
+  const limit = clampSweepLimit(params.limit ?? DEFAULT_SWEEP_BATCH_LIMIT);
+  const dryRun = params.dryRun === true;
+
+  const nowIso = now.toISOString();
+
+  const report: SweepExpiredCreditsReport = {
+    scannedAt: nowIso,
+    dryRun,
+    candidatesFound: 0,
+    expired: 0,
+    errors: 0,
+    errorDetails: [],
+    oldestExpiredAt: null,
+    newestExpiredAt: null,
+  };
+
+  const { data: candidates, error: selErr } = await supabase
+    .from("appointment_credits")
+    .select("id, expires_at")
+    .eq("status", "active")
+    .lte("expires_at", nowIso)
+    .order("expires_at", { ascending: true })
+    .limit(limit);
+
+  if (selErr) {
+    log.error("sweepExpiredCredits · select falhou", {
+      err: selErr.message,
+    });
+    report.errors += 1;
+    report.errorDetails.push(`select: ${selErr.message}`);
+    return report;
+  }
+
+  const rows = (candidates ?? []) as Array<{ id: string; expires_at: string }>;
+  report.candidatesFound = rows.length;
+
+  if (rows.length > 0) {
+    report.oldestExpiredAt = rows[0]?.expires_at ?? null;
+    report.newestExpiredAt = rows[rows.length - 1]?.expires_at ?? null;
+  }
+
+  if (rows.length === 0 || dryRun) {
+    return report;
+  }
+
+  const ids = rows.map((r) => r.id);
+
+  const { data: updated, error: updErr } = await supabase
+    .from("appointment_credits")
+    .update({
+      status: "expired",
+    })
+    .in("id", ids)
+    .eq("status", "active")
+    .select("id");
+
+  if (updErr) {
+    log.error("sweepExpiredCredits · update falhou", {
+      err: updErr.message,
+      ids_count: ids.length,
+    });
+    report.errors += 1;
+    report.errorDetails.push(`update: ${updErr.message}`);
+    return report;
+  }
+
+  const expiredRows = (updated ?? []) as Array<{ id: string }>;
+  report.expired = expiredRows.length;
+
+  if (report.expired !== report.candidatesFound) {
+    log.info("sweepExpiredCredits · parcial (race?)", {
+      candidates: report.candidatesFound,
+      expired: report.expired,
+    });
+  }
+
+  log.info("sweepExpiredCredits · concluido", {
+    expired: report.expired,
+    oldest: report.oldestExpiredAt,
+    newest: report.newestExpiredAt,
+    dry_run: dryRun,
+  });
+
+  return report;
+}
+
+function clampSweepLimit(v: number): number {
+  if (!Number.isFinite(v)) return DEFAULT_SWEEP_BATCH_LIMIT;
+  if (v < MIN_SWEEP_BATCH_LIMIT) return MIN_SWEEP_BATCH_LIMIT;
+  if (v > MAX_SWEEP_BATCH_LIMIT) return MAX_SWEEP_BATCH_LIMIT;
+  return Math.floor(v);
+}
+
 export async function cancelCredit(
   input: CancelCreditInput,
 ): Promise<CancelCreditResult> {
