@@ -6,6 +6,105 @@
 
 ---
 
+## 2026-04-20 · Quick-wins técnicos: Next 15 + UI magic-links + sweep de créditos (D-083/D-084/D-085) · IA
+
+**Por quê:** após o runbook operacional (PR-074/D-082) estabilizar o dia
+a dia do operador solo, sobraram 3 follow-ups "puramente técnicos" que
+não exigiam input externo e travavam menos urgência do que dívida
+acumulada. Executados na ordem inversa de risco: primeiro os dois
+contidos (UI novas sobre tabelas existentes, read-only ou admin-only),
+depois o bump major de framework.
+
+**Entregáveis:**
+
+- **PR-073-B/C (D-083)** · sweep físico de `appointment_credits` +
+  `/admin/credits`. Nova rota cron `/api/internal/cron/expire-appointment-credits`
+  (`0 12 * * *` UTC), lib `sweepExpiredCredits({ limit, now, dryRun })`
+  em `src/lib/appointment-credits.ts` usando SELECT→UPDATE 2-passos
+  (espelha `asaas-events-retention.ts`), limit clamped `[1..10_000]`,
+  report estruturado pro `cron_runs.payload`. UI `/admin/credits` com
+  seção "Ativos" (cards FIFO + badge terracotta "sweep pendente" via
+  `computeCurrentStatus` D-081) e "Histórico" (tabela filtrável via
+  `admin-list-filters.ts`). API routes `POST /api/admin/credits/[id]/consume`
+  e `/cancel` com audit em `admin_audit_log`. Item "Créditos" no
+  `AdminNav`; `admin-inbox.reschedule_credit_pending.href` agora aponta
+  pra `/admin/credits`. 7 testes novos. RUNBOOK §15 reescrito pra UI-first.
+
+- **PR-070-B (D-084)** · UI `/admin/magic-links` read-only. Fecha o
+  follow-up do PR-070/D-078 que vinha sendo triado via SQL inline no
+  Studio. Filtros: email (plaintext no input, servidor hasheia via
+  `hashEmail()` antes do `WHERE email_hash = ?` — plaintext **nunca**
+  vira query literal), action (10 valores), role, IP (regex
+  allow-list), intervalo BRT. Lista mostra `email_hash` truncado +
+  `email_domain` cleartext; hash full no `title`. 4 cards de resumo
+  das últimas 24h (total, emitidos, verificados, incidentes)
+  independentes dos filtros — heatmap absoluto pra detectar spike em
+  `rate_limited`/`provider_error`/`verify_failed`. Seção
+  "Troubleshooting rápido" espelha §16 do RUNBOOK. Read-only por
+  design: sem reenviar (viola modelo mental de magic-link), sem
+  delete (imutável por BEFORE DELETE de D-078), sem export CSV.
+  RUNBOOK §16 reescrito pra UI-first. Zero testes novos (`hashEmail()`
+  e `admin-list-filters` já cobertos).
+
+- **PR-041-B (D-085)** · migração Next.js 14.2.35 → 15.5.15 +
+  React 18.3.1 → 19.2.5. Fecha os 4 advisories DoS da linha 14
+  listados como follow-up do finding [11.1] (Image Optimizer SSRF,
+  RSC deserialization, rewrite header smuggling, next/image cache
+  poisoning). Estratégia em 3 fases: **(1)** codemod
+  `next-async-request-api` analisou 340 arquivos e modificou só 4 —
+  os demais 336 já estavam Next-15-style por disciplina acumulada
+  em Sprint 2. **(2)** Refactor manual de `src/lib/supabase-server.ts`:
+  rejeitei `UnsafeUnwrappedCookies` (escape hatch deprecated em
+  Next 16); reescrevi `getSupabaseServer()` e `getSupabaseRouteHandler()`
+  como async retornando `Promise<SupabaseClient>` com `await cookies()`.
+  Propaguei `await` pros 4 call-sites (`auth.ts::getSessionUser`,
+  `auth.ts::requireDoctor`, `api/auth/callback`, `api/auth/signout`).
+  Zero `UnsafeUnwrappedCookies` no tree. **(3)** Bump + 4 gates
+  verdes: TSC 0 erros, ESLint 1 fix trivial (`<a>` → `<Link>` em
+  `NewDoctorForm.tsx`), Vitest 1440/1440, `next build` OK, `npm audit`
+  0 vulns. Escolha 15.5.15 (último stable da série 15, 3 meses de prod)
+  em vez de 15.6 canary ou 16.2.4 — 16 vira PR-041-C futuro se houver
+  advisory específico. React 19 backward-compatible; framer-motion
+  11.18.2 já tem peer range `^18 || ^19`.
+
+**Invariantes preservadas:**
+
+- Idempotência do sweep (`status='active'` guard em UPDATE garante
+  que chamadas concorrentes/retry não sobrescrevem `consumed/cancelled`).
+- LGPD do `magic_link_issued_log`: email plaintext nunca vira literal
+  SQL (hash server-side antes do `WHERE`).
+- Trilha imutável do `magic_link_issued_log` (trigger BEFORE DELETE
+  de D-078) — UI é estritamente read-only.
+- Todas as 95 rotas SSR já declaravam `export const dynamic =
+  "force-dynamic"`, então caching defaults do Next 15 (router cache
+  + GET route handlers não-cacheados) são no-op.
+
+**Trade-offs aceitos:**
+
+- Warning cosmético do `next build` sobre `outputFileTracingRoot`
+  (múltiplos `package-lock.json` em ancestrais) não corrigido — fix
+  arrisca cascata em CI, build produção funciona.
+- Sem testes unitários pra `/admin/magic-links` e `/admin/credits`
+  — server components com queries diretas, lógica de filtros/hashing
+  já coberta em testes de bibliotecas upstream.
+- Não adotamos APIs novas do React 19 (`use()`, `useActionState`,
+  `useFormStatus`, ref-como-prop) — backward compat total, adoção
+  lazy.
+
+**Fechamento de findings:**
+
+- `[2.4]` — UI follow-up do PR-073/D-081 ✅ RESOLVED.
+- `[17.8]` — UI follow-up do PR-070/D-078 ✅ RESOLVED.
+- `[11.1] Follow-up DoS` — ✅ RESOLVED (os 4 advisories da linha 14
+  foram fechados pelo Next 15).
+
+**Backlog restante sem input:** PR-068-B (auto-block — espera 3+
+meses de dados), PR-071-B (remoção do enum `pending_payment` — espera
+180d de `LEGACY_PURCHASE_ENABLED=false`), PR-033-Clinical (só
+relevante em 2045+), PR-041-C (Next 15→16, se/quando).
+
+---
+
 ## 2026-04-20 · Busca global + ficha do paciente em /admin (D-045 · onda 3.B) · IA
 
 **Por quê:** operar sozinho envolve muitos "me manda o link da
