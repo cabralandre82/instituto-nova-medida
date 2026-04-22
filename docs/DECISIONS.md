@@ -5,6 +5,60 @@
 
 ---
 
+## D-070 · State machine declarativa de `appointments.status` via trigger (PR-059 · finding 10.5) · 2026-04-20
+
+**Contexto.** A coluna `appointments.status` (enum `appointment_status` com 10 valores) tinha CHECK no enum mas zero validação de **transições**. O DB aceitava `cancelled_by_admin → completed`, `completed → scheduled`, qualquer permutação. A camada de aplicação respeita as transições legítimas (`reconcile.ts`, `appointment-finalize.ts`, `book_pending_appointment_slot`, daily webhook), mas:
+
+1. `getSupabaseAdmin()` usa service_role → bypassa RLS. Admin via SQL Studio (ou hotfix CLI) consegue mover o appointment pra qualquer estado, sem rastro.
+2. Bug futuro pode regredir: rota nova esquece de checar `status atual` antes de updatar.
+3. Forense CFM exige rastreabilidade do prontuário (Res. 1.821/2007 Art. 8º). "Quem mudou de status quando" precisa ser auditável.
+
+**Decisão.** State machine **declarativa + trigger BEFORE UPDATE** com rollout em duas fases.
+
+**1) Tabela declarativa `appointment_state_transitions(from_status, to_status, description)`** seedada com TODAS as transições reais mapeadas via grep em 2026-04-20 (28 entradas cobrindo `pending_payment → {scheduled, cancelled_*, completed, no_show_*}`, `scheduled → {confirmed, in_progress, completed, no_show_*, cancelled_*}`, `confirmed → {in_progress, completed, no_show_*, cancelled_*}`, `in_progress → {completed, no_show_*, cancelled_*}`). Estados terminais (`completed`, `no_show_*`, `cancelled_*`) NÃO aparecem como `from` — não há saída legítima. Adicionar uma transição é **uma migration declarativa** (1 INSERT), não uma alteração de função.
+
+**2) Tabela imutável `appointment_state_transition_log`** com triggers BEFORE UPDATE/DELETE bloqueando edição. Cada transição problemática vira 1 linha: `appointment_id`, `from_status`, `to_status`, `action ∈ {warning, blocked, bypassed}`, `mode_at_time ∈ {warn, enforce, off}`, `by_user_id`, `by_user_email`, `by_role`, `bypass_reason`. RLS deny-all, consulta só via service_role. Caminho feliz NÃO loga (volume seria absurdo — só transições que merecem atenção).
+
+**3) Trigger `validate_appointment_transition` BEFORE UPDATE OF status** em `appointments`. Comportamento controlado por GUC `app.appointment_state_machine.mode`:
+
+- `'warn'` (default): registra em log + `RAISE WARNING` no Postgres, **deixa passar**. Modo de descoberta — coleta evidência por 1-2 semanas.
+- `'enforce'`: registra + `RAISE EXCEPTION 'invalid_appointment_transition'`. Modo de produção depois do periodo de observação.
+- `'off'`: trigger é no-op (escape hatch emergencial — `ALTER DATABASE … SET app.appointment_state_machine.mode = 'off'` se a state machine quebrar mass deploy).
+
+**4) Bypass por transação:** `SET LOCAL app.appointment_state_machine.bypass = 'true'` + `app.appointment_state_machine.bypass_reason = 'CFM hotfix #123'` permite uma transição proibida UMA vez. **Sempre loga** com `action='bypassed'` e o motivo. Usado pra hotfix manual do admin sem desligar a state machine global.
+
+**5) Espelho TS em `src/lib/appointment-transitions.ts`** com a MESMA lista (28 entradas), `isAllowedAppointmentTransition(from, to)`, `isTerminalAppointmentStatus(s)`, `listForbiddenTransitionsFrom(s)`. Permite código novo validar local antes de tentar update no DB. **Risco de drift TS↔SQL** é assumido — testes garantem invariantes (sem duplicata, sem self-loop, sem terminal-as-from), mas comparação literal com o seed SQL exigiria rodar o DB no CI (out-of-scope agora). Discrepância vira `warning` em produção (modo warn), portanto descobre-se rápido.
+
+**Por que NÃO `CASE WHEN` direto na trigger?** Hardcoding 28 transições no `validate_appointment_transition` é manutenção pior — toda mudança de transição vira reescrita de função, não migration declarativa. Tabela permite seedar via INSERT, listar via SELECT no DB, e o admin operador pode ver "quais transições estão habilitadas hoje" sem ler código pgsql.
+
+**Por que NÃO partial unique constraint?** A constraint expressaria "estado terminal não muda" mas não consegue expressar transições direcionais (`scheduled → completed` ok mas `completed → scheduled` não). Trigger é a ferramenta certa.
+
+**Plano de rollout.**
+1. **Hoje (2026-04-20):** deploy em modo `'warn'` (default da função). Sem risco operacional — nada bloqueia.
+2. **Próximas 1-2 semanas:** monitora `select count(*), action from appointment_state_transition_log group by action` semanal. `warning > 0` → investigar caso a caso (adicionar transição ao seed se for legítima esquecida; corrigir caller se for bug).
+3. **Quando 7 dias seguidos sem warning:** `ALTER DATABASE postgres SET app.appointment_state_machine.mode = 'enforce'`. Documentado no `docs/RUNBOOK.md` (próxima atualização).
+4. **Reconcile com `forceTouch`:** mantém override permitido pela própria trigger (já está no seed: `in_progress → cancelled_by_admin`, `scheduled → cancelled_by_admin` etc. — `expired_no_one_joined` é exatamente um forceTouch defensivo). Não precisa de bypass.
+
+**Não-objetivos.**
+- Não cobre INSERT (estado inicial). RPC `book_pending_appointment_slot` já força `pending_payment`; INSERT direto é raro e tem risco baixo.
+- Não cobre `prescription_status` (já imutável pós-finalização via migration `20260428010000`).
+- Não automatiza migração de modo `warn → enforce` — decisão humana baseada no log.
+
+**Consequências.**
+- ✅ Defesa-em-profundidade real: nem service_role consegue corromper estados.
+- ✅ Audit trail forense CFM-pronto (mode_at_time, by_user, bypass_reason).
+- ✅ Adicionar transição = migration de 1 linha em 2 lugares (SQL seed + TS array). Difícil esquecer porque o teste do mapping cobre.
+- ✅ Modo OFF como escape hatch emergencial — não trava deploy se a state machine derrubar produção.
+- 🟡 Drift TS↔SQL é possível — modo warn descobre rápido, mas mitigação 100% precisa de teste de paridade com Supabase local (futuro).
+- 🟡 Modo enforce vai exigir disciplina pra adicionar novas transições antes de mergear código que as usa.
+
+**Arquivos.**
+- `supabase/migrations/20260509000000_appointment_state_machine.sql`
+- `src/lib/appointment-transitions.ts`
+- `src/lib/appointment-transitions.test.ts` (13 testes)
+
+---
+
 ## D-069 · Filtros + busca em listagens admin (PR-058 · finding 8.7) · 2026-04-20
 
 **Contexto.** A auditoria sinalizou que `/admin/payouts`, `/admin/refunds` e `/admin/fulfillments` eram listas planas, sem busca nem filtro. `/admin/pacientes` (D-045 · 3.B) já tinha trigram-search, criando inconsistência entre as superfícies. Para um operador solo com 100+ fulfillments/mês, "achar o caso do João da Silva de duas semanas atrás" exigia SQL direto no Supabase — fricção inaceitável.

@@ -474,4 +474,78 @@ rodar `/admin/health?ping=1` pra validar.
 
 ---
 
-*Última revisão: 2026-04-20 · D-045 · 3.G*
+## State machine de `appointments.status` (D-070 · PR-059)
+
+A trigger `validate_appointment_transition` está instalada em modo
+`'warn'` (default) — registra transições não-listadas em
+`appointment_state_transition_log` mas **deixa passar**. Quando o log
+ficar limpo por ≥ 7 dias seguidos, promova para `'enforce'`.
+
+### Diagnóstico semanal
+
+```sql
+-- O que apareceu de não-esperado nos últimos 7 dias?
+select
+  action,
+  count(*) as n,
+  array_agg(distinct from_status || '→' || to_status order by from_status || '→' || to_status) as transitions
+from public.appointment_state_transition_log
+where created_at >= now() - interval '7 days'
+group by action;
+```
+
+Espera-se `n = 0` para `warning`, `blocked` e `bypassed`. Se aparecer:
+
+- **warning** legítimo (ex.: nova rota faz uma transição que faz sentido):
+  adicione INSERT na tabela `appointment_state_transitions` E na lib
+  `src/lib/appointment-transitions.ts` (mantém paridade), pelo
+  procedimento padrão de migration.
+- **warning** ilegítimo (ex.: bug em cron ou rota): corrige o caller
+  e marca o caso como tratado em ADR de follow-up.
+
+### Promoção para `enforce`
+
+1. Confirmar 7 dias seguidos com `n=0` em `warning`.
+2. No Supabase SQL Editor, rodar como `postgres`:
+
+   ```sql
+   alter database postgres
+     set app.appointment_state_machine.mode = 'enforce';
+   ```
+
+3. Disparar `select pg_reload_conf();` (não estritamente necessário, mas
+   garante propagação imediata para conexões novas).
+4. Rodar smoke manual: tentar `update appointments set status='completed'
+   where status='cancelled_by_admin' limit 1` — deve falhar com
+   `invalid_appointment_transition`.
+5. Atualizar `D-070` em `docs/DECISIONS.md` com data/hora da promoção.
+
+### Rollback emergencial
+
+Se o `enforce` quebrar produção (transição legítima esquecida no seed):
+
+```sql
+alter database postgres set app.appointment_state_machine.mode = 'warn';
+```
+
+Em emergência absoluta:
+
+```sql
+alter database postgres set app.appointment_state_machine.mode = 'off';
+```
+
+### Bypass por transação (admin manual com motivo)
+
+```sql
+begin;
+set local app.appointment_state_machine.bypass = 'true';
+set local app.appointment_state_machine.bypass_reason = 'CFM hotfix #123 - reclassificação após petição';
+update public.appointments set status = 'completed' where id = '...';
+commit;
+```
+
+Sempre loga em `appointment_state_transition_log` com `action='bypassed'`.
+
+---
+
+*Última revisão: 2026-04-20 · D-070 · PR-059*

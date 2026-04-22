@@ -1345,12 +1345,17 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 - **Correção:** (a) testes "contract" contra sample de payload oficial; (b) extraction views (`asaas_events_view`) com casts tipados; (c) alerta se `pg_column_size(payload) > 100KB`.
 - **Observador:** admin, CFO.
 
-### [10.5 🟡 MÉDIO] `appointments.status` sem máquina de estados no DB
+### [10.5 🟢 RESOLVIDO · PR-059 · D-070] `appointments.status` sem máquina de estados no DB
 
-- **Onde:** migration 040 — check constraint lista valores válidos, mas **qualquer transição** é aceita.
-- **Achado:** `update appointments set status='completed' where status='cancelled'` funciona. Só `src/lib/fulfillment-transitions.ts` protege (e só cobre fulfillments, não appointments). Admin via SQL pode levar appointment de `cancelled` pra `completed` sem trilha.
-- **Correção:** trigger `validate_appointment_transition` que consulta tabela `appointment_state_transitions (from, to)` e rejeita inválidas.
-- **Observador:** admin, CFM.
+- **Onde:** migration 040 — check constraint lista valores válidos, mas qualquer transição era aceita.
+- **Resolução (Onda 3B · D-070).** State machine declarativa em `supabase/migrations/20260509000000_appointment_state_machine.sql`:
+  - Tabela `appointment_state_transitions(from_status, to_status, description)` seedada com **as 28 transições reais** que o código faz (mapeadas via grep em 2026-04-20 — `pending_payment → {scheduled, cancelled_*, completed defensivo, no_show_*}`, `scheduled → {confirmed, in_progress, completed, no_show_*, cancelled_*}`, `confirmed → mesmas saídas`, `in_progress → {completed, no_show_*, cancelled_*}`).
+  - Tabela imutável `appointment_state_transition_log` (RLS deny-all) com triggers BEFORE UPDATE/DELETE.
+  - Trigger `validate_appointment_transition` BEFORE UPDATE OF status. Modo controlado por GUC `app.appointment_state_machine.mode ∈ {warn, enforce, off}`. Default **`'warn'`** (registra em log mas deixa passar).
+  - Bypass por transação via `SET LOCAL app.appointment_state_machine.bypass='true'` + `bypass_reason` — sempre loga.
+  - Espelho TS em `src/lib/appointment-transitions.ts` + 13 testes (`appointment-transitions.test.ts`) cobrindo invariantes (sem duplicata, sem self-loop, terminal nunca aparece como `from`, transições reais do código permitidas, transições impossíveis bloqueadas).
+- **Plano de promoção a `enforce`.** Observar `appointment_state_transition_log` por 1-2 semanas. Quando 7 dias seguidos sem warning, `ALTER DATABASE postgres SET app.appointment_state_machine.mode='enforce'` (próxima atualização do RUNBOOK).
+- **Validação.** 1133 testes verde (1120+13 novos), `tsc` + `eslint` clean.
 
 ### [10.6 🟡 MÉDIO] `on delete set null` em campos de responsabilidade perde audit
 
@@ -1467,7 +1472,7 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 |---|---|---|
 | 🔴 CRÍTICO | **3** | 10.1, 17.1 (+ uma menção forte a 9.1 dependendo do horizonte; **9.1 resolvido em Ondas 2C+2D+2E**) |
 | 🟠 ALTO | **5** | ~~9.1~~, ~~9.2~~, ~~22.1~~, ~~22.2~~, 10.2, 10.3, 17.2, 17.3, 17.4 (conta: 9 original; 4 resolvidos) |
-| 🟡 MÉDIO | **11** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4, 10.5, 10.6, ~~10.7 (já tinha UNIQUE)~~, 10.8, 17.5, 17.6, 17.7, 17.8 |
+| 🟡 MÉDIO | **10** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4, ~~10.5 (PR-059 · D-070)~~, 10.6, ~~10.7 (já tinha UNIQUE)~~, 10.8, 17.5, 17.6, 17.7, 17.8 |
 | 🟢 SEGURO | **4** | 9.7, 22.7, 10.9, 17.9 |
 
 **Interpretação:** toda família 9.x (prompt-injection + AI-agents) está efetivamente fechada pra superfície atual. Quando LLM externo for plugado, seguir o check-list de 9 itens em `AGENTS.md` — as primitivas (`prompt-envelope`, `prompt-redact`, `customer-display`) já estão prontas. Backlog atual migra 100% pra findings não-AI (observabilidade, financeiro, LGPD).
