@@ -5,6 +5,64 @@
 
 ---
 
+## D-071 · Schemas defensivos pra colunas `jsonb` app-geradas (PR-061 · finding 10.4) · 2026-04-20
+
+**Contexto.** A plataforma tem ~18 colunas `jsonb` no schema. A auditoria (finding 10.4) observou que payloads JSONB não têm schema/contract test — o Postgres aceita praticamente qualquer coisa via cast implícito, mas o resultado fica irrecuperável na leitura. Os riscos concretos:
+
+1. **Tipos não-serializáveis colados em payload**. `JSON.stringify` trata `Date`, `Error`, `Map`, `Set` de formas diferentes: alguns viram `{}`, outros viram string (`ISO`), outros lançam. Hoje nada avisa que `log.error({ err })` onde `err: Error` vai virar `{}` no `cron_runs.payload` e apagar o stack.
+2. **`undefined` e `NaN` silenciosos**. JSON.stringify converte `undefined` em ausência e `NaN` em `null`. Caller acha que registrou, leitor não encontra.
+3. **Payloads gigantes por descuido**. Uma rota que empurra a entity inteira recursivamente no `admin_audit_log.after_json` infla a tabela sem aviso.
+4. **Prototype pollution residual**. `{ "__proto__": {...} }` vindo de input externo + reflexão desatenta = bug.
+5. **Contratos rígidos sem validação**. `plan_acceptances.shipping_snapshot` e `fulfillment_address_changes.{before,after}_snapshot` têm shape conhecido (o `ShippingSnapshot` de `fulfillments.ts`), mas ninguém valida antes do INSERT — se `patient-address.ts` regressar, um snapshot corrompido entra na prova legal do aceite.
+
+**Decisão.** Introduzir `src/lib/jsonb-schemas.ts`, zero-dep (mesma filosofia de `text-sanitize`, `admin-list-filters`, `customer-pii-guard`, `appointment-transitions`), com **dois níveis de rigor**:
+
+**Nível 1 — genérico (`validateSafeJsonbValue` / `validateSafeJsonbObject`).** Aplicável a payloads app-gerados de shape livre (`cron_runs.payload`, `admin_audit_log.metadata`, etc.). Rejeita:
+- `undefined`, `NaN`, `Infinity`, `bigint`, função, símbolo;
+- qualquer objeto com protótipo ≠ `Object.prototype` (captura `Date`, `Error`, `Map`, `Set`, `Promise`, `RegExp`, typed arrays, streams);
+- referências circulares (via `WeakSet`);
+- chaves em `__proto__` / `constructor` / `prototype`;
+- profundidade > `maxDepth` (default 6);
+- strings > `maxStringLength` (default 4 KiB);
+- serialização > `maxSerializedChars` (default 16 KiB).
+
+Retorna `{ ok: true, value: cópia limpa }` ou `{ ok: false, issues: string[] }`. Cópia é **defensiva** — mutar o input depois da validação não afeta o que foi validado.
+
+**Nível 2 — schemas específicos de contrato.**
+- `validateShippingSnapshot` exige as 8 chaves do `ShippingSnapshot` com tipos precisos (CEP regex `/^\d{8}$/`, UF regex `/^[A-Z]{2}$/`, strings trimadas com limites, `complement` aceita null); acumula múltiplos issues num retorno.
+- `validateAddressChangeSnapshot` cobre o snapshot em formato "colunas do fulfillment" (`shipping_*` prefix, todos opcionais pra antes-snapshot de fulfillment novo), tolerância pra `undefined → null` (Supabase não distingue na serialização) e chaves extras (tolerância evolutiva).
+
+**Integração nos call-sites críticos.**
+1. `src/lib/cron-runs.ts::finishCronRun` — aplica `validateSafeJsonbObject` (16 KiB default elevado pra 32 KiB, string 8 KiB — cron_runs legitimamente guarda logs maiores). Política: **fail-soft** — payload inválido vira stub `{ _validation_failed: true, _job, _issue_count, _first_issue }` e emite `log.warn`. Cron já fez o trabalho, registrar a execução prevalece sobre preservar o payload original.
+2. `src/lib/patient-update-shipping.ts` — valida `before_snapshot` (opcional null) e `after_snapshot` (null não permitido) antes do INSERT em `fulfillment_address_changes`. Política: **fail-hard** — snapshot inválido é bug de código, não de input; abortamos com `db_error` e `log.error`. Se alguma vez falhar em produção, é regressão detectável imediatamente.
+3. `src/lib/fulfillment-acceptance.ts` — valida `shipping_snapshot` pelo schema estrito antes do INSERT em `plan_acceptances` (a tabela imutável de prova legal do aceite). Política: **fail-hard** pelos mesmos motivos. O valor validado (com strings trimadas e `complement` normalizado) é o que entra no DB, blindando contra drift em `patient-address.ts`.
+
+**Por que NÃO Zod.** O projeto tem hoje pelo menos 5 validadores puros compartilhando a mesma filosofia (`text-sanitize`, `lead-validate`, `patient-address`, `admin-list-filters`, `customer-pii-guard`). Adicionar Zod só pra PR-061 quebraria o padrão (dependência de runtime + aumento de bundle size + outro modelo mental pra novos contribuidores). A API `{ ok, value|issues }` é a mesma convenção.
+
+**Não-objetivos.**
+- **Não valida webhooks externos** (`asaas_events.payload`, `daily_events.payload`, `whatsapp_events.payload`). Esses são espelhos do provider — o schema pode mudar sem aviso, e o log precisa guardar o bruto pra debug. Sanitização e retenção já são cobertas por D-063/PR-052.
+- **Não valida payloads com shape legitimamente flexível** (`products.features`, `appointments.anamnese`, `*.asaas_raw`). Limitar aí introduziria acoplamento pior.
+- **Não redige PII** — já coberto em `prompt-redact.ts` (D-056) e `asaas-event-redact.ts` (D-063).
+
+**Consequências.**
+- ✅ Bug sutil de tipo não-serializável em `cron_runs.payload` deixa de ser silencioso. Substituição por stub mantém o registro mas evidencia problema.
+- ✅ Snapshot rígido (prova legal) está cercado. `plan_acceptances.shipping_snapshot` e `fulfillment_address_changes` só aceitam shape conhecido.
+- ✅ Zero breaking changes em produção. Payloads que hoje passam continuam passando; os que falhariam no runtime agora falham **explicitamente** com issue list.
+- ✅ Cópia defensiva no retorno — mutação posterior não corrompe valor validado.
+- 🟡 Falso positivo raríssimo: se um cron legítimo quiser guardar `Date` em `payload`, vira stub. Solução: caller serializa pra ISO string (como já faz em todos os call-sites existentes — verificado via grep).
+- 🟡 Novas colunas `jsonb` precisam ser decididas caso a caso (nível 1 genérico vs nível 2 específico). Documentado aqui.
+
+**Arquivos.**
+- `src/lib/jsonb-schemas.ts` — lib nova
+- `src/lib/jsonb-schemas.test.ts` — 36 testes (primitivos, objetos, limites, rejeições específicas, `ShippingSnapshot`, `AddressChangeSnapshot`)
+- `src/lib/cron-runs.ts` — integração fail-soft
+- `src/lib/patient-update-shipping.ts` — integração fail-hard
+- `src/lib/fulfillment-acceptance.ts` — integração fail-hard
+
+**Validação.** `tsc --noEmit` 0 erros, `vitest` 1169/1169 (1133+36 novos), `eslint` clean.
+
+---
+
 ## D-070 · State machine declarativa de `appointments.status` via trigger (PR-059 · finding 10.5) · 2026-04-20
 
 **Contexto.** A coluna `appointments.status` (enum `appointment_status` com 10 valores) tinha CHECK no enum mas zero validação de **transições**. O DB aceitava `cancelled_by_admin → completed`, `completed → scheduled`, qualquer permutação. A camada de aplicação respeita as transições legítimas (`reconcile.ts`, `appointment-finalize.ts`, `book_pending_appointment_slot`, daily webhook), mas:

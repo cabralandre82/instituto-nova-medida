@@ -30,6 +30,7 @@ import {
   type AddressInput,
 } from "@/lib/patient-address";
 import type { FulfillmentStatus } from "@/lib/fulfillments";
+import { validateAddressChangeSnapshot } from "./jsonb-schemas";
 import { logger } from "./logger";
 
 const log = logger.with({ mod: "patient-update-shipping" });
@@ -229,6 +230,38 @@ export async function updateFulfillmentShipping(
   }
 
   // 4) Audit log (sempre grava — inclusive quando `noChanges`)
+  //
+  // Valida os snapshots pelo schema jsonb antes do INSERT (PR-061 · D-071).
+  // Contrato é estrito — se algum campo vier com tipo errado, é bug de
+  // código: abortamos e logamos. Nunca deve falhar em produção; se
+  // falhar, é regressão que o audit trail precisa capturar.
+  const beforeVal = validateAddressChangeSnapshot(before);
+  const afterVal = validateAddressChangeSnapshot(afterPatch, {
+    allowNullSnapshot: false,
+  });
+  if (!beforeVal.ok) {
+    log.error("before_snapshot inválido", {
+      fulfillment_id: input.fulfillmentId,
+      issues: beforeVal.issues,
+    });
+    return {
+      ok: false,
+      code: "db_error",
+      message: "Erro interno ao preparar audit (before_snapshot inválido).",
+    };
+  }
+  if (!afterVal.ok) {
+    log.error("after_snapshot inválido", {
+      fulfillment_id: input.fulfillmentId,
+      issues: afterVal.issues,
+    });
+    return {
+      ok: false,
+      code: "db_error",
+      message: "Erro interno ao preparar audit (after_snapshot inválido).",
+    };
+  }
+
   const auditIns = await supabase
     .from("fulfillment_address_changes")
     .insert({
@@ -236,8 +269,8 @@ export async function updateFulfillmentShipping(
       changed_by_user_id: input.actorUserId,
       changed_at: now,
       source: input.source,
-      before_snapshot: before,
-      after_snapshot: afterPatch,
+      before_snapshot: beforeVal.value,
+      after_snapshot: afterVal.value,
       note: input.note ?? null,
     })
     .select("id")

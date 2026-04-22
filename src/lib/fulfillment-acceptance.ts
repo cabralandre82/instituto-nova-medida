@@ -55,6 +55,7 @@ import {
   renderAcceptanceTerms,
 } from "./acceptance-terms";
 import { formatCurrencyBRL } from "./datetime-br";
+import { validateShippingSnapshot } from "./jsonb-schemas";
 import { logger } from "./logger";
 
 const log = logger.with({ mod: "fulfillment-acceptance" });
@@ -409,6 +410,25 @@ export async function acceptFulfillment(
   //     Race condition: 2 chamadas paralelas. O UNIQUE em
   //     `fulfillment_id` garante que só uma vence; a outra pega
   //     violação e re-lê.
+  //
+  // PR-061 · D-071. Defesa em profundidade: valida o shipping snapshot
+  // pelo schema jsonb antes do INSERT. `shipping` aqui sempre passou
+  // por `validateAddress` + `snapshotFromNormalizedAddress`, então o
+  // contrato DEVE bater — se não, é regressão em `patient-address.ts`.
+  // Aborta e loga em vez de gravar payload corrompido no prontuário.
+  const shippingVal = validateShippingSnapshot(shipping);
+  if (!shippingVal.ok) {
+    log.error("shipping_snapshot inválido pelo schema jsonb", {
+      fulfillment_id: ff.id,
+      issues: shippingVal.issues,
+    });
+    return {
+      ok: false,
+      code: "db_error",
+      message: "Erro interno ao validar endereço pra aceite.",
+    };
+  }
+
   const accIns = await supabase
     .from("plan_acceptances")
     .insert({
@@ -420,7 +440,7 @@ export async function acceptFulfillment(
       acceptance_text: acceptanceText,
       acceptance_hash: acceptanceHash,
       terms_version: termsVersion,
-      shipping_snapshot: shipping,
+      shipping_snapshot: shippingVal.value,
       user_id: params.userId,
       ip_address: params.input.ip_address ?? null,
       user_agent: params.input.user_agent ?? null,

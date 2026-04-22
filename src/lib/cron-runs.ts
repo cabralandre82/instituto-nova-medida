@@ -12,9 +12,43 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { validateSafeJsonbObject } from "./jsonb-schemas";
 import { logger } from "./logger";
 
 const log = logger.with({ mod: "cron-runs" });
+
+/**
+ * Sanitiza um payload pra `cron_runs.payload` via schema genérico safe.
+ * Payload inválido (undefined / Date / circular / muito grande) NÃO
+ * derruba o finishCronRun — cron já fez o trabalho e registrar o
+ * run é prioridade. Trocamos por um stub rastreável e emitimos warning
+ * no logger (que vai pra sink externo via D-057). PR-061 · D-071.
+ */
+function sanitizeCronPayload(
+  payload: Record<string, unknown> | undefined,
+  job: string,
+  runId: string | null
+): Record<string, unknown> | null {
+  if (!payload) return null;
+  const res = validateSafeJsonbObject(payload, {
+    maxDepth: 6,
+    maxSerializedChars: 32 * 1024,
+    maxStringLength: 8 * 1024,
+  });
+  if (res.ok) return res.value;
+
+  log.warn("payload rejeitado pelo schema safe, substituindo por stub", {
+    job,
+    run_id: runId,
+    issues: res.issues,
+  });
+  return {
+    _validation_failed: true,
+    _job: job,
+    _issue_count: res.issues.length,
+    _first_issue: res.issues[0] ?? null,
+  };
+}
 
 export type CronJob =
   | "recalc_earnings_availability"
@@ -57,11 +91,12 @@ export async function finishCronRun(
   const durationMs = params.startedAtMs
     ? finishedAt.getTime() - params.startedAtMs
     : null;
+  const safePayload = sanitizeCronPayload(params.payload, "cron_runs", id);
   const { error } = await supabase
     .from("cron_runs")
     .update({
       status: params.status,
-      payload: params.payload ?? null,
+      payload: safePayload,
       error_message: params.errorMessage ?? null,
       finished_at: finishedAt.toISOString(),
       duration_ms: durationMs,

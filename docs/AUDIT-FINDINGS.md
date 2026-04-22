@@ -1338,12 +1338,20 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 - **Correção:** (a) adotar convenção `migrations/XXX_name.up.sql` + `migrations/XXX_name.down.sql` (convenção manual, Supabase não roda down); (b) toda migration destrutiva exige staging test; (c) runbook de rollback manual (passos para cada migration em `docs/RUNBOOK.md`).
 - **Observador:** admin solo, futuro CTO.
 
-### [10.4 🟡 MÉDIO] Payloads JSONB raw (`daily_raw`, `asaas_events.payload`, `whatsapp_events.payload`) sem schema
+### [10.4 🟡 PARCIAL · PR-061 · D-071] Payloads JSONB sem schema
 
-- **Onde:** `appointments.daily_raw`, `asaas_events.payload`, `whatsapp_events.payload`.
-- **Achado:** bom pra audit e replay, ruim pra queries e schema drift. Asaas muda um campo (`invoiceUrl` → `paymentUrl`), código quebra silenciosamente em algum consumer.
-- **Correção:** (a) testes "contract" contra sample de payload oficial; (b) extraction views (`asaas_events_view`) com casts tipados; (c) alerta se `pg_column_size(payload) > 100KB`.
-- **Observador:** admin, CFO.
+- **Onde:** originalmente `appointments.daily_raw`, `asaas_events.payload`, `whatsapp_events.payload` (espelhos externos); ampliado no PR-061 pra incluir também colunas **app-geradas** (`cron_runs.payload`, `admin_audit_log.{before,after}_json/metadata`, `patient_access_log.metadata`, `document_access_log.metadata`, `plan_acceptances.shipping_snapshot`, `fulfillment_address_changes.{before,after}_snapshot`).
+- **Resolução parcial (Onda 3B · D-071).** Lib `src/lib/jsonb-schemas.ts` com **dois níveis de rigor**:
+  - `validateSafeJsonbValue`/`validateSafeJsonbObject` — genéricos; rejeitam undefined/NaN/Infinity/bigint/função/símbolo, instâncias não-literais (Date/Error/Map/Set/Promise/RegExp/typed arrays), circular refs, chaves `__proto__`/`constructor`/`prototype`, profundidade > 6, strings > 4 KiB, serialização > 16 KiB. Retorno `{ ok, value|issues }` com cópia defensiva.
+  - `validateShippingSnapshot` + `validateAddressChangeSnapshot` — schemas estritos; acumulam múltiplos issues por call.
+  - **Integrado em call-sites críticos.** `cron-runs.finishCronRun` (**fail-soft** — stub rastreável em caso de inválido), `patient-update-shipping` e `fulfillment-acceptance` (**fail-hard** — aborta com `db_error`, é bug de código).
+- **NÃO resolvido neste PR (fora de escopo deliberado).** Webhooks externos (`asaas_events.payload`, `daily_raw`, `whatsapp_events.payload`) seguem sem schema — são espelhos do provider; provider pode mudar schema sem aviso, e guardar o bruto ajuda debug/replay. Caminho sugerido pra PR-061-B futuro: views de extraction (`asaas_events_view`) com casts tipados + alerta quando `pg_column_size(payload) > 100 KB`.
+- **Validação.** `tsc` 0 erros, `vitest` 1169/1169 (1133+36 novos), `eslint` clean. 
+
+### [10.4-B 🟡 MÉDIO pendente] Contract tests para webhooks externos
+
+- **Escopo residual.** Itens não cobertos pelo PR-061: `appointments.daily_raw`, `asaas_events.payload`, `whatsapp_events.payload`.
+- **Correção prevista (PR-061-B).** (a) testes de contrato contra sample de payload oficial (captura drift do provider); (b) views tipadas pra extraction; (c) alerta `pg_column_size > 100 KB`.
 
 ### [10.5 🟢 RESOLVIDO · PR-059 · D-070] `appointments.status` sem máquina de estados no DB
 
@@ -1472,7 +1480,7 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 |---|---|---|
 | 🔴 CRÍTICO | **3** | 10.1, 17.1 (+ uma menção forte a 9.1 dependendo do horizonte; **9.1 resolvido em Ondas 2C+2D+2E**) |
 | 🟠 ALTO | **5** | ~~9.1~~, ~~9.2~~, ~~22.1~~, ~~22.2~~, 10.2, 10.3, 17.2, 17.3, 17.4 (conta: 9 original; 4 resolvidos) |
-| 🟡 MÉDIO | **10** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4, ~~10.5 (PR-059 · D-070)~~, 10.6, ~~10.7 (já tinha UNIQUE)~~, 10.8, 17.5, 17.6, 17.7, 17.8 |
+| 🟡 MÉDIO | **10** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4 (parcial PR-061 · D-071; escopo app-gerado fechado, webhooks externos → 10.4-B), ~~10.5 (PR-059 · D-070)~~, 10.6, ~~10.7 (já tinha UNIQUE)~~, 10.8, 17.5, 17.6, 17.7, 17.8 |
 | 🟢 SEGURO | **4** | 9.7, 22.7, 10.9, 17.9 |
 
 **Interpretação:** toda família 9.x (prompt-injection + AI-agents) está efetivamente fechada pra superfície atual. Quando LLM externo for plugado, seguir o check-list de 9 itens em `AGENTS.md` — as primitivas (`prompt-envelope`, `prompt-redact`, `customer-display`) já estão prontas. Backlog atual migra 100% pra findings não-AI (observabilidade, financeiro, LGPD).
