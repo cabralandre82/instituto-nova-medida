@@ -15,6 +15,11 @@ import {
   CHECKOUT_CONSENT_TEXT_VERSION,
   isKnownCheckoutConsentVersion,
 } from "@/lib/checkout-consent-terms";
+import {
+  decideCustomerUpsert,
+  logCustomerUpsertDecision,
+} from "@/lib/customer-pii-guard";
+import { getOptionalPatient } from "@/lib/auth";
 import { logger } from "@/lib/logger";
 
 const log = logger.with({ route: "/api/checkout" });
@@ -234,7 +239,9 @@ export async function POST(req: Request) {
 
   const { data: existingCustomer, error: custLookupErr } = await supabase
     .from("customers")
-    .select("id, asaas_customer_id, asaas_env")
+    .select(
+      "id, asaas_customer_id, asaas_env, user_id, name, email, phone, address_zipcode, address_street, address_number, address_complement, address_district, address_city, address_state"
+    )
     .eq("cpf", input.cpf)
     .maybeSingle();
 
@@ -249,29 +256,76 @@ export async function POST(req: Request) {
   let localCustomerId: string;
   let asaasCustomerId: string | null = existingCustomer?.asaas_customer_id ?? null;
 
+  // PR-054 · D-065 · finding 5.8: guard de takeover. Sessão patient é
+  // OPCIONAL — se houver e bater com `customers.user_id`, permite
+  // atualização de PII; senão, dados gravados ficam intocados.
+  const optionalPatient = await getOptionalPatient();
+  const sessionUserId = optionalPatient?.user.id ?? null;
+
   if (existingCustomer) {
     localCustomerId = existingCustomer.id;
     // Se o ambiente mudou (sandbox → production), o id antigo não vale.
     if (existingCustomer.asaas_env !== asaasEnv) {
       asaasCustomerId = null;
     }
-    // Atualiza dados que podem ter mudado (endereço, etc.)
-    await supabase
-      .from("customers")
-      .update({
-        lead_id: input.leadId ?? null,
+
+    const decision = decideCustomerUpsert({
+      existing: existingCustomer,
+      incoming: {
         name: input.name,
         email: input.email,
         phone: input.phone,
-        address_zipcode: input.address.zipcode,
-        address_street: input.address.street,
-        address_number: input.address.number,
-        address_complement: input.address.complement ?? null,
-        address_district: input.address.district,
-        address_city: input.address.city,
-        address_state: input.address.state,
-      })
-      .eq("id", localCustomerId);
+        address: input.address,
+      },
+      sessionUserId,
+    });
+
+    // Log da decisão (best-effort). update_full sem diff é silencioso.
+    await logCustomerUpsertDecision(supabase, {
+      decision,
+      customerId: localCustomerId,
+      sessionUserId,
+      routeName: "/api/checkout",
+      ipAddress: extractClientIp(req),
+      userAgent: req.headers.get("user-agent"),
+    });
+
+    if (decision.action === "update_full") {
+      await supabase
+        .from("customers")
+        .update({
+          lead_id: input.leadId ?? null,
+          name: input.name,
+          email: input.email,
+          phone: input.phone,
+          address_zipcode: input.address.zipcode,
+          address_street: input.address.street,
+          address_number: input.address.number,
+          address_complement: input.address.complement ?? null,
+          address_district: input.address.district,
+          address_city: input.address.city,
+          address_state: input.address.state,
+        })
+        .eq("id", localCustomerId);
+    } else {
+      // update_blocked: só atualiza `lead_id` (não é PII e não há
+      // ataque útil em sobrescrever a origem do lead). Os demais
+      // campos ficam exatamente como estavam — atacante não consegue
+      // tomber email/phone/address. A cobrança Asaas será criada com
+      // `asaas_customer_id` existente, então comunicações continuam
+      // indo pra vítima legítima (não pro atacante).
+      log.warn("customer upsert bloqueado (takeover guard)", {
+        customer_id: localCustomerId,
+        decision_reason: decision.reason,
+        changed_fields: decision.changedFields,
+      });
+      if (input.leadId) {
+        await supabase
+          .from("customers")
+          .update({ lead_id: input.leadId })
+          .eq("id", localCustomerId);
+      }
+    }
   } else {
     const { data: newCust, error: insertErr } = await supabase
       .from("customers")
@@ -304,13 +358,40 @@ export async function POST(req: Request) {
   }
 
   // 3) Garantir que existe customer no Asaas ───────────────────────────────
+  // PR-054 · D-065: usa SEMPRE os dados gravados em `customers` (que
+  // refletem a decisão do guard) — nunca o input bruto. Em caso de
+  // update_blocked, isso garante que o customer Asaas é criado com a
+  // PII real da vítima, não com dados spoofed pelo atacante.
   if (!asaasCustomerId) {
+    const { data: persistedCust, error: persistedErr } = await supabase
+      .from("customers")
+      .select(
+        "name, cpf, email, phone, address_zipcode, address_street, address_number, address_complement, address_district, address_city, address_state"
+      )
+      .eq("id", localCustomerId)
+      .single();
+    if (persistedErr || !persistedCust) {
+      log.error("re-fetch customer pra Asaas falhou", { err: persistedErr });
+      return NextResponse.json(
+        { ok: false, error: "Erro ao consultar cliente" },
+        { status: 500 }
+      );
+    }
     const created = await createCustomer({
-      name: input.name,
-      cpf: input.cpf,
-      email: input.email,
-      phone: input.phone,
-      address: input.address,
+      name: persistedCust.name as string,
+      cpf: persistedCust.cpf as string,
+      email: persistedCust.email as string,
+      phone: persistedCust.phone as string,
+      address: {
+        zipcode: (persistedCust.address_zipcode as string) ?? "",
+        street: (persistedCust.address_street as string) ?? "",
+        number: (persistedCust.address_number as string) ?? "",
+        complement:
+          (persistedCust.address_complement as string | null) ?? undefined,
+        district: (persistedCust.address_district as string) ?? "",
+        city: (persistedCust.address_city as string) ?? "",
+        state: (persistedCust.address_state as string) ?? "",
+      },
       externalReference: localCustomerId,
     });
 

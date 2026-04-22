@@ -85,7 +85,11 @@ export type PatientAccessAction =
   | "lgpd_fulfill"
   | "lgpd_reject"
   // PR-033-A · D-052 — anonimização automática por política de retenção.
-  | "retention_anonymize";
+  | "retention_anonymize"
+  // PR-054 · D-065 — guard de takeover em upsert de customer.
+  | "pii_takeover_blocked"
+  | "pii_updated_authenticated"
+  | "pii_updated_unauthenticated";
 
 export type LogPatientAccessInput = {
   /**

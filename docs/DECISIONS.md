@@ -5,6 +5,66 @@
 
 ---
 
+## D-065 · Guard de "customer takeover" no upsert por CPF (finding 5.8) · 2026-04-20
+
+**Contexto.** Findings [3.5/3.6] (Parte 1 da auditoria) e [5.8] (Parte 5) descrevem a mesma classe: tanto `/api/checkout` quanto `/api/agendar/reserve` faziam `UPDATE customers SET name=$, email=$, phone=$, address_*=$ WHERE cpf=$` cegamente quando o CPF já existia. Modelo de ameaça:
+
+1. CPF é dado pseudo-público no Brasil (vaza fácil — Serasa, dataleaks, brokers, conhecidos).
+2. Atacante com CPF da vítima monta payload com email/phone/endereço dele e POST. UPDATE cego sobrescreve a vítima.
+3. Próxima cobrança/comunicação vai pro atacante (invoice, link de pagamento, WhatsApp do agendamento).
+4. Variante: envenena endereço de entrega — medicamento real vai pra ponto de coleta do atacante.
+
+A correção sugerida pelo audit foi "se CPF já existe, exigir login (magic-link) antes de permitir alterar email/phone/address. Reutilizar `requirePatient()` ou flag `can_update_pii=false` quando não autenticado." A interpretação literal — bloquear o upsert e retornar erro — quebra o funil pra paciente legítimo que cadastra-se pela primeira vez (caso comum) ou que volta meses depois sem ter feito magic-link no meio (também comum). Solução literal seria "obrigar o paciente a logar antes de comprar" → fricção brutal num funil já apertado.
+
+**Decisão.** Guard estruturado em três camadas, sem expor oracle pro atacante e sem quebrar o funil legítimo:
+
+1. **Lib `src/lib/customer-pii-guard.ts`** — função pura `decideCustomerUpsert({ existing, incoming, sessionUserId })` retorna decisão estruturada:
+
+   | Cenário | Decisão | Reason |
+   |---|---|---|
+   | `customer.user_id IS NULL` (paciente fantasma, nunca logou) | `update_full` | `no_user_id_link` |
+   | `user_id` setado + sessão patient bate (`session.user.id === customer.user_id`) | `update_full` | `session_matches_user_id` |
+   | `user_id` setado + sem sessão patient | `update_blocked` | `user_id_set_no_session` |
+   | `user_id` setado + sessão patient é de OUTRO user | `update_blocked` | `user_id_set_other_session` |
+
+   Insight central: o **vínculo `customers.user_id`** (criado quando o paciente faz seu primeiro magic-link via D-043) é o que "fortalece" o registro. Antes do primeiro login não há identidade real defendendo nada — não faz sentido travar. Depois do primeiro login, qualquer mudança de PII exige prova de posse (sessão).
+
+2. **Comportamento em `update_blocked` — abort de PII, segue o pagamento**:
+
+   - Os campos `name/email/phone/address_*` ficam **intocados** (UPDATE só aplica `lead_id` se diferente).
+   - A rota **continua** o fluxo: cria a cobrança Asaas usando `asaas_customer_id` existente. O resultado é cobrança real no nome da vítima — atacante não recebe invoice nem WhatsApp, vítima recebe (e pode reagir).
+   - Ironia útil: se o atacante pagar, paga pra vítima. Se desistir, vítima recebe alerta "você tem uma cobrança pendente" e descobre a tentativa.
+
+3. **Defesa em profundidade no `createCustomer` Asaas** — quando `asaas_customer_id` é null mas customer local existe (por ex. ambiente trocou sandbox→production), o `createCustomer` agora **re-busca** os dados gravados em `customers` antes de chamar Asaas. Antes, ele usava o `input.*` do request — atacante poderia tomber via Asaas ainda que o UPDATE local fosse bloqueado. Agora, fonte da verdade é sempre o banco.
+
+4. **Resposta HTTP idêntica em ambos os casos** — não há erro `409 Forbidden` nem flag no JSON dizendo "PII bloqueada". Atacante não consegue distinguir "CPF tem cadastro fortalecido" de "tudo correu normal". Vítima legítima que de fato precisa atualizar email/phone fica ciente quando vê seus dados antigos persistirem nas comunicações futuras — o caminho correto é fazer login em `/paciente` (magic-link já testado pela vítima no primeiro contato) e atualizar via área autenticada (TODO: PR-055 pra UI de "meus dados" no portal patient — hoje só tem export/anonymize).
+
+5. **Audit log via `patient_access_log`** com novas actions:
+
+   - `pii_takeover_blocked` — SEMPRE loga (prova LGPD da defesa).
+   - `pii_updated_authenticated` — loga quando há diff real e sessão bate.
+   - `pii_updated_unauthenticated` — loga quando há diff real em customer sem `user_id` (visibilidade pra detectar anomalias mesmo no caso permitido).
+   - `update_full` com diff vazio = não-evento, não polui o log.
+
+   `actorKind='system'` (não há admin humano). Sessão patient (se houver) entra em `metadata.patient_user_id`. IP/user-agent do request também. failSoft: indisponibilidade do log não bloqueia.
+
+6. **Helper `getOptionalPatient()`** em `src/lib/auth.ts` — retorna `{ user, customerId }` se há sessão patient válida, ou `null`. Sem redirect (POST JSON, não Server Component). Sessão de admin/doctor/anon retornam `null` (só aceita `role='patient'`). Permite os endpoints anônimos consultarem "tem patient logado?" sem forçar login.
+
+7. **Sem migration** — `customers.user_id` já existe (D-043 · migration `20260423000000_customers_user_id.sql`); `patient_access_log` já existe (D-051) e a coluna `action text not null check (length(trim(action)) > 0)` aceita qualquer string — só precisei estender o tipo TS `PatientAccessAction`.
+
+**Consequências.**
+
+- Atacante com CPF da vítima **não consegue** desviar comunicações se a vítima já fez login pelo menos uma vez. Defesa sólida pro caso típico (paciente recorrente).
+- Risco residual aceito: paciente fantasma (CPF cadastrado, nunca logou) ainda é tomberable. Mitigação possível futura (PR-055-B): se o customer tem `appointments`/`payments` históricos, **promove** o vínculo automaticamente bloqueando até primeiro magic-link. Não foi escopo agora — afeta funil de pacientes silenciosos que nunca acessam portal.
+- Vítima legítima que mudou de email continua conseguindo comprar (cobrança vai pro email antigo até ela atualizar via portal). Comunicação pode atrasar; risco aceito.
+- Operador detecta tentativas de takeover via `patient_access_log` filtrando `action='pii_takeover_blocked'`. Inclui IP do atacante (forense).
+- Performance: 1 query extra em `getOptionalPatient()` (Supabase `auth.getUser()` + lookup em `customers`). Sob ~10ms p50 num funil já com 8+ I/O calls; insignificante.
+- Trade-off explícito: **não emitimos resposta diferenciada** em update_blocked. Quem quiser PR-055-Notify pode plugar email "tentativa de alteração detectada" pra vítima — depende de orçamento de WhatsApp/email transacional.
+
+**Refs.** Findings 3.5, 3.6, 5.8 da auditoria. Migration `20260423000000_customers_user_id.sql` (D-043). `src/lib/customer-pii-guard.ts`, `src/lib/auth.ts::getOptionalPatient`, `src/app/api/checkout/route.ts`, `src/app/api/agendar/reserve/route.ts`. Testes: `src/lib/customer-pii-guard.test.ts` (19 casos cobrindo todas as combinações da árvore de decisão + normalização de campos + política de log).
+
+---
+
 ## D-064 · Persistência server-authoritative do aceite LGPD em `/api/checkout` (finding 5.6) · 2026-04-20
 
 **Contexto.** Finding [5.6 🟠 ALTO]: `src/app/api/checkout/route.ts` definia `CONSENT_TEXT_CHECKOUT` mas **nunca usava** — só validava `body.consent === true` e descartava. Nenhum registro em banco. A plataforma ficava sem prova jurídica de que o paciente leu/aceitou os termos. LGPD Art. 8º §1º exige demonstração da manifestação de vontade; Art. 9º exige comprovação da base legal. ANPD pode requerer a qualquer momento: "mostre-me o consentimento do Fulano de Tal em 2026-05-03" — controller incapaz de responder.

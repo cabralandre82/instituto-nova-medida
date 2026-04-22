@@ -139,3 +139,33 @@ export async function requirePatient(): Promise<{
   }
   return { user, customerId: data.id as string };
 }
+
+/**
+ * Versão opcional de `requirePatient()` — retorna `{ user, customerId }`
+ * se há sessão patient válida ou `null` caso contrário. Sem redirect.
+ *
+ * PR-054 · D-065. Usada em rotas POST anônimas (`/api/checkout`,
+ * `/api/agendar/reserve`) que querem saber "tem paciente logado?"
+ * pra decisão de guard sem forçar login. Sessão de admin/doctor/anon
+ * todas retornam `null` (só aceita role='patient').
+ *
+ * Retorna `customerId=null` quando o user é patient mas não tem
+ * `customers.user_id` populado (caso de borda, por ex. token antigo).
+ */
+export async function getOptionalPatient(): Promise<{
+  user: SessionUser;
+  customerId: string | null;
+} | null> {
+  const user = await getSessionUser();
+  if (!user || user.role !== "patient") return null;
+
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("customers")
+    .select("id")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (error) return { user, customerId: null };
+  return { user, customerId: (data?.id as string | undefined) ?? null };
+}

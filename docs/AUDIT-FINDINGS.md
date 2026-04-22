@@ -87,7 +87,7 @@ Fonte dos PRs de correção. Atualizar conforme cada parte é fechada.
   ```
 - **Observador:** atacante, médica.
 
-### [3.5] `POST /api/checkout` — qualquer um cria Asaas customer com CPF alheio
+### [3.5] `POST /api/checkout` — qualquer um cria Asaas customer com CPF alheio · ✅ RESOLVED (PR-054 · D-065)
 
 - **Veredicto:** 🟠 ALTO
 - **Achado:** `src/app/api/checkout/route.ts` aceita `cpf`, `email`, `phone`, `address` sem verificar identidade. O `upsert` por CPF atualiza `name/email/phone/address` de um customer existente.
@@ -99,14 +99,16 @@ Fonte dos PRs de correção. Atualizar conforme cada parte é fechada.
   2. Se mantida: no `upsert`, quando `customer` já tiver `user_id` populado, **não atualizar** `name/email/phone` — só endereço. E logar `customer_identity_change_attempt`.
   3. Revisar `reserve` (`/api/agendar/reserve`) com a mesma lógica.
 - **Observador:** atacante, paciente, admin (inbox de fraude).
+- **Resolução (2026-04-20).** PR-054 · D-065. Implementado guard `decideCustomerUpsert` em `src/lib/customer-pii-guard.ts`: customer com `user_id IS NOT NULL` (paciente já fez magic-link pelo menos uma vez) só permite UPDATE de PII se a sessão patient bate com o `user_id`. Sem sessão ou sessão de outro user → `update_blocked`: PII intocada, cobrança Asaas continua usando dados gravados (atacante não recebe invoice nem WhatsApp). `createCustomer` Asaas re-busca dados do banco (defesa em profundidade). Resposta HTTP idêntica em ambos os casos (sem oracle). Trilha em `patient_access_log` action=`pii_takeover_blocked`. Mantida rota — a "opção 1" do audit (retirar) foi descartada porque a rota tem uso back-office residual legítimo.
 
-### [3.6] `POST /api/agendar/reserve` — mesma classe que 3.5
+### [3.6] `POST /api/agendar/reserve` — mesma classe que 3.5 · ✅ RESOLVED (PR-054 · D-065)
 
 - **Veredicto:** 🟠 ALTO
 - **Achado:** `src/app/api/agendar/reserve/route.ts:236-251` — update blind no customer existente (mesmo risco do 3.5).
 - **Risco:** igual a 3.5.
 - **Correção (PR):** mesma regra — proteger customer com `user_id` setado.
 - **Observador:** atacante, paciente.
+- **Resolução (2026-04-20).** PR-054 · D-065. Mesmo guard aplicado em `/api/agendar/reserve`. A reserva de slot e cobrança continuam funcionando mesmo com `update_blocked` — apenas a PII fica preservada. Audit em `patient_access_log` com `route='/api/agendar/reserve'`.
 
 ### [3.7] `POST /api/auth/magic-link` — `listUsers({perPage:200})` quebra silenciosamente
 
@@ -628,10 +630,11 @@ _Fim da PARTE 1. Seguir pra PARTE 2 (Lentes 5 Dinheiro + 6 LGPD/CFM)._
 - **Correção:** mesmo rate-limit do PR-007. Validar DV do CPF com função canônica.
 - **Observador:** atacante, CFO.
 
-### [5.8] `customer` upsert em `/api/checkout` e `/api/agendar/reserve` aceita sobrescrever dados de cliente existente sem autenticação (takeover)
+### [5.8] `customer` upsert em `/api/checkout` e `/api/agendar/reserve` aceita sobrescrever dados de cliente existente sem autenticação (takeover) · ✅ RESOLVED (PR-054 · D-065)
 
 - **Veredicto:** 🟠 ALTO (já registrado como 3.5/3.6 em Parte 1 — repetido aqui para fila do PR-010 financeiro)
 - **Correção:** se CPF já existe, exigir login (magic-link) antes de permitir alterar email/phone/address. Reutilizar `requirePatient()` ou flag `can_update_pii=false` quando não autenticado.
+- **Resolução (2026-04-20).** Ver detalhes em [3.5] e [3.6] acima. Implementação central: `src/lib/customer-pii-guard.ts` + helper `getOptionalPatient()` em `src/lib/auth.ts`. Política tri-estado (no_user_id_link / session_matches / blocked) protege pacientes que já fizeram magic-link sem quebrar o funil de pacientes novos. 19 testes cobrindo todos os ramos.
 
 ### [5.9] Asaas payment não vincula `customer.id` local → webhook não valida origem
 
