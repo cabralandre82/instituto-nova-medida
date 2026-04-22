@@ -5,6 +5,147 @@
 
 ---
 
+## D-082 · Runbook operacional consolidado + checklist pré-produção (PR-074) · 2026-04-20
+
+**Contexto.** Antes deste PR o conhecimento operacional estava
+espalhado em 4 lugares: `RUNBOOK.md` (dia a dia), `RUNBOOK-E2E.md`
+(prova de fogo manual), `SECRETS.md` (template de envs) e dentro dos
+ADRs D-061 a D-081 (cada PR recente). O próprio `RUNBOOK.md` tinha
+**drift cumulativo** pós-PR-059 (última revisão): schedules de cron
+desatualizados (dizia `recalc_earnings_availability` em `06:00 UTC`
+e `generate_monthly_payouts` em `04:00 UTC dia 1`, quando o `vercel.json`
+real diz `15 3 * * *` e `15 9 1 * *`), faltavam os crons instalados
+em PRs posteriores (`retention-anonymize`, `asaas-events-purge`,
+`daily-reconcile`, `wa-reminders`, `expire-reservations`), e não tinha
+runbook pros 6 subsistemas adicionados entre PR-050 e PR-073:
+
+- Circuit breaker (PR-050 · D-061).
+- Clawback reconciliation (PR-051 · D-062).
+- Soft delete CFM (PR-066 · D-074).
+- Body snapshot de notificação (PR-067 · D-075).
+- Magic link log (PR-070 · D-078).
+- `pending_payment` stale (PR-071 · D-079).
+- Crédito de reagendamento (PR-073 · D-081).
+
+Sem runbook, cada incidente desses vira 30-60min de arqueologia
+(abrir ADR → entender → escrever query SQL do zero) em vez de 5-10min
+de execução de um passo-a-passo pré-assado. Operador solo não pode
+pagar esse preço.
+
+Também faltava um **checklist de go-live** formal. Quando o operador
+finalmente receber os inputs legais do PR-023 (CNPJ/RT/DPO/DPA
+farmácia) e quiser publicar, hoje não há lista única de "o que
+precisa estar verdadeiro antes de liberar ao público" — tá espalhado
+entre `SECRETS.md`, `PRS-PENDING.md` e decisões informais.
+
+**Decisão.**
+
+1. **Atualizar `RUNBOOK.md` em edits cirúrgicas** (não reescrever):
+   - Reescrever tabela de crons na seção 10 com os **11 jobs reais**
+     do `vercel.json`, incluindo coluna BRT e impacto em caso de
+     falha. Inclui slugs novos (`retention-anonymize`,
+     `asaas-events-purge`, `daily-reconcile`, `wa-reminders`,
+     `expire-reservations`) e suporte a flags `?dryRun=1` /
+     `?thresholdDays=N` nos crons de retenção.
+   - Adicionar seções 15–20 cobrindo os subsistemas PR-050..PR-073
+     (crédito de reagendamento, magic-link log, body snapshot de
+     notificação, circuit breaker, soft delete CFM, pending_payment
+     ghost). Cada seção segue o template existente: "quando acontece
+     → passos → invariantes → casos excepcionais".
+   - Atualizar rotina diária pra incluir `/admin/crons` (PR-040) com
+     correlação temporal (PR-069) e explicitar chip `skipped` (não é
+     falha, é cron pulando por breaker OPEN).
+   - Atualizar seção 5 (payout) com os warnings novos da reconciliação
+     de clawback (`clawback_reconciled`, `clawback_dominant_cancelled`,
+     `reconcile_incomplete`).
+   - Atualizar seção 4 (refund) com `REFUNDS_VIA_ASAAS` + idempotência
+     via webhook.
+   - Atualizar apêndice de envs: remover lista resumida que induzia
+     a "só essas são críticas"; apontar pro checklist novo como
+     autoridade única.
+
+2. **Criar `docs/RUNBOOK-PRODUCTION-CHECKLIST.md`** focado em go-live,
+   com classificação explícita por criticidade:
+   - 🔴 bloqueante (não sobe)
+   - 🟠 degradação (sobe, mas feature X fica capada)
+   - 🟡 observabilidade (sobe, mas você vai trabalhar "às cegas"
+     em parte)
+   Blocos: (1) bloqueantes legais + regulatórios (PR-023, PR-033-B,
+   DPO, políticas publicadas), (2) envs classificadas por criticidade
+   com referência ao call-site real, (3) catálogo dos 11 crons com
+   SQL de verificação de `cron.job`, (4) feature flags e gates,
+   (5) acesso + contas (admin, break-glass PR-047, 2FA PR-038),
+   (6) observabilidade, (7) smoke test final de 10min com `curl`
+   em 4 endpoints + verificação manual no browser,
+   (8) rotação de secrets (cadência, ordem, envs que causam downtime).
+
+**Por quê dois documentos e não um.** `RUNBOOK.md` é referência
+cotidiana — alta frequência de leitura, baixa formalidade, escrito
+pra quem já está operando. `RUNBOOK-PRODUCTION-CHECKLIST.md` é
+referência marco — leitura pontual antes de go-live / tráfego pago
+/ rotação, alta formalidade, escrito pra não esquecer nada. Juntar
+num só doc significaria 900+ linhas onde a parte de "acionar farmácia"
+fica ao lado de "classificação LGPD do DPO" — perde-se a utilidade
+dos dois.
+
+**Por quê edits cirúrgicas e não reescrever `RUNBOOK.md` do zero.**
+Reescrita completa é tentadora mas destrói histórico útil: git blame
+perde contexto, diff de revisão fica inacessível, detalhes
+operacionais específicos (ex.: procedimento exato de anonimização
+na seção 9, frases de WA pro paciente na seção 6) sairiam do lugar.
+Cirúrgico preserva esse capital.
+
+**Por quê não criar `RUNBOOK-SQL-RECIPES.md` separado.** Considerado,
+rejeitado. Queries SQL são sempre **contextuais a um procedimento**;
+isolá-las num doc só faria o operador ter que abrir dois tabs pra
+executar um passo. Em vez disso, cada nova seção (15–20) traz as
+queries inline, onde elas fazem sentido.
+
+**Trade-offs aceitos.**
+
+- **Drift futuro.** Este doc vai envelhecer de novo — é intrínseco.
+  Mitigação: linkar explicitamente cada seção ao ADR/PR que instalou
+  o subsistema correspondente (ex.: "PR-050 · D-061"). Quando um ADR
+  for atualizado ou superseder, o grep reverso encontra o runbook
+  naturalmente. Também: toda última revisão do arquivo cita o
+  D-82/PR-74, então o próximo `PR-N` com mudança operacional precisa
+  adicionar seção + bumpar linha final.
+
+- **Risco de confiança excessiva.** Documento completo pode virar
+  desculpa pra pular `RUNBOOK-E2E.md`. Pre-empção: o checklist §7
+  termina com "Smoke test final (10 min)" antes de ir pro
+  RUNBOOK-E2E.md, e ambos documentos referenciam o outro.
+
+- **Zero testes unitários.** Documentação não tem lint automático.
+  Mitigação parcial: `docs/RUNBOOK.md` passa a referenciar constantes
+  técnicas via código-fonte (`process.env.X` ou `src/lib/Y.ts:NN`);
+  grep reverso encontra dangling refs na próxima revisão. Sem
+  garantia sincronizada, mas melhor que texto solto.
+
+**Resultado.** `docs/RUNBOOK.md` 551 → 1014 linhas (+463: seções 15–20
++ revisão seção 0/10/5/4 + novo apêndice de envs pivô).
+`docs/RUNBOOK-PRODUCTION-CHECKLIST.md` 0 → 377 linhas (novo).
+`docs/PRS-PENDING.md` atualizado com conclusão do PR-074. Zero
+mudanças em código-fonte, zero migrations, zero breaking changes,
+zero testes alterados. É o primeiro PR 100% documental da série —
+justificado pelo retorno operacional assimétrico: 5-10min economizados
+a cada incidente × frequência real × risco de operador solo sob
+pressão fazer decisão errada por falta de referência.
+
+**Referências.**
+
+- `docs/RUNBOOK.md` revisado (seções 15–20 novas).
+- `docs/RUNBOOK-PRODUCTION-CHECKLIST.md` criado.
+- `vercel.json` (fonte de verdade dos schedules de cron).
+- ADRs D-061 (circuit breaker) · D-062 (clawback reconciliation) ·
+  D-074 (soft delete) · D-075 (body snapshot) · D-078 (magic link log) ·
+  D-079 (pending_payment deprecation) · D-081 (crédito reagendamento).
+- Audit findings resolvidos ou relacionados: [1.4], [2.4], [17.5],
+  [17.6], [17.7], [17.8], [5.5], [13.2] — runbook agora documenta
+  cada um operacionalmente.
+
+---
+
 ## D-081 · Crédito automático de reagendamento para no-show da médica (PR-073 · finding 2.4) · 2026-04-20
 
 **Contexto.** O finding `[2.4 🟡 MÉDIO]` cobrava cinco coisas quando

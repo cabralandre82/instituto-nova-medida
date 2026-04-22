@@ -2,12 +2,21 @@
 
 > Checklist operacional do dia a dia pra quem administra a plataforma
 > sozinho. Cada seção responde **"o que faço quando X acontece?"** em
-> passos concretos, sem teoria. Pro teste ponta-a-ponta, ver
-> [`RUNBOOK-E2E.md`](./RUNBOOK-E2E.md).
+> passos concretos, sem teoria.
 >
-> **Filosofia:** se você abrir `/admin` e `/admin/errors` todo dia de
-> manhã e seguir os indicadores daqui, o sistema opera sozinho em 95%
-> dos dias. Os outros 5% têm runbook.
+> Documentos vizinhos:
+>
+> - [`RUNBOOK-E2E.md`](./RUNBOOK-E2E.md) — prova de fogo ponta-a-ponta
+>   antes de release grande.
+> - [`RUNBOOK-PRODUCTION-CHECKLIST.md`](./RUNBOOK-PRODUCTION-CHECKLIST.md)
+>   — checklist de go-live: envs, crons, feature flags, bloqueantes
+>   legais. Rodar antes de cada mudança de escopo (publicar, ligar
+>   tráfego pago, rotacionar secrets).
+> - [`SECRETS.md`](./SECRETS.md) — catálogo das envs.
+>
+> **Filosofia:** se você abrir `/admin` + `/admin/crons` + `/admin/errors`
+> todo dia de manhã e seguir os indicadores daqui, o sistema opera
+> sozinho em 95% dos dias. Os outros 5% têm runbook.
 
 ---
 
@@ -28,6 +37,12 @@
 - [12 · Conciliação financeira com divergência](#12--conciliação-financeira-com-divergência)
 - [13 · Médica pausada inesperadamente](#13--médica-pausada-inesperadamente)
 - [14 · Incidente geral — `/admin/health` em error](#14--incidente-geral--adminhealth-em-error)
+- [15 · Crédito de reagendamento do paciente (PR-073)](#15--crédito-de-reagendamento-do-paciente-pr-073)
+- [16 · Paciente diz que não recebeu magic link (PR-070)](#16--paciente-diz-que-não-recebeu-magic-link-pr-070)
+- [17 · Conferir texto exato de WA enviado (PR-067)](#17--conferir-texto-exato-de-wa-enviado-pr-067)
+- [18 · Circuit breaker aberto (PR-050)](#18--circuit-breaker-aberto-pr-050)
+- [19 · Soft delete de registro CFM (PR-066)](#19--soft-delete-de-registro-cfm-pr-066)
+- [20 · Appointment `pending_payment` "fantasma" (PR-071)](#20--appointment-pending_payment-fantasma-pr-071)
 
 ---
 
@@ -36,14 +51,24 @@
 Toda manhã, abra nessa ordem:
 
 1. **`/admin`** — inbox do operador. Lista ordenada por urgência:
-   `fulfillment_paid` (acionar farmácia), `fulfillment_pharmacy`
-   (despachar), `offer_acceptance`/`offer_payment` (perseguir),
-   `refund` (processar).
-2. **`/admin/errors`** (janela 24h) — qualquer coisa que falhou desde
-   ontem. Se estiver vazio, siga. Se tiver entries, seção 10.
-3. **`/admin/health`** — status geral deve ser `ok` ou `warning`
+   `reschedule_credit_pending` (2h SLA, paciente desassistido),
+   `fulfillment_paid` (acionar farmácia, 24h), `fulfillment_pharmacy`
+   (despachar, 5d), `offer_acceptance`/`offer_payment` (perseguir),
+   `refund` (processar, 48h), `appointment_pending_payment_stale`
+   (ghost D-044, 24h).
+2. **`/admin/crons`** — sparklines dos 11 crons nos últimos 7 dias.
+   Qualquer cron com `success_rate < 95%` ou `stuck_count > 0` vira
+   investigação (seção 10). Note os chips `skipped` — são cron que
+   pulou de propósito por circuit breaker aberto (seção 18), não
+   falha.
+3. **`/admin/errors`** (janela 24h) — qualquer coisa que falhou desde
+   ontem. Se estiver vazio, siga. Se tiver entries em `source=cron`,
+   cruze com `/admin/crons` via correlação temporal (D-077): o bloco
+   "Último erro" de cada job mostra `± 15min: N Asaas · M envio WA`
+   → clica em **ver correlação →** e chega em `/admin/errors?ts=…&w=15`.
+4. **`/admin/health`** — status geral deve ser `ok` ou `warning`
    tolerável. `error` = seção 14 imediatamente.
-4. **WhatsApp rollup diário** — se configurado (`ADMIN_DIGEST_PHONE`),
+5. **WhatsApp rollup diário** — se configurado (`ADMIN_DIGEST_PHONE`),
    já te avisou por WA às 08:30 BRT o que está pendente. Use como
    referência cruzada com o `/admin`.
 
@@ -157,10 +182,21 @@ está no `acceptance_text` assinado.
      médica).
    - WA pro paciente: "estorno processado".
 
-**Cálculo de repasse:** cron diário `recalc_earnings_availability`
+**Cálculo de repasse:** cron diário `recalculate-earnings` (03:15 UTC)
 reconcilia na próxima rodada. Se a médica já recebeu o ganho
 original, o clawback será descontado do próximo payout
-automaticamente.
+automaticamente. Pós-PR-051 · D-062, `generateMonthlyPayouts` faz
+reconciliação bounded (até 3 iterações) captando clawbacks que cheguem
+**durante** a janela de geração — se um clawback dominar e zerar o
+payout, ele vira `cancelled` e as earnings negativas voltam pra
+disponível aguardando o próximo ciclo.
+
+**Estorno via Asaas API:** se a env `REFUNDS_VIA_ASAAS=true`
+estiver ligada, `/admin/refunds` mostra botão "Estornar no Asaas"
+que chama `POST /payments/{id}/refund` diretamente — não precisa
+abrir o painel. Idempotente (webhook `PAYMENT_REFUNDED` chega depois
+e não duplica clawback). Default é `false` (conservador); só
+ligar após Cenário 4 do RUNBOOK-E2E passar em sandbox.
 
 ---
 
@@ -187,6 +223,17 @@ gera em `draft` no dia 1). Card `doctor_pending` em `/admin`.
 
 Ordem estrita: `draft` → `approved` → `pix_sent` → `confirmed`. Nenhum
 atalho.
+
+**Warnings inesperados em `/admin/payouts/[id]` (pós-PR-051):**
+
+- `clawback_reconciled` — veio um clawback durante a geração do
+  payout. Valor reajustado; seguir normalmente.
+- `clawback_dominant_cancelled` — clawback maior que earnings positivas.
+  Payout foi marcado `cancelled`; nada pra pagar neste ciclo. Próximo
+  cron vai regenerar quando houver earnings positivas.
+- `reconcile_incomplete` — a reconciliação não convergiu em 3
+  iterações (sistema sob carga alta). Aguardar próximo ciclo; se
+  repetir, investigar.
 
 ---
 
@@ -296,29 +343,53 @@ registrado pra auditoria.
 2. Copiar o `reference` (formato `cron_runs:abc-def-123`).
 3. Checar qual cron é pela coluna `job`:
 
-| Cron | Schedule (UTC) | Impacto se falha |
-| --- | --- | --- |
-| `recalc_earnings_availability` | 06:00 diário | Repasses podem ficar travados na contagem |
-| `generate_monthly_payouts` | 04:00 dia 1 | Pagamento do mês não é criado |
-| `notify_pending_documents` | 09:00 diário | Médicas não são cobradas pela NF-e |
-| `auto_deliver_fulfillments` | 10:00 diário | Fulfillments ficam em `shipped` pra sempre |
-| `nudge_reconsulta` | 11:00 diário | Pacientes não recebem lembrete pra reconsultar |
-| `admin_digest` | 11:30 diário | Você não recebe resumo por WA (mas pode abrir `/admin` mesmo assim) |
+| Cron (slug) | Schedule (UTC) | BRT aprox. | Impacto se falha |
+| --- | --- | --- | --- |
+| `expire-reservations` | `* * * * *` | a cada min | Reserva de horário fica lockada além dos 15min; paciente não consegue retomar |
+| `wa-reminders` | `* * * * *` | a cada min | `appointment_notifications` `pending` não vira `sent`; paciente não recebe WA |
+| `daily-reconcile` | `*/5 * * * *` | a cada 5min | Sala encerrada sem marcar appointment `completed`; no-show D-032 não aplica → sem clawback/refund |
+| `recalculate-earnings` | `15 3 * * *` | 00:15 | Earnings ficam `pending` além do hold; `/medico/ganhos` não reflete saldo disponível |
+| `generate-payouts` | `15 9 1 * *` | 06:15 dia 1 | Payout mensal da médica não é criado — ela não recebe até você rodar manualmente |
+| `notify-pending-documents` | `0 9 * * *` | 06:00 | Médicas não são cobradas pela NF-e atrasada |
+| `auto-deliver-fulfillments` | `0 10 * * *` | 07:00 | Fulfillments ficam em `shipped` pra sempre |
+| `nudge-reconsulta` | `0 11 * * *` | 08:00 | Pacientes não recebem lembrete pra reconsultar (20d antes do fim do plano) |
+| `admin-digest` | `30 11 * * *` | 08:30 | Você não recebe resumo por WA (mas pode abrir `/admin` mesmo assim) |
+| `retention-anonymize` | `0 4 * * 0` | 01:00 dom | Backlog LGPD (Art. 16) cresce — customers "ghost" não anonimizados |
+| `asaas-events-purge` | `0 5 * * 0` | 02:00 dom | `asaas_events.payload` com PII não é purgado pós-180d |
 
 4. Ler `error_message` na UI. Causas comuns:
    - `timeout` → banco sob carga. Rodar novamente manualmente
      (veja próximo passo).
    - `constraint violation` → dado inconsistente. Investigar antes
      de rodar.
-5. Rodar manualmente (se seguro):
+   - `status='skipped'` (não é falha) → cron pulou por circuit
+     breaker aberto (seção 18). Provedor externo indisponível; ação:
+     investigar provedor, não o cron.
+5. Rodar manualmente (se seguro — Vercel aceita tanto GET quanto POST
+   nos endpoints internos):
    ```bash
-   curl -X POST https://app.institutonovamedida.com.br/api/internal/cron/<job-slug> \
-     -H "x-cron-secret: $CRON_SECRET"
+   curl -H "x-cron-secret: $CRON_SECRET" \
+     https://app.institutonovamedida.com.br/api/internal/cron/<slug>
    ```
-   Slugs disponíveis: `recalculate-earnings`, `generate-payouts`,
+   Slugs disponíveis (bate 1:1 com a coluna da tabela acima):
+   `expire-reservations`, `wa-reminders`, `daily-reconcile`,
+   `recalculate-earnings`, `generate-payouts`,
    `notify-pending-documents`, `auto-deliver-fulfillments`,
-   `nudge-reconsulta`, `admin-digest`.
-6. Conferir novo run em `/admin/health` (coluna "Cron · ...").
+   `nudge-reconsulta`, `admin-digest`, `retention-anonymize`,
+   `asaas-events-purge`.
+
+   Crons de retenção aceitam flags:
+   ```bash
+   # Dry-run (não muta, só reporta):
+   curl -H "x-cron-secret: $CRON_SECRET" \
+     "https://.../api/internal/cron/retention-anonymize?dryRun=1"
+
+   # Threshold custom em dias:
+   curl -H "x-cron-secret: $CRON_SECRET" \
+     "https://.../api/internal/cron/asaas-events-purge?thresholdDays=365"
+   ```
+6. Conferir novo run em `/admin/crons` (bloco do job específico →
+   sparkline + últimos 20 runs).
 
 Se o cron falha **3 dias seguidos** pela mesma causa, abrir issue
 (trello/github) pra tratar como bug. Não espere o quarto dia.
@@ -442,6 +513,388 @@ Registrar o incidente em planilha com: início, causa, fim, impacto
 
 ---
 
+## 15 · Crédito de reagendamento do paciente (PR-073)
+
+**Contexto:** quando a médica dá no-show (`no_show_doctor`) ou a sala
+expira vazia (`cancelled_by_admin_expired`), `applyNoShowPolicy`
+emite automaticamente um `appointment_credits` pro paciente. É o
+direito do paciente à reconsulta gratuita — aparece como banner
+grande no `/paciente`.
+
+**Quando:** card `reschedule_credit_pending` em `/admin`. **SLA: 2h.**
+É o SLA mais curto da plataforma porque cada hora parado é paciente
+desassistido + risco de reclamação regulatória.
+
+**Passos:**
+
+1. Abrir `/admin/reliability` (o card linka pra cá). Localizar o
+   paciente com crédito ativo.
+2. **Escolher uma data/hora** com a médica — seja com a mesma ou
+   outra — e criar um novo `appointment` (`scheduled`, sem cobrança).
+3. Avisar o paciente por WA (ele já viu o banner "Sua próxima
+   consulta é por nossa conta" e clicou no CTA pré-preenchido).
+4. Marcar o crédito como consumido. Hoje sem UI dedicada
+   (backlog PR-073-C); no SQL editor do Supabase Studio:
+
+   ```sql
+   update public.appointment_credits
+   set status = 'consumed',
+       consumed_at = now(),
+       consumed_appointment_id = '<uuid-do-novo-appointment>',
+       consumed_by = '<uuid-do-admin-user>',
+       consumed_by_email = 'cabralandre@yahoo.com.br'
+   where id = '<uuid-do-credit>'
+     and status = 'active';
+   ```
+
+   O CHECK `appointment_credits_consumed_coherent_chk` exige os 3
+   campos `consumed_*` juntos. Para obter o UUID do admin:
+   `select id from auth.users where email = 'cabralandre@yahoo.com.br'`.
+
+   Preferido no código do app: `markCreditConsumed({ creditId, actor, consumedAppointmentId })`
+   em `src/lib/appointment-credits.ts` (idempotente via guard
+   `status='active'` e faz log).
+
+5. Conferir: `/admin/reliability` deixa de mostrar o card; card
+   `reschedule_credit_pending` some do `/admin`.
+
+**Invariantes (D-081):**
+
+- Créditos são **imutáveis** em `customer_id/source_appointment_id/source_reason/created_at/expires_at`
+  (trigger `prevent_appointment_credits_source_mutation`).
+- Consumo de crédito **não** devolve refund — são ortogonais. Se o
+  paciente pagou e médica faltou, ele recebe refund **e** ganha o
+  crédito.
+- Expiração: 90 dias após emissão (`CREDIT_EXPIRY_DAYS`). Depois
+  disso `computeCurrentStatus` devolve `expired` on-read; cron de
+  sweep é PR-073-B (pendente).
+- Idempotência estrutural: tentar emitir crédito pro mesmo `source_appointment_id`
+  duas vezes faz o segundo virar `alreadyExisted=true` (UNIQUE partial
+  `ux_appointment_credits_source_active`).
+
+**Casos excepcionais:**
+
+- **Paciente não quer reagendar** (quer desistir): cancele o
+  crédito com motivo:
+  ```sql
+  update appointment_credits
+  set status = 'cancelled',
+      cancelled_at = now(),
+      cancelled_reason = 'Paciente optou por não reagendar (WA YYYY-MM-DD)',
+      cancelled_by = auth.uid(),
+      cancelled_by_email = 'cabralandre@yahoo.com.br'
+  where id = '<uuid>' and status = 'active';
+  ```
+  `cancelled_reason` é obrigatório ≥4 chars (CHECK constraint).
+
+---
+
+## 16 · Paciente diz que não recebeu magic link (PR-070)
+
+**Contexto:** D-078 instalou trilha forense em `magic_link_issued_log`.
+Toda emissão + verificação de magic-link é logada com email **hasheado**
+(SHA-256 LGPD-safe), IP, UA, route e `action` taxonômica.
+
+**Passos:**
+
+1. Pedir o email exato do paciente por WA.
+2. SQL Editor no Supabase Studio — calcular hash e buscar:
+
+   ```sql
+   -- cria o hash exato como a lib faz (normaliza: trim + lower)
+   with probe as (
+     select encode(
+       digest(lower(trim('alice@yahoo.com.br')), 'sha256'),
+       'hex'
+     ) as h
+   )
+   select
+     action,
+     reason,
+     role,
+     route,
+     issued_at,
+     ip,
+     metadata
+   from magic_link_issued_log, probe
+   where email_hash = probe.h
+   order by issued_at desc
+   limit 20;
+   ```
+
+3. Interpretar o `action`:
+
+| `action` | Significado | Ação |
+|---|---|---|
+| `issued` | Supabase confirmou envio pro SMTP | Checar caixa de spam; se não está lá, Supabase SMTP entregou mas destinatário filtrou. |
+| `silenced_no_account` | Email não tem conta em `auth.users` | Paciente nunca se cadastrou / digitou errado. Se é patient real, criar conta (seção 5.1 do RUNBOOK-PRODUCTION-CHECKLIST). |
+| `silenced_no_customer` | `auth.users` existe mas `customers.user_id` não bate | Bug ou estado antigo. Consertar manualmente `customers.user_id`. |
+| `silenced_no_role` | Tentou logar admin/médica num endpoint do paciente, ou vice-versa | Use a URL certa (`/admin/login`, `/medico/login`, `/paciente/login`). |
+| `silenced_wrong_scope` | Admin/doctor tentou logar como paciente | Mesma coisa. |
+| `rate_limited` | Muitas tentativas do mesmo IP | Aguardar; ou se é o admin, SSH pra `PATIENT_TOKEN_SECRET` bypass (não existe — esperar cooldown). |
+| `provider_error` | Falhou `signInWithOtp` ou `listUsers` | Supabase Auth fora do ar ou sandbox limit. Ver `reason`. |
+| `auto_provisioned` | Novo auth.user criado on-the-fly pra paciente com customer mas sem user_id | Sucesso normal do fluxo magic-link. |
+| `verified` | Paciente clicou no link e trocou por sessão | Bem-sucedido — se reclamou mesmo assim, é problema no device dele, não na plataforma. |
+| `verify_failed` | Paciente clicou em link expirado / inválido | Link tem validade curta; pedir novo. |
+
+4. Se `action=issued` mas paciente reclama:
+   - Checar `/admin/errors?source=whatsapp_delivery` — às vezes
+     confundem "email" com "WhatsApp".
+   - Checar caixa de spam do provedor dele (Yahoo/Gmail agressivo
+     com SMTP novo).
+   - Reenviar.
+
+**Bypass último recurso (admin só):** você pode criar sessão
+pelo Supabase Studio → Authentication → Users → ação "Send magic
+link" (usa SMTP Supabase direto, fora do fluxo da plataforma).
+
+---
+
+## 17 · Conferir texto exato de WA enviado (PR-067)
+
+**Contexto:** D-075 instalou snapshot do body + telefone em
+`appointment_notifications.body/target_phone/rendered_at`. Coluna é
+**imutável** após `sent_at` preenchido (trigger `trg_an_body_immutable_after_send`)
+— serve como evidência jurídica CFM 2.314/2022 + CDC Art. 39 VIII.
+
+**Quando:**
+
+- Paciente diz "recebi mensagem diferente do que estou vendo no painel".
+- Médica diz "o aviso de consulta saiu errado pro meu paciente".
+- Auditoria externa pedir "prove que o paciente foi avisado".
+
+**Via UI:** `/admin/notifications` tem coluna **Conteúdo** com
+telefone mascarado + `<details>` colapsável do body (não expõe PII em
+massa na listagem; expande caso-a-caso).
+
+**Via SQL (pra filtros complexos):**
+
+```sql
+-- tudo que foi enviado pro número X, mais recente primeiro
+select
+  id,
+  appointment_id,
+  kind,
+  target_phone,       -- gravado no momento do render
+  sent_at,
+  body                -- exato, imutável pós-sent_at
+from appointment_notifications
+where target_phone = '5511999998888'
+  and sent_at is not null
+order by sent_at desc
+limit 20;
+
+-- tudo que foi enviado pra um appointment específico
+select kind, target_phone, rendered_at, sent_at, status, body
+from appointment_notifications
+where appointment_id = '<uuid>'
+order by coalesce(sent_at, rendered_at, created_at) desc;
+```
+
+**Interpretação de `target_phone`:**
+
+- Vem **sempre** preenchido em rows pós-PR-067.
+- Rows legadas (pré-migration `20260512000000`) têm `target_phone=null` —
+  normal, não é bug.
+- Máscara de display do admin: `maskPhoneForAdmin(phone, { visible: 4 })`
+  em `src/lib/appointment-notifications.ts` mostra DDI+DDD +
+  últimos 4. Pra ver completo no SQL é só selecionar a coluna.
+
+---
+
+## 18 · Circuit breaker aberto (PR-050)
+
+**Contexto:** D-061 instalou circuit breaker in-memory (3 estados
+clássicos) em `asaas.ts::request`, `whatsapp.ts::postToGraph`,
+`video.ts::dailyRequest`, `cep.ts::fetchViaCep`. Rolling window 60s,
+threshold 50%, minThroughput 5, cooldown 30s. Provider em falha vira
+`OPEN` → requisições respondem rápido com erro; depois do cooldown
+entra em `HALF_OPEN` e a próxima tenta validar; sucesso fecha, falha
+reabre.
+
+**Sintomas de breaker aberto:**
+
+- `/admin/health` mostra check `circuit_breaker_<provider>` em
+  warning/error.
+- `/admin/crons` mostra chip **`skipped`** em jobs WA-dependentes
+  (`admin-digest`, `nudge-reconsulta`, `notify-pending-documents`).
+  Skip é **intencional** (fail-fast), não falha.
+- Checkout/agendar retornam erro mais rápido do que o normal.
+
+**Passos:**
+
+1. **Identificar o provider:** olhar qual check em `/admin/health`
+   disparou. Valores: `circuit_breaker_asaas`, `_whatsapp`,
+   `_daily`, `_cep`.
+2. **Confirmar que é o provider, não nós:**
+   - Asaas: abrir `https://status.asaas.com`.
+   - Meta/WhatsApp: `https://metastatus.com` → Messaging & WhatsApp Business.
+   - Daily.co: `https://status.daily.co`.
+   - ViaCEP: `curl https://viacep.com.br/ws/01310100/json/`.
+3. **Se provider está fora:** aguardar. Breaker vai abrir e permitir
+   1 probe a cada 30s. Quando provider voltar, o primeiro probe
+   bem-sucedido fecha o breaker automaticamente.
+4. **Se provider está OK mas breaker ainda aberto:** indica que nosso
+   request é que está errado (4xx). 4xx não abre breaker, mas 5xx
+   sim — provavelmente estamos mandando payload inválido. Ver
+   `/admin/errors?source=<provider>` e investigar.
+
+**Forçar reset manual** (só em emergência real; o fluxo normal
+é deixar o HALF_OPEN probe resolver):
+
+- Breaker é **in-memory por instance da função Vercel**. Redeploy
+  (Vercel → Deployments → Redeploy) reseta todos os estados.
+- Se múltiplas instâncias de Function estão rodando, o redeploy é
+  o único reset global.
+
+**Logs:** transições de estado são logadas como `circuit.opened`,
+`circuit.half_open`, `circuit.closed` no logger canônico com `provider`
+no contexto. Filtrar no Vercel Logs:
+
+```
+level:"info" mod:"circuit-breaker" msg:"circuit.opened"
+```
+
+---
+
+## 19 · Soft delete de registro CFM (PR-066)
+
+**Contexto:** D-074 instalou soft delete nas 4 tabelas CFM-core:
+`appointments`, `fulfillments`, `doctor_earnings`, `doctor_payouts`.
+Trigger `prevent_hard_delete_<table>` BEFORE DELETE bloqueia qualquer
+`DELETE` bruto nelas — proteção contra SQL manual descuidado,
+`TRUNCATE` em migration, cron buggy. Retenção CFM 1.821/2007 exige
+prontuário por 20 anos.
+
+**Quando fazer soft delete:**
+
+- Registro claramente errado que não dá pra corrigir por `UPDATE`
+  (ex.: appointment criado com `doctor_id` da médica errada).
+- Duplicata detectada pós-fato.
+- Decisão administrativa explícita e documentada.
+
+**Nunca fazer:**
+
+- "Limpar" dados de teste em produção — isso é sinal de dados de
+  teste em produção, que é o bug. Use staging/sandbox.
+- Apagar registro real de paciente real só pra "deixar a tela
+  limpa". Isso é prontuário, é violação CFM direta.
+
+**Via código (preferido):**
+
+```typescript
+import { softDelete } from "@/lib/soft-delete";
+
+await softDelete(supabase, {
+  table: "appointments",
+  id: "<uuid>",
+  reason: "Duplicata de <outro-uuid> criada por bug X em YYYY-MM-DD",
+  actor: { kind: "admin", userId: user.id, email: user.email },
+});
+```
+
+- `reason` é obrigatório, mínimo 4 chars úteis após trim (CHECK
+  constraint + validação TS). Seja descritivo; isso fica em
+  `deleted_reason` pra sempre.
+- Idempotente: se já estava deletado, devolve `alreadyDeleted: true`
+  sem lançar.
+
+**Via SQL (emergência):**
+
+```sql
+update appointments
+set deleted_at = now(),
+    deleted_by = auth.uid(),
+    deleted_by_email = 'cabralandre@yahoo.com.br',
+    deleted_reason = 'Duplicata de <uuid> (bug X em YYYY-MM-DD)'
+where id = '<uuid>' and deleted_at is null;
+```
+
+**Hard delete (último recurso):**
+
+```sql
+begin;
+set local app.soft_delete.allow_hard_delete = 'true';
+delete from <table> where id = '<uuid>';
+commit;
+```
+
+Use só quando soft delete não serve (ex.: LGPD Art. 18 VI de
+paciente **sem** vínculo assistencial). Pra paciente com vínculo, a
+retenção CFM 20 anos prevalece sobre o direito de eliminação LGPD
+(Art. 16 I) e isso está documentado no `legal_notice` do export LGPD.
+
+**Índices parciais:** listagens normais já filtram `deleted_at IS NULL`
+automaticamente quando o call-site usa helpers da lib; se for query
+direta no SQL editor, lembrar de adicionar `where deleted_at is null`
+explicitamente.
+
+---
+
+## 20 · Appointment `pending_payment` "fantasma" (PR-071)
+
+**Contexto:** D-079 marcou `appointments.status='pending_payment'`
+como **legado** (D-044 tornou primeira consulta gratuita). Watchdog
+`appointment_pending_payment_stale` no admin-inbox alerta após 24h.
+
+**Quando:** card `appointment_pending_payment_stale` em `/admin`.
+
+**Leitura defensiva:** com `LEGACY_PURCHASE_ENABLED=false` em
+produção, **nenhum novo** appointment `pending_payment` deveria
+estar sendo criado. Se o watchdog dispara:
+
+1. É resíduo histórico (appointment criado antes da virada D-044) —
+   contexto normal, seguir passo 3.
+2. OU é bug grave (algum código-path criando `pending_payment` novo)
+   — seguir passo 2.
+
+**Passos:**
+
+1. Identificar quais appointments estão em `pending_payment`:
+
+   ```sql
+   select
+     id, customer_id, doctor_id, created_at,
+     age(now(), created_at) as age,
+     pending_payment_expires_at,
+     scheduled_at
+   from appointments
+   where status = 'pending_payment'
+     and deleted_at is null
+   order by created_at asc;
+   ```
+
+2. **Se a row é recente (< 1h) e `LEGACY_PURCHASE_ENABLED=false` em
+   produção:** bug sério. Abrir `/admin/errors` e ver o que logou.
+   Investigar antes de fechar manualmente.
+
+3. **Se a row é antiga (resíduo D-044):** contactar o paciente.
+   Decidir:
+   - Paciente quer consultar → reagendar (cria novo appointment
+     `scheduled`, grátis per D-044). Soft-delete o antigo com
+     `deleted_reason='Ghost D-044 (pending_payment) — reagendado como <new-uuid>'`
+     (seção 19).
+   - Paciente não quer mais → cancelar via UI ou:
+     ```sql
+     update appointments
+     set status = 'cancelled_by_admin',
+         cancelled_reason = 'D-044 legacy pending_payment — paciente não deu retorno',
+         cancelled_at = now(),
+         cancelled_by = auth.uid()
+     where id = '<uuid>' and status = 'pending_payment';
+     ```
+
+4. **Nunca auto-cancelar em massa via cron** — foi decisão explícita
+   (D-079): segurança > conveniência. Cada appointment é triado
+   manualmente pra evitar duplo-estorno.
+
+**Paciente vê UI ruim?** Pós-PR-071, card `/paciente` desses
+appointments mostra "Fale com a equipe pelo WhatsApp" com mensagem
+pré-preenchida (`whatsappSupportUrl` da lib `contact.ts`). Responder
+o WA dele rapidamente destrava o fluxo humano.
+
+---
+
 ## Apêndice · Onde está cada coisa
 
 | Dado | Onde |
@@ -458,19 +911,35 @@ Registrar o incidente em planilha com: início, causa, fim, impacto
 
 ## Apêndice · Variáveis de ambiente críticas
 
-Em Vercel (todas secret):
+Ver `docs/RUNBOOK-PRODUCTION-CHECKLIST.md` §2 pra a lista
+**completa** classificada por criticidade (🔴 bloqueante, 🟠
+degradação, 🟡 observabilidade) e `docs/SECRETS.md` pro template
+completo do `.env.local`.
 
-- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
-- `ASAAS_API_KEY`, `ASAAS_WEBHOOK_TOKEN`, `ASAAS_ENV`
-- `DAILY_API_KEY`, `DAILY_DOMAIN`, `DAILY_WEBHOOK_SECRET`
-- `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`,
-  `WHATSAPP_WEBHOOK_VERIFY_TOKEN`
-- `CRON_SECRET` (pra disparar crons manualmente)
-- `ADMIN_DIGEST_PHONE` (E.164, recebe WA rollup diário)
-- `MEMED_API_KEY`
+Atalho operacional:
 
-Qualquer uma rotacionada → atualizar no Vercel imediatamente e
-rodar `/admin/health?ping=1` pra validar.
+- **Cobrança / pagamento:** `ASAAS_API_KEY`, `ASAAS_WEBHOOK_TOKEN`,
+  `ASAAS_ENV`, `REFUNDS_VIA_ASAAS` (flag).
+- **Vídeo:** `DAILY_API_KEY`, `DAILY_DOMAIN`, `DAILY_WEBHOOK_SECRET`
+  (base64 válido).
+- **WhatsApp:** `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`,
+  `WHATSAPP_WEBHOOK_VERIFY_TOKEN`, `WHATSAPP_TEMPLATES_APPROVED` (flag),
+  `WHATSAPP_TEMPLATE_VERSION`.
+- **Supabase:** `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`,
+  `SUPABASE_SERVICE_ROLE_KEY`.
+- **Crons + tokens:** `CRON_SECRET`, `PATIENT_TOKEN_SECRET`,
+  `ADMIN_DIGEST_PHONE` (E.164 do operador).
+- **Fluxos + contato público:** `LEGACY_PURCHASE_ENABLED` (default
+  `false` em prod — **nunca ligar**), `NEXT_PUBLIC_WA_SUPPORT_NUMBER`,
+  `NEXT_PUBLIC_DPO_EMAIL`, `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_BASE_URL`.
+- **Memed (prescrição):** `MEMED_API_KEY`, `MEMED_API_SECRET`,
+  `MEMED_ENV`.
+
+Qualquer uma rotacionada → atualizar em Vercel (production **+**
+preview **+** development, atento ao gotcha da CLI descrito em
+`SECRETS.md`) e rodar `/admin/health?ping=1` pra validar.
+Para rotina de rotação (cadência, ordem, envs que causam downtime),
+ver `RUNBOOK-PRODUCTION-CHECKLIST.md` §8.
 
 ---
 
@@ -548,4 +1017,5 @@ Sempre loga em `appointment_state_transition_log` com `action='bypassed'`.
 
 ---
 
-*Última revisão: 2026-04-20 · D-070 · PR-059*
+*Última revisão: 2026-04-20 · D-082 · PR-074 (adiciona seções 15–20 e
+atualiza tabela de crons com os 11 jobs reais do `vercel.json`)*
