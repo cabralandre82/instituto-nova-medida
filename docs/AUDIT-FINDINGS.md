@@ -1094,13 +1094,12 @@ _Fim da PARTE 2. Seguir pra PARTE 3 (Lentes 1+2 Paciente/Médica + 7+8 Produto/O
 - **Correção:** se `unknown > 5%` do total, destacar em vermelho com CTA "investigar".
 - **Observador:** admin solo.
 
-### [8.6 🟡 MÉDIO] Nenhum indicador visual do last_run de cada cron
+### [8.6 ✅ RESOLVED — PR-040 · D-059] Nenhum indicador visual do last_run de cada cron
 
-- **Onde:** `src/app/admin/(shell)/page.tsx` + `src/lib/cron-runs.ts` (se existir).
-- **Achado:** cron `admin-digest` ou `auto-deliver-fulfillments` pode estar offline (Vercel paused, region outage) e admin solo não percebe — não há um card "Saúde dos Crons" com cada `name / last_run_at / status`. Há só reconciliação Daily.
-- **Risco:** silenciamento: paciente não recebe nudge, NF-e nunca alertada, payout não gera, mas dashboard "tá verde".
-- **Correção:** criar tabela `cron_runs` (ou usar existente), cada cron registra `run_at` + `success/fail` no final. Dashboard admin mostra tabela "Cron · last_run · status". Alerta se `last_run < now - 2*interval`.
-- **Observador:** admin solo, financeiro.
+- **Status:** ✅ **RESOLVIDO em 2026-04-20 (PR-040 · D-059).**
+- **Solução implementada:** `/admin/crons` exibe dashboard temporal completo via `src/lib/cron-dashboard.ts`. Por job mostra: `last_run_at`, `last_status`, badge de estado (saudável/falha/em atraso), `success_rate`, percentis `p50/p95/max` de duração, sparkline de 30 dias, delta semana-vs-semana, contador de jobs `stuck` (running ≥ 2h) e últimas 20 execuções em `<details>`. `expectedJobs[]` injetado mantém crons de cadência baixa visíveis mesmo sem runs recentes (não-evento ≠ silêncio).
+- **Onde:** `src/lib/cron-dashboard.ts`, `src/app/admin/(shell)/crons/page.tsx`, link "Crons" na nav admin. Tabela `cron_runs` já existia desde a auditoria — PR-040 montou a leitura.
+- **Pendente:** alerta proativo via WhatsApp/Slack quando `stuck_count > 0` ou `last_run < now − 2×interval` depende de **PR-043** (drain externo / sink no logger), bloqueado por input operacional (chaves Axiom/Sentry + budget).
 
 ### [8.7 🟡 MÉDIO] Admin sem filtros/busca nas listas de payouts, refunds, fulfillments
 
@@ -1130,7 +1129,7 @@ _Fim da PARTE 2. Seguir pra PARTE 3 (Lentes 1+2 Paciente/Médica + 7+8 Produto/O
 |---|---|---|
 | 🔴 CRÍTICO | **3** | 1.1, 2.1, 7.1, 8.2 |
 | 🟠 ALTO | **7** | 1.2, 1.3, 2.2, 2.3, 7.2, 7.3, 8.3, 8.4 |
-| 🟡 MÉDIO | **12** | 1.4, 1.5, 1.6, 1.7, 2.4, 2.5, 7.4, 7.5, 7.6, 7.7, 8.1 (recalibrado), 8.5, 8.6, 8.7 |
+| 🟡 MÉDIO | **11** | 1.4, 1.5, 1.6, 1.7, 2.4, 2.5, 7.4, 7.5, 7.6, 7.7, 8.1 (recalibrado), 8.5, ~~8.6 (PR-040 · D-059)~~, 8.7 |
 | 🟢 SEGURO | **4** | 1.8, 2.6, 7.8, 8.8 |
 
 **Observação:** [8.1] foi **recalibrado de CRÍTICO para MÉDIO** em 2026-04-20: os crons já estão corretos em UTC e documentados nos `route.ts`. O problema remanescente é preferência operacional (horários matinais), não bug técnico.
@@ -1359,12 +1358,11 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 - **Correção:** mudar para `on delete restrict` nesses FKs; implementar "anonymize user" (similar a `anonymize customer` já criada em P2).
 - **Observador:** DPO, CFM.
 
-### [10.7 🟡 MÉDIO] `customers.cpf` possivelmente sem unique constraint
+### [10.7 ✅ RESOLVED — falso positivo da auditoria] `customers.cpf` já tem `UNIQUE`
 
-- **Onde:** `supabase/migrations/20260419030000_asaas_payments.sql:108-155` (ler pra confirmar).
-- **Achado:** se existir dois customers com mesmo CPF (legítimo em edge case como mudança de telefone/email), `customers_by_cpf` lookup ambíguo. Dependente de leitura pra confirmar.
-- **Correção:** se não houver unique, adicionar `UNIQUE (cpf)` + migration de deduplicação.
-- **Observador:** admin.
+- **Status:** ✅ **Já implementado** desde a migration original. Era falso positivo (auditoria pediu confirmação por leitura).
+- **Verificação (2026-04-20):** `supabase/migrations/20260419030000_asaas_payments.sql:117` declara `cpf text not null unique check (length(regexp_replace(cpf, '[^0-9]', '', 'g')) = 11)`. Postgres impede inserção duplicada via constraint UNIQUE; `INSERT` concorrente em race-condition resulta em erro `23505 unique_violation`, tratado em `src/app/api/checkout/route.ts` e `src/app/api/agendar/reserve/route.ts` que sempre fazem lookup `select … from customers where cpf=$1` antes de inserir.
+- **Defesa adicional:** o D-065 (PR-054) endurece o caminho de UPDATE quando o customer já tem `user_id` — atacante não consegue sobrescrever PII de um CPF cadastrado pra "tomar" o cadastro.
 
 ### [10.8 🟡 MÉDIO] Nenhum soft delete — `DELETE FROM appointments` destrói histórico
 
@@ -1468,7 +1466,7 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 |---|---|---|
 | 🔴 CRÍTICO | **3** | 10.1, 17.1 (+ uma menção forte a 9.1 dependendo do horizonte; **9.1 resolvido em Ondas 2C+2D+2E**) |
 | 🟠 ALTO | **5** | ~~9.1~~, ~~9.2~~, ~~22.1~~, ~~22.2~~, 10.2, 10.3, 17.2, 17.3, 17.4 (conta: 9 original; 4 resolvidos) |
-| 🟡 MÉDIO | **12** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4, 10.5, 10.6, 10.7, 10.8, 17.5, 17.6, 17.7, 17.8 |
+| 🟡 MÉDIO | **11** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4, 10.5, 10.6, ~~10.7 (já tinha UNIQUE)~~, 10.8, 17.5, 17.6, 17.7, 17.8 |
 | 🟢 SEGURO | **4** | 9.7, 22.7, 10.9, 17.9 |
 
 **Interpretação:** toda família 9.x (prompt-injection + AI-agents) está efetivamente fechada pra superfície atual. Quando LLM externo for plugado, seguir o check-list de 9 itens em `AGENTS.md` — as primitivas (`prompt-envelope`, `prompt-redact`, `customer-display`) já estão prontas. Backlog atual migra 100% pra findings não-AI (observabilidade, financeiro, LGPD).

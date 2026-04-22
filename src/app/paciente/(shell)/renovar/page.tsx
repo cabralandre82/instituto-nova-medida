@@ -24,6 +24,7 @@ import { requirePatient } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getRenewalInfo, labelForRenewalStatus } from "@/lib/patient-treatment";
 import { formatCurrencyBRL, formatDateBR } from "@/lib/datetime-br";
+import { whatsappSupportUrl } from "@/lib/contact";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -32,8 +33,7 @@ function brl(cents: number): string {
   return formatCurrencyBRL(cents);
 }
 
-const WHATSAPP_NUMBER = "5521998851851"; // mesmo da equipe operacional
-const WHATSAPP_MSG = encodeURIComponent(
+const RENOVAR_WHATSAPP_HREF = whatsappSupportUrl(
   "Oi! Quero agendar a reconsulta pra renovar meu tratamento."
 );
 
@@ -131,7 +131,7 @@ export default async function RenovarPage() {
         </p>
         <div className="mt-5 flex flex-wrap gap-3">
           <a
-            href={`https://wa.me/${WHATSAPP_NUMBER}?text=${WHATSAPP_MSG}`}
+            href={RENOVAR_WHATSAPP_HREF}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center rounded-xl bg-ink-900 hover:bg-ink-800 text-white text-sm font-semibold px-5 py-2.5 transition-colors shadow-sm"

@@ -22,6 +22,7 @@ import {
   RELIABILITY_SOFT_WARN,
 } from "@/lib/reliability";
 import { getReconciliationCounts } from "@/lib/reconciliation";
+import { evaluateUnknownSourceRatio } from "@/lib/dashboard-health";
 import {
   loadAdminInbox,
   formatAge,
@@ -251,6 +252,19 @@ export default async function AdminDashboard() {
                 </span>
               )}
             </p>
+            {(() => {
+              // PR-057 · finding 8.5 — destaca volume anômalo de
+              // reconciliações sem fonte conhecida (NULL→"unknown").
+              const u = evaluateUnknownSourceRatio(d.reconciledLast24hBySource);
+              if (!u.alert) return null;
+              return (
+                <p className="mt-2 text-xs text-terracotta-800 bg-terracotta-50 border border-terracotta-200 rounded-md px-2 py-1 inline-block">
+                  ⚠ {u.unknown}/{u.total} ({Math.round(u.ratio * 100)}%) sem
+                  fonte registrada — investigar webhook Daily ou regressão na
+                  coluna <code>reconciled_by_source</code>.
+                </p>
+              );
+            })()}
           </div>
           {d.reconcileStuck > 0 ? (
             <div className="rounded-xl bg-terracotta-50 border border-terracotta-200 px-3 py-2 text-sm text-terracotta-700 font-medium">

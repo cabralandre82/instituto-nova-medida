@@ -5,6 +5,57 @@
 
 ---
 
+## D-068 · Polimento operacional · contato público centralizado + alerta de unknown source (Onda 3A · MÉDIOs 1.5 + 8.5; resolve 8.6 e 10.7) · 2026-04-20
+
+**Contexto.** Primeira investida nos findings 🟡 MÉDIO da auditoria após zerar os ALTOs não-AI. Quatro itens leves agrupados em uma única entrega:
+
+- **[10.7]** "customers.cpf possivelmente sem unique constraint" — verificação no schema mostrou `cpf text not null unique check (...)` desde a migration `20260419030000_asaas_payments.sql:117`. Era falso positivo da auditoria (que pediu confirmação por leitura). Doc-only.
+- **[8.6]** "Nenhum indicador visual do last_run de cada cron" — endereçado por completo no PR-040 · D-059 (`/admin/crons` com sparklines, percentis, deltas, badge de estado e últimas 20 execuções por job, mais `expectedJobs[]` que mantém visibilidade de crons de cadência baixa). Doc-only confirmando.
+- **[1.5]** "Número de WhatsApp hardcoded em múltiplos lugares" — auditoria assumiu propagação ("provavelmente repetido em Footer/wa-*"). Verificação real achou só `src/app/paciente/(shell)/renovar/page.tsx:35` como número público hardcoded. Mesmo assim centralizamos pra evitar drift futuro.
+- **[8.5]** "`countBySource` trata `null` como `unknown` silenciosamente" — sem alerta visual quando `unknown / total` cresce, regressão fica invisível.
+
+**Decisão.**
+
+1. **`src/lib/contact.ts`** — fonte única do canal público:
+   - Lê `NEXT_PUBLIC_WA_SUPPORT_NUMBER` em build-time (dado público, pode ir no bundle do client; não é segredo).
+   - Sanitiza qualquer máscara (`(11) 99999-8888`, `+55 11 …`) em dígitos puros, garante prefixo DDI 55.
+   - Fallback `5521998851851` (mesmo número que estava hardcoded) pra não quebrar dev/preview enquanto a env não é definida.
+   - Helpers: `getSupportWhatsappNumber()`, `getSupportWhatsappE164()` (display `+55 (DD) 9XXXX-XXXX`), `whatsappSupportUrl(message?)` (URL `https://wa.me/<num>?text=…`), `telSupportUrl()` (`tel:+55…`), `getDpoEmail()` (`NEXT_PUBLIC_DPO_EMAIL` com fallback `lgpd@institutonovamedida.com.br`).
+   - Validação defensiva: número fora de 10–13 dígitos cai pro fallback (preferência por número funcional vs. silêncio).
+   - Migrado `src/app/paciente/(shell)/renovar/page.tsx` pra usar `whatsappSupportUrl(...)`. Footer e demais lugares já usavam apenas labels textuais ("WhatsApp"); não precisam migrar.
+   - **15 testes** cobrindo env vars, formatos, validação defensiva, encoding de mensagens com acentos.
+
+2. **`src/lib/dashboard-health.ts`** — `evaluateUnknownSourceRatio(bySource)` puro:
+   - Threshold: `> 5%` de `unknown` no total das últimas 24h.
+   - Mínimo de amostra: `≥ 20` reconciliações antes de alertar (abaixo disso o ratio é volátil — 1 unknown em 5 já passa o threshold sem significar nada).
+   - Retorna `{ total, unknown, ratio, alert }` consumido pelo `/admin` dashboard.
+   - **7 testes** cobrindo amostra vazia, abaixo do mínimo, exatamente no threshold, 100% degenerado, e chaves espúrias.
+   - Quando `alert=true`, o dashboard mostra um chip `terracotta` abaixo do bloco "Reconciliação Daily · últimas 24h" com `N/total (XX%) sem fonte registrada — investigar webhook Daily ou regressão na coluna reconciled_by_source`.
+
+**Por que extrair `dashboard-health.ts` em vez de função inline na page.** A page é server component; testá-la exigiria subir Next inteiro. Lib pura `evaluateUnknownSourceRatio` é determinística, sem I/O — cobertura sobe sem custo.
+
+**Por que `NEXT_PUBLIC_*` no contact.** O número de suporte é dado público (paciente vai discar). Nada secreto. Build-time inline é OK e simplifica.
+
+**O que NÃO entrou neste PR.**
+- `[1.4]` "Aguardando confirmação de pagamento" pra consultas que não deveriam ter pagamento — depende de deprecação completa do fluxo `pending_payment` (resíduo do D-044), o que merece PR próprio com migration.
+- `[1.6]` Preços altos sem contexto em `/paciente/renovar` — UX call do operador (esconder preços vs. transparência); deixa pro operador decidir.
+- `[1.7]` Atalhos de prescrição/endereço no dashboard do paciente — endereço já tem self-service (D-067 / PR-056); receita Memed depende de integração ainda não plugada.
+- `[8.7]` Filtros/busca em `/admin/payouts`, `/admin/refunds`, `/admin/fulfillments` — escopo grande, candidato a PR dedicado.
+- `[10.5]` State machine de `appointments` no DB via trigger — alto valor estrutural, mas alto risco se eu mapear transições errado. Candidato a PR dedicado com mapeamento explícito de transições válidas + janela de observação em modo permissivo antes de bloquear.
+
+**Consequências:**
+- Quando o operador trocar o número de WhatsApp, basta atualizar `NEXT_PUBLIC_WA_SUPPORT_NUMBER` no Vercel e dar deploy. Zero busca-e-substitui no código.
+- Regressão silenciosa em `reconciled_by_source` deixa de passar despercebida; admin solo vê o chip vermelho na home.
+- `customers.cpf` UNIQUE confirmado documentalmente — não cai mais como pendência em revisões futuras.
+- `[8.6]` sai oficialmente do backlog — endereço de PR-040 fica registrado como solução.
+
+**Follow-ups recomendados (próximos MÉDIOs):**
+- **PR-058** — `[10.5]` state machine de appointments via trigger DB (precisa mapear todas as transições do código antes).
+- **PR-059** — `[8.7]` filtros/search em `/admin/payouts` + `/admin/refunds` + `/admin/fulfillments`.
+- **PR-060** — `[1.4]` deprecar `pending_payment` em appointments (depende de fluxo D-044 100% migrado).
+
+---
+
 ## D-067 · Self-service de atualização de PII no `/paciente` · 2026-04-20
 
 **Contexto.** O guard D-065 (PR-054) bloqueia atualização cega de PII nos endpoints `/api/checkout` e `/api/agendar/reserve` quando `customers.user_id` está populado — defesa contra "CPF-takeover" (atacante sobrescrevendo e-mail/endereço de uma vítima com CPF conhecido).

@@ -2,7 +2,7 @@
 
 Lista consolidada de PRs identificados na auditoria (`docs/AUDIT-FINDINGS.md`) que **não podem ser abertos só pelo engenheiro**: dependem de dados reais, decisões do operador ou acesso externo.
 
-Atualizado em: **2026-04-20** (pós-PR-056 / D-067 — self-service de atualização de PII em `/paciente/meus-dados/atualizar`).
+Atualizado em: **2026-04-20** (pós-PR-057 / D-068 — Onda 3A de MÉDIOs: contato público centralizado + alerta de unknown source + fechamento doc-only de [10.7] e [8.6]).
 
 ---
 
@@ -95,9 +95,10 @@ Endereço físico da sede (rua, número, bairro, cidade, UF, CEP): _____________
 
 Enquanto o operador colhe os dados acima, o engenheiro segue com os PRs que não dependem de inputs externos.
 
-**Status pós-PR-056 (2026-04-20):**
+**Status pós-PR-057 (2026-04-20):**
 
 - ✅ Concluídos:
+  - PR-057 (D-068): **Onda 3A · MÉDIOs (1.5 + 8.5; doc-only 10.7 + 8.6)** — `src/lib/contact.ts` centraliza canal público (`NEXT_PUBLIC_WA_SUPPORT_NUMBER` + `NEXT_PUBLIC_DPO_EMAIL` com fallbacks defensivos; helpers `whatsappSupportUrl/getSupportWhatsappE164/telSupportUrl/getDpoEmail`; sanitiza máscaras; valida 10–13 dígitos). `/paciente/renovar` migrado pra usar o helper. `src/lib/dashboard-health.ts::evaluateUnknownSourceRatio` puro (threshold 5%, mínimo 20 amostras pra evitar volatilidade); chip terracotta no `/admin` quando alerta. `[10.7] cpf UNIQUE` confirmado por leitura (`migrations/20260419030000_asaas_payments.sql:117` declara `cpf text not null unique`); auditoria pediu confirmação, era falso positivo. `[8.6] last_run dos crons` 100% endereçado pelo PR-040 (sparklines + percentis + delta semana + jobs em atraso). **22 testes novos (15 contact + 7 dashboard-health); suíte 1080/1080.** Sem migration. **Findings [1.5], [8.5], [8.6], [10.7] ✅ RESOLVED — MÉDIOs caem de 12+12 pra 11+11 nas tabelas das PARTES 1+2 e PARTE 3.**
   - PR-056 (D-067): **self-service de atualização de PII em `/paciente/meus-dados/atualizar`** — destrava a fricção criada pelo guard D-065 (paciente com `customer.user_id` não tinha caminho pra atualizar e-mail/phone/endereço fora do funil de compra, que agora bloqueia silenciosamente). POST `/api/paciente/meus-dados/atualizar` protegido por `requirePatient()`; lib pura `src/lib/meus-dados-update.ts` (`parseAndValidateUpdate` + `computeChangedFields`) reusa `sanitizeShortText(personName)` (PR-037), `validateAddress` (PR-035), regex de e-mail + dígito-only de telefone; CPF silenciosamente ignorado se vier no payload (evita oracle); `anonymized_at` responde 409; diff normalizado (case/lower/digits/complement null-vs-empty) evita UPDATE + log de não-evento; trilha LGPD reusa action `pii_updated_authenticated` (D-065) com `actor_kind='system'` + `metadata.self_service=true` + `changed_fields[]`. UI em `src/app/paciente/(shell)/meus-dados/atualizar/page.tsx` (server) + `_AtualizarForm.tsx` (client com ViaCEP via proxy `/api/cep/[cep]` + máscaras). Link "Atualizar dados" no topo do `/paciente/meus-dados`. **27 testes novos; suíte 1058/1058.** Sem migration, sem breaking changes. Follow-ups opcionais: **PR-056-B** (sync Asaas `updateCustomer`) e **PR-056-C** (OTP antes de trocar e-mail principal).
   - Onda 1A (D-047): PR-024, PR-025, PR-026 (dark patterns + fail-fast CRON_SECRET)
   - Onda 1B (D-048): PR-013, PR-020, PR-030, PR-031 (integridade financeira, prontuário, audit log)
