@@ -39,7 +39,12 @@ import {
   getAccessContextFromHeaders,
   logPatientAccess,
 } from "@/lib/patient-access-log";
+import {
+  getPatientReliabilitySnapshot,
+  listCustomerEvents,
+} from "@/lib/patient-reliability";
 import { LgpdBlock } from "./_LgpdBlock";
+import { ReliabilityBlock } from "./_ReliabilityBlock";
 
 export const dynamic = "force-dynamic";
 
@@ -72,6 +77,14 @@ export default async function AdminPatientProfilePage({
 
   const timeline = buildPatientTimeline(profile);
   const stats = summarizePatient(profile);
+
+  // PR-068 · D-076: snapshot + histórico de eventos de confiabilidade
+  // do paciente. Carregado em paralelo pra não segurar renderização
+  // — ambos os reads são pequenos (≤30 linhas cada).
+  const [reliabilitySnapshot, reliabilityEvents] = await Promise.all([
+    getPatientReliabilitySnapshot(id),
+    listCustomerEvents(id, 30),
+  ]);
 
   return (
     <div>
@@ -232,6 +245,12 @@ export default async function AdminPatientProfilePage({
           </ol>
         )}
       </section>
+
+      {/* ========== CONFIABILIDADE (PR-068 · D-076) ========== */}
+      <ReliabilityBlock
+        snapshot={reliabilitySnapshot}
+        events={reliabilityEvents}
+      />
 
       {/* ========== FULFILLMENTS ========== */}
       {profile.fulfillments.length > 0 && (

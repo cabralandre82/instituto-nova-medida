@@ -1461,12 +1461,21 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 - **Correção:** unificar em `error_log` com `source: 'cron', job: X, run_id: UUID`.
 - **Observador:** admin solo.
 
-### [17.6 🟡 MÉDIO] Paciente sem `reliability_events` (só médica tem)
+### [17.6 🟡 MÉDIO] ~~Paciente sem `reliability_events` (só médica tem)~~ ✅ RESOLVIDO (PR-068 · D-076 · 2026-04-20)
 
 - **Onde:** `doctor_reliability_events` existe. `customer_reliability_events` não existe.
 - **Achado:** se paciente faz no-show repetido, cancela 5x no mesmo dia, ou tem múltiplos refunds, não há registro agregado. Solo admin não identifica "frequent abuser".
 - **Correção:** simétrica a `doctor_reliability_events` — registrar no_show, cancelamento tardio, refund solicitado. Com política de bloqueio automatizado opcional.
 - **Observador:** admin solo.
+
+**Resolução · PR-068 · D-076 · 2026-04-20**
+
+- Migration `20260513000000_patient_reliability_events.sql` cria tabela `patient_reliability_events` (5 kinds: `no_show_patient`, `reservation_abandoned`, `late_cancel_patient`, `refund_requested`, `manual`), RLS admin-only, índice ativo recente + unique parcial `(appointment_id, kind)`.
+- Trigger `trg_record_patient_reliability` (AFTER UPDATE OF status ON appointments) registra automaticamente os 3 kinds automáticos (`no_show_patient`, `reservation_abandoned` via `pending_payment_expired`, `late_cancel_patient` quando < 2h do `scheduled_at`). Fail-safe: erros da trigger viram `RAISE NOTICE` sem derrubar o UPDATE de negócio.
+- `src/lib/patient-reliability.ts` expõe `recordManualEvent` (admin ad-hoc), `dismissEvent`, `getPatientReliabilitySnapshot` (janela 90d, soft-warn=2, hard-flag=3, breakdown por kind), `listCustomerEvents`, `listRecentEvents`. `computeSnapshotFromEvents` é função pura testável.
+- UI: seção "Confiabilidade" em `/admin/pacientes/[id]` (`_ReliabilityBlock.tsx`) mostra status, breakdown e histórico.
+- Sem auto-block de paciente no MVP (só sinalização) — decisão reversível em PR-068-B quando houver sinal operacional pra calibrar threshold.
+- **30 unit tests** cobrindo snapshot puro, validações, idempotência, error paths.
 
 ### [17.7 🟡 MÉDIO] ~~`appointment_notifications` registra envio, mas conteúdo exato não persiste~~ ✅ RESOLVIDO (PR-067 · D-075 · 2026-04-20)
 
@@ -1509,7 +1518,7 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 |---|---|---|
 | 🔴 CRÍTICO | **3** | 10.1, 17.1 (+ uma menção forte a 9.1 dependendo do horizonte; **9.1 resolvido em Ondas 2C+2D+2E**) |
 | 🟠 ALTO | **5** | ~~9.1~~, ~~9.2~~, ~~22.1~~, ~~22.2~~, 10.2, 10.3, 17.2, 17.3, 17.4 (conta: 9 original; 4 resolvidos) |
-| 🟡 MÉDIO | **8** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4 (parcial PR-061 · D-071; escopo app-gerado fechado, webhooks externos → 10.4-B), ~~10.5 (PR-059 · D-070)~~, ~~10.6 (onda A PR-064 · D-072; onda B → 10.6-B)~~, ~~10.7 (já tinha UNIQUE)~~, ~~10.8 (PR-066 · D-074)~~, 17.5, 17.6, ~~17.7 (PR-067 · D-075)~~, 17.8 |
+| 🟡 MÉDIO | **7** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4 (parcial PR-061 · D-071; escopo app-gerado fechado, webhooks externos → 10.4-B), ~~10.5 (PR-059 · D-070)~~, ~~10.6 (onda A PR-064 · D-072; onda B → 10.6-B)~~, ~~10.7 (já tinha UNIQUE)~~, ~~10.8 (PR-066 · D-074)~~, 17.5, ~~17.6 (PR-068 · D-076)~~, ~~17.7 (PR-067 · D-075)~~, 17.8 |
 | 🟢 SEGURO | **4** | 9.7, 22.7, 10.9, 17.9 |
 
 **Interpretação:** toda família 9.x (prompt-injection + AI-agents) está efetivamente fechada pra superfície atual. Quando LLM externo for plugado, seguir o check-list de 9 itens em `AGENTS.md` — as primitivas (`prompt-envelope`, `prompt-redact`, `customer-display`) já estão prontas. Backlog atual migra 100% pra findings não-AI (observabilidade, financeiro, LGPD).

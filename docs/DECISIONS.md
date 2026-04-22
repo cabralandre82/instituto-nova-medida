@@ -5,6 +5,189 @@
 
 ---
 
+## D-076 · Log granular de confiabilidade do paciente em `patient_reliability_events` (PR-068 · finding 17.6) · 2026-04-20
+
+**Contexto.** A plataforma já mantinha `doctor_reliability_events`
+(migration 015 / D-036) com log granular de incidentes da médica
+(no-show, sala expirada vazia, manual), thresholds em janela temporal
+(2 eventos = soft warn, 3 = hard block → auto-pause). O lado simétrico
+do paciente **inexistia**: `appointments.status` virava
+`no_show_patient` em `reconcile.ts`, `cancelled_by_admin` com
+`cancelled_reason='pending_payment_expired'` em
+`expire_abandoned_reservations()`, mas nenhum **evento de paciente**
+era registrado pra análise de padrão. O admin não conseguia responder
+"esse paciente faltou quantas vezes nos últimos 90 dias?" ou
+"quantas reservas ele abandonou sem pagar?".
+
+Três incidentes concretos que importam:
+
+1. **`no_show_patient`** — paciente pagou, confirmou reserva, não
+   compareceu. Slot queimado, médica precisou estar logada. Clawback
+   não se aplica (ele pagou). Padrão crônico → sinal de abuso.
+2. **`reservation_abandoned`** — paciente ocupou slot em
+   `pending_payment` por até 30 min (TTL), não pagou, cron expirou.
+   Bloqueou agenda sem custo. Reincidente = potencial "pesquisador de
+   horários" ou bot.
+3. **`late_cancel_patient`** — (futuro) paciente cancela em cima da
+   hora (< 2h). Slot irrecuperável. UI ainda não existe, mas infra
+   deve estar pronta pra capturar quando a transição
+   `scheduled → cancelled_by_patient` for acionada pela aplicação.
+
+**Decisão.** Introduzir `patient_reliability_events` espelhando o
+schema de `doctor_reliability_events`, com as seguintes diferenças:
+
+### Schema (migration `20260513000000_patient_reliability_events`)
+
+```
+patient_reliability_events
+├── id                 uuid pk
+├── customer_id        uuid not null → customers(id) on delete cascade
+├── appointment_id     uuid → appointments(id) on delete set null
+├── kind               text check in ('no_show_patient',
+│                                     'reservation_abandoned',
+│                                     'late_cancel_patient',
+│                                     'refund_requested',
+│                                     'manual')
+├── occurred_at        timestamptz default now()
+├── notes              text
+├── dismissed_at/by/reason   (admin pode dispensar caso justo)
+└── created_at         timestamptz default now()
+```
+
+### Trigger auto-registro (desacoplado do código TS)
+
+`AFTER UPDATE OF status ON appointments FOR EACH ROW` →
+`record_patient_reliability_from_appt()`. Detecta:
+
+- `new.status = 'no_show_patient'` → kind `no_show_patient`.
+- `new.status = 'cancelled_by_admin' AND
+   cancelled_reason = 'pending_payment_expired'` → kind
+   `reservation_abandoned`.
+- `new.status = 'cancelled_by_patient' AND old.status IN
+   ('scheduled','confirmed','in_progress') AND
+   scheduled_at - now() < 2h` → kind `late_cancel_patient`.
+
+Cada INSERT com `ON CONFLICT (appointment_id, kind) DO NOTHING` →
+idempotência estrutural. Falhas internas viram `RAISE NOTICE` —
+**trigger de observabilidade nunca pode derrubar o UPDATE de
+negócio**.
+
+### Lib `src/lib/patient-reliability.ts`
+
+- `recordManualEvent` — admin registra `manual` ou
+  `refund_requested` (kinds automáticos são proibidos aqui;
+  conflitam com trigger). Validações estritas:
+  - `customerId` deve ser UUID.
+  - `kind` deve ser um de `MANUAL_KINDS`.
+  - `notes` sanitizado (remove controles) + mín. 4 chars.
+- `dismissEvent` — marca `dismissed_at/by/reason`. Idempotente
+  (já-dispensado vira no-op). Validações estritas.
+- `getPatientReliabilitySnapshot` — count ativo na janela + breakdown
+  por kind + flags `isInSoftWarn`/`isAtHardFlag`. Window = 90 dias
+  (vs. 30 da médica — pacientes têm frequência menor).
+- `listCustomerEvents`, `listRecentEvents` — leituras pra UI.
+- `computeSnapshotFromEvents` — função pura, extraída pra facilitar
+  teste + reuso.
+
+### Diferenças vs. reliability.ts (médica)
+
+| Aspecto              | Médica (D-036)        | Paciente (D-076)           |
+| -------------------- | --------------------- | -------------------------- |
+| Janela               | 30 dias               | **90 dias**                |
+| Hard threshold       | Auto-pause (bloqueia) | **Flag apenas** (manual)   |
+| Kinds                | 3 (no_show, expired, manual) | **5** (inclui `reservation_abandoned`, `refund_requested`) |
+| Registro automático  | Chamada TS em `applyNoShowPolicy` | **Trigger DB** (desacoplado) |
+| Impacto negócio      | Remove de `/agendar`  | Apenas sinaliza ao admin   |
+
+**Por que não auto-block de paciente no MVP?** Sem sinal
+operacional suficiente pra calibrar o threshold, o risco de falso
+positivo (ex: paciente real que cancelou por doença na família e
+volta depois) bloquear um cliente legítimo é maior que o benefício
+marginal. Admin decide caso a caso via UI — PR-068-B pode adicionar
+`customers.reliability_blocked_at` quando houver 3+ meses de dados.
+
+### UI — seção "Confiabilidade" em `/admin/pacientes/[id]`
+
+Componente `_ReliabilityBlock.tsx` mostra:
+
+- Cartão de status (verde/ambar/terracotta) com count ativo na janela.
+- Breakdown por kind em lista compacta.
+- Histórico dos últimos 20 eventos, diferenciando ativos de
+  dispensados visualmente.
+- Ações interativas (dispensar / registrar manual) ficam pra PR-068-B
+  — precisa de API routes novas e fluxo de auditoria. MVP entrega
+  observabilidade, que já é >80% do valor.
+
+### Invariantes
+
+1. **Idempotência estrutural**: `unique(appointment_id, kind)` partial
+   garante que retries / hot-reloads / reconcile rodando 2x não
+   duplicam evento. Múltiplos kinds distintos pro mesmo appointment
+   são permitidos (edge case: paciente abandona, reserva nova e perde).
+2. **Fail-safe DB**: trigger `exception when others` captura
+   qualquer erro e converte em `RAISE NOTICE`. UPDATE do `appointments`
+   é o caminho crítico e não pode quebrar.
+3. **RLS admin-only**: paciente não enxerga a própria "nota" — é info
+   adversarial. Policy `pre_admin_only` espelha `doctor_reliability_
+   events`.
+4. **Decoupling SQL ↔ TS**: trigger DB cobre todos os callers
+   (webhook, cron, admin UI, futuro endpoint de cancel). Não precisa
+   alterar `no-show-policy.ts` nem `reconcile.ts`.
+
+### Trade-offs
+
+- **Trigger vs. integração TS**: escolhi trigger DB porque (a) hoje o
+  status muda em múltiplos caminhos (reconcile, pg_cron
+  `expire_abandoned_reservations`, webhooks futuros) e integrar TS em
+  cada lugar seria frágil; (b) `doctor_reliability_events` foi feito
+  em TS mas a médica só transita via `applyNoShowPolicy` — o paciente
+  tem mais rotas. Custo: quem lê o código TS não vê o registro
+  acontecer (mitigado por `notes` auto-explicativas +
+  documentação).
+- **Window 90d vs. 30d**: pacientes têm frequência típica de 1
+  consulta/4 meses no plano de emagrecimento; 30 dias raramente
+  capturaria padrão. 90 dias balanceia "esquecer o incidente único"
+  com "detectar reincidência". Ajustável via constante
+  `PATIENT_RELIABILITY_WINDOW_DAYS` (não via config dinâmica — muda
+  via commit, fica no histórico).
+- **Sem auto-block**: aceitei MVP "só observabilidade". Risco de
+  bloquear paciente legítimo > custo de slots adicionais. Decisão
+  reversível (PR-068-B adiciona quando tiver dados).
+
+### Consequências
+
+- **Futuro**: base pra métricas de NPS de slot ("% de slots
+  reservados que viram consulta realizada"). Também pra política de
+  pré-pagamento obrigatório (hoje opcional) em pacientes recorrentes
+  de abandono.
+- **Admin ganha visão concreta**: pela primeira vez consegue
+  responder "esse paciente tem histórico de abuso?" antes de conceder
+  reembolso ou resposta especial.
+
+### Testes
+
+30 unit tests em `src/lib/patient-reliability.test.ts`:
+- `computeSnapshotFromEvents` (pura): vazio, fora-de-janela,
+  breakdown por kind, soft-warn (2), hard-flag (3), `lastEventAt`,
+  `occurred_at` inválido.
+- `recordManualEvent`: validação (UUID, kind allowlist, notes mín),
+  happy path, appointmentId opcional, idempotência via 23505,
+  db_error.
+- `dismissEvent`: validações, not_found, alreadyDismissed, happy.
+- `getPatientReliabilitySnapshot`: null em UUID inválido / customer
+  inexistente / erro de events; snapshot correto.
+- `listCustomerEvents`, `listRecentEvents`: contract básico.
+
+A trigger DB é validada por inspeção (contém lógica SQL pura e
+idempotente; replicar em TS seria duplicar a fonte de verdade).
+
+**Referências**: `src/lib/patient-reliability.ts`,
+`src/lib/patient-reliability.test.ts`,
+`supabase/migrations/20260513000000_patient_reliability_events.sql`,
+`src/app/admin/(shell)/pacientes/[id]/_ReliabilityBlock.tsx`.
+
+---
+
 ## D-075 · Snapshot forense do body + telefone-destino em `appointment_notifications` (PR-067 · finding 17.7) · 2026-04-20
 
 **Contexto.** `appointment_notifications` (migrations 004 e 011) hoje
