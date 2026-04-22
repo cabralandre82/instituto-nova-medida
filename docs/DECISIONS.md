@@ -5,6 +5,174 @@
 
 ---
 
+## D-081 · Crédito automático de reagendamento para no-show da médica (PR-073 · finding 2.4) · 2026-04-20
+
+**Contexto.** O finding `[2.4 🟡 MÉDIO]` cobrava cinco coisas quando
+`appointments.status` ia pra `no_show_doctor` (ou `cancelled_by_admin`
+com `cancelled_reason='expired_no_one_joined'` — sala expirou vazia):
+
+1. Reagendamento automático do paciente.
+2. Notificação ao admin + paciente + médica.
+3. Bloqueio da earning da médica.
+4. Refund caso o paciente tivesse pago.
+5. SLA `no_show_doctor > 2h sem ação → alerta admin`.
+
+**Estado pré-PR-073.** `src/lib/no-show-policy.ts::applyNoShowPolicy`
+já cobria (2) notificação do paciente via `enqueueImmediate`, (3)
+clawback da earning via `createClawback`, (4) `refund_required=true`
+que entra em `/admin/refunds`, e o evento granular em
+`doctor_reliability_events` cobria a trilha da médica com possível
+auto-pause (D-036).
+
+Faltava:
+
+- **(1)** nada dizia ao paciente "você tem direito a uma nova consulta
+  sem custo" — ele só recebia "a médica não compareceu". Sem trilha
+  auditável: admin tinha apenas os eventos de reliability pra
+  reconstituir mentalmente quem precisava de reagendamento.
+- **(5)** nenhum SLA. Um no-show podia ficar semanas sem reagendamento
+  sem ninguém saber.
+
+**Decisão.** Formalizar o **direito ao reagendamento** como uma
+entidade de primeira classe: tabela `appointment_credits`. Emitida
+automaticamente por `applyNoShowPolicy`, consumida pelo admin solo
+quando ele agenda a nova consulta, exibida ao paciente como banner
+destacado no topo do dashboard e surfa no admin-inbox com SLA 2h.
+
+### Modelo de dados
+
+Migration `20260516000000_appointment_credits.sql`:
+
+| Campo | Propósito |
+|-------|-----------|
+| `customer_id` | Dono do crédito. |
+| `source_appointment_id` | Consulta que gerou o direito. Imutável. |
+| `source_reason` | `no_show_doctor` ou `cancelled_by_admin_expired`. Imutável. |
+| `status` | `active` / `consumed` / `expired` / `cancelled`. |
+| `created_at` | Emissão. Imutável. |
+| `expires_at` | Janela de uso (90 dias). Imutável após criação. |
+| `consumed_at` / `consumed_appointment_id` / `consumed_by` / `consumed_by_email` | Snapshot do consumo. |
+| `cancelled_at` / `cancelled_reason` / `cancelled_by` / `cancelled_by_email` | Snapshot do cancelamento (requer reason ≥4 chars). |
+| `metadata jsonb` | Extensão futura (ex: motivo operacional). |
+
+Invariantes garantidas por CHECK constraints:
+
+- `expires_at > created_at` (janela válida na criação).
+- `status='consumed' ⇔ consumed_at NOT NULL ⇔ consumed_appointment_id NOT NULL`.
+- `status='cancelled' ⇔ cancelled_at NOT NULL`.
+- Não pode estar `consumed` e `cancelled` simultaneamente.
+- `cancelled_reason` obrigatório se cancelado (≥4 chars trimados).
+
+Idempotência estrutural via UNIQUE partial
+`ux_appointment_credits_source_active` em `source_appointment_id` onde
+`status <> 'cancelled'` — chamada dupla de `grantNoShowCredit` (retry,
+webhook duplicado) vira `alreadyExisted=true` sem erro.
+
+Imutabilidade parcial via trigger
+`prevent_appointment_credits_source_mutation`: bloqueia mudança de
+`customer_id`, `source_appointment_id`, `source_reason`, `created_at`,
+`expires_at`. Transições de status e snapshots `consumed_/cancelled_`
+seguem livres com coerência validada pelos CHECK.
+
+RLS deny-by-default + FORCE, sem policies. Acesso apenas via
+`service_role`. Paciente nunca lê a tabela diretamente — enxerga via
+`patient-quick-links.ts` que projeta os campos seguros.
+
+### Política (`src/lib/appointment-credits.ts`)
+
+- `CREDIT_EXPIRY_DAYS = 90` — conservador: cobre férias/feriados,
+  curto o bastante pra não virar zumbi.
+- `computeCurrentStatus(row, now)` computa `'expired'` quando
+  `row.status='active'` mas `expires_at <= now`. Mantém o watchdog
+  honesto antes de um cron dedicado de expiração (PR-073-B, opcional).
+- `grantNoShowCredit` — idempotente via 23505 → re-select. Fail-soft.
+- `listActiveCreditsForCustomer` — query do banner do paciente (active
+  AND expires_at > now, ordem de criação asc).
+- `markCreditConsumed({ actor, ... })` — admin marca o consumo; grava
+  snapshot de ator (D-077) em `consumed_by_email`.
+- `cancelCredit` — admin descarta com reason obrigatório.
+
+### Integração com `applyNoShowPolicy`
+
+Nova função privada `emitRescheduleCredit(customerId,
+sourceAppointmentId, finalStatus)` chamada no fim dos dois branches de
+`no_show_doctor`/`cancelled_by_admin_expired`. Fail-soft: erro vira
+`log.warn`, nunca bloqueia a política financeira já aplicada. O id do
+crédito sobe em `NoShowResult.rescheduleCreditId` pra observabilidade.
+
+### Admin-inbox (PR-045 · D-045)
+
+Nova categoria `reschedule_credit_pending` · SLA 2h.
+`SLA_HOURS.reschedule_credit_pending=2` — curto porque cada hora é
+paciente desassistido. Query conta créditos `active` com
+`expires_at > now`, idade via `created_at`. CTA leva a
+`/admin/reliability` (já existe; o admin acessa a trilha da médica de
+lá e agenda a reconsulta falando com o paciente).
+
+### UI paciente (`/paciente`)
+
+Novo bloco `RescheduleCreditBanner` no topo do dashboard (antes de
+`pendingOffers`), em `terracotta-50/200/700`. Copy diferenciada por
+razão:
+
+- `no_show_doctor` → "Sua próxima consulta é por nossa conta" +
+  "A médica não pôde comparecer…"
+- `cancelled_by_admin_expired` → "A consulta agendada não aconteceu" +
+  "A sala expirou sem atendimento, provavelmente por um problema
+  técnico ou falta de link…"
+
+CTA WhatsApp com mensagem pré-preenchida pra o admin reconhecer de
+cara. Banner some sozinho quando o admin marca `markCreditConsumed` ou
+quando o crédito expira (computado em runtime).
+
+`patient-quick-links.ts` ganhou o tipo `RescheduleCredit` (discriminated
+union `ready|none`) e a busca paralela em `Promise.allSettled` — sem
+crescer tempo total do dashboard.
+
+### Trade-offs explícitos
+
+- **Consumo via admin, não self-service.** O paciente não consegue
+  "usar o crédito" clicando num botão porque agendar uma consulta
+  envolve verificar slot da médica, enviar novo link, etc. — cenário
+  que o admin solo resolve sob medida. O banner é "sinal de direito",
+  o consumo é manual. Consistente com o modelo solo-operator (D-045).
+- **90 dias de validade.** Maior que o razoável pro caso comum (o
+  paciente idealmente reagenda em dias), menor que "eterno" (evita
+  ressuscitar caso de 2 anos atrás quando o contexto clínico mudou).
+- **Status `expired` computado on-read.** Não há cron ainda pra mover
+  fisicamente `active → expired`. Quando houver sinal operacional,
+  PR-073-B adiciona um cron diário que faz o sweep (reuso do índice
+  `ix_appointment_credits_expiry_sweep`).
+- **Banner não tenta "automatizar" o WhatsApp.** CTA leva ao
+  `https://wa.me/<num>?text=…` simples — mais robusto que "reagendar
+  direto na UI" dado que a médica atual é única (D-045) e o admin já
+  usa esse fluxo pros demais suportes.
+
+### Testes
+
+27 testes unitários novos em `appointment-credits.test.ts` (puros +
+IO com stubs leves) + 4 em `patient-quick-links.test.ts` pro
+`toRescheduleCredit`. Total: 1433 testes passando (baseline 1402,
+delta +31). `tsc --noEmit` limpo. `eslint` limpo.
+`public-pages-safety.test.ts` passou.
+
+### Fora de escopo (fica pra futuro)
+
+- **PR-073-B** — cron diário `expire_appointment_credits_sweep` que
+  move `active+expirado → expired` fisicamente. Sem isso o watchdog
+  computado dá conta, mas relatórios via SQL raw ficam menos limpos.
+- **PR-073-C** — UI dedicada no admin (`/admin/credits`) pra listar,
+  marcar consumed explicitamente sem passar pelo workflow de
+  appointment + botão `cancelCredit`. Hoje o admin faz via SQL editor
+  ou via UI de `/admin/reliability` + `markCreditConsumed` chamada
+  por uma action futura.
+- **Clawback retroativo já cobrava** via `/admin/refunds` (D-032); o
+  crédito é **benefício adicional** ao paciente, não substitui
+  refund. Se o paciente pagou e a médica faltou, ele tem direito a
+  ambos: refund do valor + crédito de reagendamento.
+
+---
+
 ## D-080 · Atalhos de auto-atendimento no dashboard do paciente + preços sob demanda em `/renovar` (PR-072 · findings 1.7 + 1.6) · 2026-04-20
 
 **Contexto.** Dois achados MÉDIOS da auditoria eram UX adjacentes que

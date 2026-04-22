@@ -31,6 +31,7 @@ import { whatsappSupportUrl } from "@/lib/contact";
 import {
   getPatientQuickLinks,
   type LatestPrescription,
+  type RescheduleCredit,
   type ShippingAddress,
 } from "@/lib/patient-quick-links";
 import { ActiveFulfillmentCard } from "./_ActiveFulfillmentCard";
@@ -88,6 +89,12 @@ export default async function PatientDashboard() {
         </h1>
         <p className="mt-2 text-ink-500">{formatWeekdayLongBR(now)}</p>
       </header>
+
+      {quickLinks.rescheduleCredit.kind === "ready" && (
+        <section className="mb-8">
+          <RescheduleCreditBanner credit={quickLinks.rescheduleCredit} />
+        </section>
+      )}
 
       {pendingOffers.length > 0 && (
         <section className="mb-8 space-y-3">
@@ -583,3 +590,66 @@ function ShippingQuickLink({ data }: { data: ShippingAddress }) {
   );
 }
 
+/**
+ * Banner destacado quando o paciente tem `appointment_credits` ativo —
+ * PR-073 · D-081 · finding 2.4. Aparece no topo do dashboard porque:
+ *
+ *   1. É a primeira coisa que o paciente precisa ver ao entrar (ele já
+ *      sabe que a médica não compareceu — queremos reduzir atrito
+ *      imediato pro reagendamento).
+ *   2. Admin solo marca `consumed` ao agendar; o banner some sozinho.
+ *
+ * Copy difere por razão. Nunca expõe ids internos ao paciente; a CTA
+ * WhatsApp tem mensagem pré-preenchida pra o admin reconhecer de cara.
+ */
+function RescheduleCreditBanner({
+  credit,
+}: {
+  credit: Extract<RescheduleCredit, { kind: "ready" }>;
+}) {
+  const isDoctorNoShow = credit.reason === "no_show_doctor";
+  const headline = isDoctorNoShow
+    ? "Sua próxima consulta é por nossa conta"
+    : "A consulta agendada não aconteceu";
+  const body = isDoctorNoShow
+    ? "A médica não pôde comparecer à sua última consulta. Deixamos um reagendamento gratuito disponível pra você — é só escolher o melhor horário falando com a nossa equipe."
+    : "A sala expirou sem atendimento, provavelmente por um problema técnico ou falta de link. Você tem direito a um reagendamento sem custo. Fale com nossa equipe pra escolher um novo horário.";
+  const whatsappMessage = isDoctorNoShow
+    ? "Olá! Recebi a mensagem de que minha médica não pôde comparecer. Gostaria de reagendar a consulta usando o crédito disponível."
+    : "Olá! Minha consulta não aconteceu (sala expirou). Gostaria de reagendar usando o crédito disponível.";
+  const urgencyLabel =
+    credit.daysRemaining >= 30
+      ? null
+      : credit.daysRemaining <= 0
+        ? "expira hoje"
+        : credit.daysRemaining === 1
+          ? "expira amanhã"
+          : `expira em ${credit.daysRemaining} dias`;
+
+  return (
+    <div className="rounded-2xl border border-terracotta-200 bg-terracotta-50 p-5 sm:p-6">
+      <p className="text-[0.72rem] uppercase tracking-[0.18em] text-terracotta-700 font-semibold">
+        Reagendamento disponível
+      </p>
+      <h2 className="mt-1 font-serif text-[1.35rem] text-ink-800">
+        {headline}
+      </h2>
+      <p className="mt-2 text-sm text-ink-700 max-w-2xl">{body}</p>
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <a
+          href={whatsappSupportUrl(whatsappMessage)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-2 rounded-full bg-terracotta-600 hover:bg-terracotta-700 text-white text-sm font-medium px-5 py-2.5"
+        >
+          Reagendar pelo WhatsApp →
+        </a>
+        {urgencyLabel && (
+          <span className="text-xs text-terracotta-700 font-medium">
+            · {urgencyLabel}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}

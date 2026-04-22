@@ -14,7 +14,9 @@ import {
   pickIssuedAt,
   REQUIRED_ADDRESS_FIELDS,
   toLatestPrescription,
+  toRescheduleCredit,
   toShippingAddress,
+  type AppointmentCreditLinkRow,
   type CustomerAddressRow,
 } from "./patient-quick-links";
 
@@ -363,5 +365,58 @@ describe("toShippingAddress", () => {
         "address_complement",
       ),
     ).toBe(false);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────
+// toRescheduleCredit (PR-073 · D-081)
+// ────────────────────────────────────────────────────────────────────
+
+describe("toRescheduleCredit", () => {
+  const NOW = new Date("2026-05-16T12:00:00.000Z");
+
+  it("null → kind=none", () => {
+    expect(toRescheduleCredit(null, NOW)).toEqual({ kind: "none" });
+  });
+
+  it("row válido com expires_at futuro → kind=ready com daysRemaining coerente", () => {
+    const row: AppointmentCreditLinkRow = {
+      id: "cccccccc-cccc-4ccc-cccc-cccccccccccc",
+      source_reason: "no_show_doctor",
+      created_at: "2026-05-10T00:00:00Z",
+      // +10 dias em relação a NOW
+      expires_at: "2026-05-26T12:00:00Z",
+    };
+    const out = toRescheduleCredit(row, NOW);
+    expect(out.kind).toBe("ready");
+    if (out.kind === "ready") {
+      expect(out.creditId).toBe(row.id);
+      expect(out.reason).toBe("no_show_doctor");
+      expect(out.daysRemaining).toBe(10);
+    }
+  });
+
+  it("expires_at no passado → kind=none (defensivo)", () => {
+    const row: AppointmentCreditLinkRow = {
+      id: "cccccccc-cccc-4ccc-cccc-cccccccccccc",
+      source_reason: "cancelled_by_admin_expired",
+      created_at: "2026-01-01T00:00:00Z",
+      expires_at: "2026-05-10T00:00:00Z",
+    };
+    expect(toRescheduleCredit(row, NOW)).toEqual({ kind: "none" });
+  });
+
+  it("preserva source_reason cancelled_by_admin_expired", () => {
+    const row: AppointmentCreditLinkRow = {
+      id: "cccccccc-cccc-4ccc-cccc-cccccccccccc",
+      source_reason: "cancelled_by_admin_expired",
+      created_at: "2026-05-10T00:00:00Z",
+      expires_at: "2026-07-01T00:00:00Z",
+    };
+    const out = toRescheduleCredit(row, NOW);
+    expect(out.kind).toBe("ready");
+    if (out.kind === "ready") {
+      expect(out.reason).toBe("cancelled_by_admin_expired");
+    }
   });
 });

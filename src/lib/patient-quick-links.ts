@@ -45,6 +45,10 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { logger } from "@/lib/logger";
+import {
+  daysUntilExpiry,
+  type AppointmentCreditReason,
+} from "@/lib/appointment-credits";
 
 const log = logger.with({ mod: "patient-quick-links" });
 
@@ -102,9 +106,37 @@ export type ShippingAddress =
   | { kind: "incomplete"; missingFields: readonly string[] }
   | { kind: "missing" };
 
+/**
+ * Estado do atalho "Reagendamento gratuito" (PR-073 · D-081).
+ *
+ *   - `ready`: paciente tem pelo menos um `appointment_credits` ativo
+ *     emitido por no-show da médica (ou sala expirada vazia).
+ *     Renderiza um banner destacado com CTA pra WhatsApp de suporte.
+ *   - `none`: nenhum crédito ativo. Esconde o bloco.
+ *
+ * Mostramos apenas o **mais antigo** — se houver mais de um, o admin
+ * resolve todos no mesmo contato (cenário raríssimo).
+ */
+export type RescheduleCredit =
+  | {
+      kind: "ready";
+      /** ID do crédito — usado pelo admin pra marcar consumed. */
+      creditId: string;
+      /** ISO de quando o crédito foi emitido (= no-show aplicado). */
+      issuedAt: string;
+      /** ISO do limite de uso do crédito. */
+      expiresAt: string;
+      /** Dias restantes (>=0). Pronto pra render "expira em N dias". */
+      daysRemaining: number;
+      /** Razão — determina a copy ("a médica faltou" vs "sala expirou"). */
+      reason: AppointmentCreditReason;
+    }
+  | { kind: "none" };
+
 export type PatientQuickLinks = {
   latestPrescription: LatestPrescription;
   shippingAddress: ShippingAddress;
+  rescheduleCredit: RescheduleCredit;
 };
 
 // ────────────────────────────────────────────────────────────────────
@@ -240,6 +272,40 @@ export function toShippingAddress(
 }
 
 // ────────────────────────────────────────────────────────────────────
+// Reschedule credit (PR-073 · D-081)
+// ────────────────────────────────────────────────────────────────────
+
+export type AppointmentCreditLinkRow = {
+  id: string;
+  source_reason: AppointmentCreditReason;
+  created_at: string;
+  expires_at: string;
+};
+
+/**
+ * Converte o row do DB em `RescheduleCredit`. Pura para teste.
+ * O filtro `status='active' AND expires_at > now` já é aplicado pela
+ * query — aqui só transformamos os campos e calculamos dias
+ * restantes (defensivo: se chegar row expirada, retorna `none`).
+ */
+export function toRescheduleCredit(
+  row: AppointmentCreditLinkRow | null,
+  now: Date = new Date(),
+): RescheduleCredit {
+  if (!row) return { kind: "none" };
+  const days = daysUntilExpiry(row, now);
+  if (days < 0) return { kind: "none" };
+  return {
+    kind: "ready",
+    creditId: row.id,
+    issuedAt: row.created_at,
+    expiresAt: row.expires_at,
+    daysRemaining: days,
+    reason: row.source_reason,
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────
 // IO canônica
 // ────────────────────────────────────────────────────────────────────
 
@@ -252,8 +318,10 @@ export function toShippingAddress(
 export async function getPatientQuickLinks(
   supabase: SupabaseClient,
   customerId: string,
+  now: Date = new Date(),
 ): Promise<PatientQuickLinks> {
-  const [prescriptionRes, customerRes] = await Promise.allSettled([
+  const nowIso = now.toISOString();
+  const [prescriptionRes, customerRes, creditRes] = await Promise.allSettled([
     supabase
       .from("appointments")
       .select(
@@ -271,6 +339,15 @@ export async function getPatientQuickLinks(
         "address_zipcode, address_street, address_number, address_complement, address_district, address_city, address_state",
       )
       .eq("id", customerId)
+      .maybeSingle(),
+    supabase
+      .from("appointment_credits")
+      .select("id, source_reason, created_at, expires_at")
+      .eq("customer_id", customerId)
+      .eq("status", "active")
+      .gt("expires_at", nowIso)
+      .order("created_at", { ascending: true })
+      .limit(1)
       .maybeSingle(),
   ]);
 
@@ -314,5 +391,26 @@ export async function getPatientQuickLinks(
     });
   }
 
-  return { latestPrescription, shippingAddress };
+  let rescheduleCredit: RescheduleCredit = { kind: "none" };
+  if (creditRes.status === "fulfilled") {
+    const { data, error } = creditRes.value;
+    if (error) {
+      log.error("load reschedule credit failed", {
+        customerId,
+        err: error.message,
+      });
+    } else {
+      rescheduleCredit = toRescheduleCredit(
+        (data as AppointmentCreditLinkRow | null) ?? null,
+        now,
+      );
+    }
+  } else {
+    log.error("load reschedule credit threw", {
+      customerId,
+      err: String(creditRes.reason),
+    });
+  }
+
+  return { latestPrescription, shippingAddress, rescheduleCredit };
 }

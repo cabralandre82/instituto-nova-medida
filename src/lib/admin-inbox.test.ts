@@ -178,18 +178,21 @@ describe("sortInboxItems", () => {
  *  11. appointments pending_payment (LEGACY watchdog · PR-071 · D-079)
  */
 function enqueueEmptyAll(supa: ReturnType<typeof createSupabaseMock>) {
+  // Ordem exata das queries em loadAdminInbox (Promise.all).
+  // Cada novo watchdog adiciona uma entrada; manter sincronizado.
   const tables = [
-    "fulfillments",
-    "fulfillments",
-    "fulfillments",
-    "fulfillments",
-    "fulfillments",
-    "appointments",
-    "appointment_notifications",
-    "appointments",
-    "doctors",
-    "lgpd_requests",
-    "appointments",
+    "fulfillments", // ffPaid
+    "fulfillments", // ffPharm
+    "fulfillments", // ffShipped
+    "fulfillments", // offerAcc
+    "fulfillments", // offerPay
+    "appointments", // refund
+    "appointment_notifications", // notifFailed
+    "appointments", // reconcile
+    "doctors", // doctorPending
+    "lgpd_requests", // lgpdPending
+    "appointments", // apptPendingPayment (PR-071)
+    "appointment_credits", // rescheduleCredit (PR-073)
   ];
   tables.forEach((t) =>
     supa.enqueue(t, { data: [], count: 0, error: null })

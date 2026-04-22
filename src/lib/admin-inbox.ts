@@ -58,6 +58,13 @@ export const SLA_HOURS = {
   reconcile_stuck: 2,
   /** lgpd_requests pendentes: Art. 19 §1º dá 15 dias corridos */
   lgpd_pending: 15 * 24,
+  /**
+   * PR-073 · D-081 · finding 2.4. Crédito de reagendamento ativo que
+   * ainda não foi consumido. SLA curto (2h) porque cada hora parado é
+   * um paciente sem atendimento — risco direto de churn e reclamação
+   * regulatória se o admin ignorar.
+   */
+  reschedule_credit_pending: 2,
 } as const;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -86,7 +93,15 @@ export type InboxCategory =
    * `pending_payment` — nenhum novo deveria existir no modelo D-044.
    * Alerta acima de 24h: provavelmente ghost do fluxo antigo ou bug.
    */
-  | "appointment_pending_payment_stale";
+  | "appointment_pending_payment_stale"
+  /**
+   * PR-073 · D-081 · finding 2.4. Paciente tem `appointment_credits`
+   * ATIVO emitido automaticamente por no-show da médica (ou sala
+   * expirada vazia). Admin precisa agendar a reconsulta (e chamar
+   * `markCreditConsumed`) em até 2h para não deixar o paciente
+   * desassistido.
+   */
+  | "reschedule_credit_pending";
 
 export type InboxItem = {
   /** Chave única estável (categoria). Usada como React key e id de notificação. */
@@ -261,6 +276,7 @@ export async function loadAdminInbox(
     doctorPending,
     lgpdPending,
     apptPendingPayment,
+    rescheduleCredit,
   ] = await Promise.all([
     countWithOldest(
       supabase
@@ -357,6 +373,19 @@ export async function loadAdminInbox(
         .from("appointments")
         .select("created_at", { count: "exact" })
         .eq("status", "pending_payment"),
+      "created_at",
+      now
+    ),
+    // PR-073 · D-081: watchdog de créditos de reagendamento ativos —
+    // emitidos automaticamente quando a médica falta. Admin tem 2h
+    // pra reagendar (e marcar consumed); acima disso é paciente
+    // desassistido em pleno.
+    countWithOldest(
+      supabase
+        .from("appointment_credits")
+        .select("created_at", { count: "exact" })
+        .eq("status", "active")
+        .gt("expires_at", now.toISOString()),
       "created_at",
       now
     ),
@@ -480,6 +509,16 @@ export async function loadAdminInbox(
       age: apptPendingPayment.oldestAgeHours,
       sla: SLA_HOURS.appointment_pending_payment_stale,
       href: "/admin/health",
+    },
+    {
+      category: "reschedule_credit_pending",
+      title: "Reagendar paciente (médica faltou)",
+      description:
+        "A médica não compareceu (ou a sala expirou vazia) e o paciente tem direito a nova consulta gratuita. Contate o paciente, crie o novo appointment e marque o crédito como consumido.",
+      count: rescheduleCredit.count,
+      age: rescheduleCredit.oldestAgeHours,
+      sla: SLA_HOURS.reschedule_credit_pending,
+      href: "/admin/reliability",
     },
   ];
 

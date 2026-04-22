@@ -944,12 +944,12 @@ _Fim da PARTE 2. Seguir pra PARTE 3 (Lentes 1+2 Paciente/Médica + 7+8 Produto/O
 - **Correção:** (a) adicionar filtro "Status" (agendada/em curso/finalizada/no_show) e "Paciente" (text search); (b) paginar por mês com navegação; (c) seção dedicada "A finalizar" que destaca consultas passadas ainda sem `finalized_at`.
 - **Observador:** médica, produto.
 
-### [2.4 🟡 MÉDIO] `no_show_doctor` registrado sem consequência automatizada
+### [2.4 🟡 MÉDIO → ✅ RESOLVIDO (PR-073 · D-081)] `no_show_doctor` registrado sem consequência automatizada
 
 - **Onde:** toda a lógica `appointments.status` + `earnings.ts`.
 - **Achado:** se status = `no_show_doctor`, o paciente simplesmente "não é atendido". Não vi automação que: (a) reagende o paciente automaticamente; (b) notifique admin + paciente + médica; (c) bloqueie earning da médica; (d) gere refund se paciente tiver pago. `earnings.ts` só cria earning em payment RECEIVED (P2 5.2) — mas se appointment ficar `no_show_doctor` após pagamento, earning foi criado e precisa de clawback manual.
 - **Risco:** pagamento retido na clínica sem atendimento, paciente irritado, ausência de trilha operacional.
-- **Correção:** (a) endpoint `/api/medico/appointments/[id]/no-show-doctor` que cria trigger automático: refund 100% ao paciente + clawback da médica + envio de WA de reagendamento; (b) SLA "no_show_doctor > 2h sem ação → alerta admin no inbox".
+- **Resolução (PR-073 · D-081):** Partes (b) notificação ao paciente, (c) clawback automático e (d) `refund_required=true` já estavam implementadas em `applyNoShowPolicy` + trilha granular em `doctor_reliability_events`. Faltava (a) reagendamento e o SLA. Criada tabela `appointment_credits` (migration `20260516`) como entidade formal do "direito a nova consulta gratuita", emitida automaticamente em `applyNoShowPolicy` para `no_show_doctor` e `cancelled_by_admin + reason='expired_no_one_joined'`. Idempotente via UNIQUE partial `source_appointment_id`, imutabilidade parcial via trigger, CHECK constraints garantindo coerência `status ⇔ snapshots`. Lib `src/lib/appointment-credits.ts` com `grantNoShowCredit` (fail-soft), `listActiveCreditsForCustomer`, `markCreditConsumed`, `cancelCredit`. Paciente vê banner `RescheduleCreditBanner` destacado no topo do `/paciente` com CTA WhatsApp pré-preenchido (copy diferenciada por razão). Admin vê nova categoria `reschedule_credit_pending` no inbox com SLA de 2h — endereça diretamente o item do finding "no_show_doctor > 2h sem ação → alerta admin". 27 testes unitários novos da lib + 4 do `patient-quick-links` · 1433 passing (baseline 1402 · delta +31). `tsc`+`eslint` limpos. Clawback e refund permanecem ortogonais ao crédito: se o paciente pagou e a médica faltou, ele recebe refund **e** ganha o crédito.
 - **Observador:** paciente, médica, admin, financeiro.
 
 ### [2.5 🟡 MÉDIO → ✅ RESOLVIDO (PR-065 · D-073)] Hint "Recebido neste mês" pode induzir erro com repasses em andamento
@@ -1138,7 +1138,7 @@ _Fim da PARTE 2. Seguir pra PARTE 3 (Lentes 1+2 Paciente/Médica + 7+8 Produto/O
 |---|---|---|
 | 🔴 CRÍTICO | **3** | 1.1, 2.1, 7.1, 8.2 |
 | 🟠 ALTO | **7** | 1.2, 1.3, 2.2, 2.3, 7.2, 7.3, 8.3, 8.4 |
-| 🟡 MÉDIO | **5** | 1.6, 1.7, 2.4, 7.4, 7.7, 8.1 (recalibrado), ~~1.4 (PR-071 · D-079)~~, ~~1.5 (PR-057 · D-068)~~, ~~2.5 (PR-065 · D-073)~~, ~~7.5 (PR-020, confirmado PR-065 · D-073)~~, ~~7.6 (PR-065 · D-073)~~, ~~8.5 (PR-057 · D-068)~~, ~~8.6 (PR-040 · D-059)~~, ~~8.7 (PR-058 · D-069)~~ |
+| 🟡 MÉDIO | **2** | 7.4, 7.7, 8.1 (recalibrado), ~~1.4 (PR-071 · D-079)~~, ~~1.5 (PR-057 · D-068)~~, ~~1.6 (PR-072 · D-080)~~, ~~1.7 (PR-072 · D-080)~~, ~~2.4 (PR-073 · D-081)~~, ~~2.5 (PR-065 · D-073)~~, ~~7.5 (PR-020, confirmado PR-065 · D-073)~~, ~~7.6 (PR-065 · D-073)~~, ~~8.5 (PR-057 · D-068)~~, ~~8.6 (PR-040 · D-059)~~, ~~8.7 (PR-058 · D-069)~~ |
 | 🟢 SEGURO | **4** | 1.8, 2.6, 7.8, 8.8 |
 
 **Observação:** [8.1] foi **recalibrado de CRÍTICO para MÉDIO** em 2026-04-20: os crons já estão corretos em UTC e documentados nos `route.ts`. O problema remanescente é preferência operacional (horários matinais), não bug técnico.

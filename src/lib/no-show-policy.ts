@@ -39,6 +39,10 @@ import {
   evaluateAndMaybeAutoPause,
   type ReliabilityEventKind,
 } from "@/lib/reliability";
+import {
+  grantNoShowCredit,
+  type AppointmentCreditReason,
+} from "@/lib/appointment-credits";
 import { logger } from "./logger";
 
 const log = logger.with({ mod: "no-show-policy" });
@@ -66,6 +70,13 @@ export type NoShowResult = {
   doctorAutoPaused?: boolean;
   /** D-036: eventos ativos na janela (após registrar este). */
   activeReliabilityEvents?: number;
+  /**
+   * D-081 · PR-073: id do `appointment_credits` criado (ou reencontrado
+   * idempotentemente) neste branch. Ausente pra `no_show_patient` e
+   * quando a emissão falhou — caso em que a política financeira já
+   * foi aplicada e o admin acompanha via reliability.
+   */
+  rescheduleCreditId?: string;
 };
 
 type ApplyInput = {
@@ -191,12 +202,18 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
       input.finalStatus
     );
     const notifId = await enqueueImmediate(row.id, "no_show_doctor");
+    const creditNoPayment = await emitRescheduleCredit(
+      row.customer_id,
+      row.id,
+      input.finalStatus,
+    );
 
     log.warn("sem payment_id — só reliability", {
       source,
       appointment_id: row.id,
       active_events: reliabilityNoPayment.activeEvents,
       auto_paused: reliabilityNoPayment.autoPaused,
+      reschedule_credit_id: creditNoPayment,
     });
 
     return {
@@ -207,6 +224,7 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
       refundRequired: false,
       doctorAutoPaused: reliabilityNoPayment.autoPaused,
       activeReliabilityEvents: reliabilityNoPayment.activeEvents ?? undefined,
+      rescheduleCreditId: creditNoPayment ?? undefined,
     };
   }
 
@@ -247,6 +265,11 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
   );
 
   const notifId = await enqueueImmediate(row.id, "no_show_doctor");
+  const creditId = await emitRescheduleCredit(
+    row.customer_id,
+    row.id,
+    input.finalStatus,
+  );
 
   log.info("applied", {
     source,
@@ -257,6 +280,7 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
     active_events: reliabilityRich.activeEvents,
     auto_paused: reliabilityRich.autoPaused,
     notification_enqueued: Boolean(notifId),
+    reschedule_credit_id: creditId,
   });
 
   return {
@@ -268,7 +292,46 @@ export async function applyNoShowPolicy(input: ApplyInput): Promise<NoShowResult
     refundRequired: true,
     doctorAutoPaused: reliabilityRich.autoPaused,
     activeReliabilityEvents: reliabilityRich.activeEvents ?? undefined,
+    rescheduleCreditId: creditId ?? undefined,
   };
+}
+
+/**
+ * D-081 · PR-073: emite (ou resgata idempotentemente) o
+ * `appointment_credits` que formaliza o direito do paciente a
+ * reagendamento gratuito. Fail-soft: qualquer erro vira log.warn e
+ * retorna null — a política financeira e a notificação já rodaram e
+ * não podem travar por um benefício que o admin pode emitir manualmente.
+ */
+async function emitRescheduleCredit(
+  customerId: string,
+  sourceAppointmentId: string,
+  finalStatus: NoShowFinalStatus,
+): Promise<string | null> {
+  if (finalStatus === "no_show_patient") return null; // defensivo
+  const reason: AppointmentCreditReason =
+    finalStatus === "cancelled_by_admin_expired"
+      ? "cancelled_by_admin_expired"
+      : "no_show_doctor";
+
+  const supabase = getSupabaseAdmin();
+  const result = await grantNoShowCredit({
+    supabase,
+    customerId,
+    sourceAppointmentId,
+    reason,
+  });
+  if (!result.ok) {
+    log.warn("grantNoShowCredit falhou", {
+      appointment_id: sourceAppointmentId,
+      customer_id: customerId,
+      reason,
+      error: result.error,
+      message: result.message,
+    });
+    return null;
+  }
+  return result.credit.id;
 }
 
 /**
