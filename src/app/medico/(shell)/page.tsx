@@ -21,6 +21,10 @@ import {
   formatTimeBR,
   formatWeekdayLongBR,
 } from "@/lib/datetime-br";
+import {
+  formatReceivedThisMonthHint,
+  formatPendingConfirmationNote,
+} from "@/lib/doctor-dashboard-copy";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -250,15 +254,24 @@ export default async function DoctorDashboard() {
         <Card
           label="Recebido neste mês"
           value={brl(d.receivedThisMonthCents)}
-          hint={
-            d.payoutsCount.pixSent + d.payoutsCount.approved > 0
-              ? `+ ${d.payoutsCount.pixSent + d.payoutsCount.approved} repasse${d.payoutsCount.pixSent + d.payoutsCount.approved === 1 ? "" : "s"} em andamento`
-              : "via PIX confirmados"
-          }
+          hint={formatReceivedThisMonthHint(d.payoutsCount)}
           href="/medico/repasses"
           tone="ink"
         />
       </section>
+
+      {formatPendingConfirmationNote(d.payoutsCount) && (
+        <p className="-mt-6 mb-10 text-[0.85rem] leading-relaxed text-ink-500">
+          {formatPendingConfirmationNote(d.payoutsCount)}{" "}
+          <Link
+            href="/medico/repasses"
+            className="text-sage-700 hover:text-sage-800 underline underline-offset-2"
+          >
+            Ver detalhes
+          </Link>
+          .
+        </p>
+      )}
 
       <section className="grid lg:grid-cols-2 gap-6">
         <div className="rounded-2xl bg-white border border-ink-100 p-6">

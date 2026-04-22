@@ -5,6 +5,62 @@
 
 ---
 
+## D-073 · Limpezas MÉDIAS · guard-rail CFM em páginas públicas + copy de repasse (PR-065 · findings 2.5, 7.5, 7.6) · 2026-04-20
+
+**Contexto.** Três achados MÉDIOS acumulados desde a auditoria, cada um com superfície pequena mas consequência binária séria:
+
+- **[7.5]** Rotas legadas `/checkout/[plano]` e `/agendar/[plano]` com `noindex` mas acessíveis por URL direta (links antigos em Google cache, email marketing, cards de visita). Cliente colando URL antiga poderia comprar medicação sem consulta, violando CFM 2.314/2022 Art. 7º. **Já resolvido pelo PR-020** via `isLegacyPurchaseEnabled()` em `src/lib/legacy-purchase-gate.ts` — redireciona pra home em produção com default `false`. Esta decisão só confirma o fechamento e registra a linha em `AUDIT-FINDINGS.md`.
+- **[7.6]** Copy de página pública mencionando mecanismo de ação de análogos de GLP-1 ("apetite e metabolismo") flerta com CFM 2.336/2023 Art. 19 (vedação de publicidade de medicamento ao leigo). Análise: a linha é tênue, mas o copy atual é legalmente defensável — ele menciona **classe terapêutica** ("análogos de GLP-1") e **só em contexto regulatório explícito** (citando Nota Técnica Anvisa 200/2025 em `/sobre` e `/termos`). O problema concreto é outro: **`/planos` renderizava `plan.medication` direto do banco**, que provavelmente contém nome comercial/princípio ativo ("Tirzepatida", "Semaglutida") — e `/planos` é acessível sem autenticação (tem só `noindex`).
+- **[2.5]** Card "Recebido neste mês" no dashboard da médica mostrava hint `"+ N repasses em andamento"`. O sinal `+` induzia soma mental: médica enxergava o valor do card + o número de repasses pendentes como "vai entrar na conta este mês". Mas `approved`/`pix_sent` podem só confirmar em M+1 (cron de confirmação roda no início do mês seguinte). Planejamento financeiro errado → frustração real da médica.
+
+**Alternativas consideradas.**
+
+1. Para **[7.6]**: (a) esconder `plan.medication` de `/planos`, (b) adicionar gate server-side em `/planos` inteira, (c) substituir `medication` no banco por genérico ("Medicamento manipulado") via migration. **Escolhida (a)**: cirúrgica, não quebra fluxos autenticados (o campo continua visível em `/paciente/oferta`, `/paciente/renovar`, `/medico/...`), não exige input do operador. Adicionamos **tripwire permanente** (smoke test) pra bloquear regressão.
+
+2. Para **[2.5]**: (a) trocar copy, (b) separar em dois cards distintos, (c) adicionar data prevista de confirmação baseada em `approved_at + SLA`. **Escolhida (a) + nota abaixo da grid**: menor risco de layout (não muda grid 4-col), comunica a incerteza sem calcular estimativas frágeis. (c) pode entrar depois se houver demanda.
+
+**Decisão.**
+
+1. **[7.6 · Content]** · `src/app/planos/page.tsx` não seleciona nem renderiza mais `plans.medication` (mantido no `select` apenas para rotas autenticadas). O nome do medicamento aparece **só depois** da consulta e do aceite do plano.
+2. **[7.6 · Tripwire]** · `src/app/public-pages-safety.test.ts` é um smoke test que lê o source de todas as páginas não-autenticadas (home, `/sobre`, `/planos`, `/termos`, `/privacidade`, checkout/agendar legados, logins) + `src/components/*.tsx` e falha o build se encontrar qualquer nome comercial (Ozempic, Mounjaro, Wegovy, Rybelsus, Saxenda, Victoza, Trulicity, Byetta, Bydureon) ou princípio ativo (Tirzepatida, Semaglutida, Liraglutida, Dulaglutida, Exenatida) em boundary de palavra case-insensitive. Rotas autenticadas (`/paciente/...`, `/medico/...`, `/admin/...`) estão fora do escopo — relação médico-paciente já estabelecida, CFM Art. 19 não se aplica.
+3. **[2.5 · Copy]** · `src/lib/doctor-dashboard-copy.ts` exporta `formatReceivedThisMonthHint()` e `formatPendingConfirmationNote()`. Hint novo: `"N repasse(s) aguardando confirmação"` (sem `+`, sem "em andamento" ambíguo). Nota abaixo da grid quando há pendências: `"Você tem N repasse(s) em andamento. Esse valor pode/podem cair neste mês ou no próximo, conforme confirmação bancária."`
+4. **[7.5]** · Nenhuma mudança de código nova — gate do PR-020 já protegia as rotas; a menção em `AUDIT-FINDINGS.md` referenciava `[1.1]` (que já foi fechado pelo PR-020). Finding marcado como RESOLVIDO retroativamente.
+
+**Invariantes.**
+
+- Qualquer PR futuro que adicione nome comercial/princípio ativo de fármaco a arquivo em `src/app/page.tsx`, `src/app/{sobre,planos,termos,privacidade}/page.tsx`, `src/app/checkout/**/page.tsx`, `src/app/agendar/**/page.tsx`, `src/app/{paciente,medico,admin}/login/page.tsx`, ou `src/components/**/*.tsx` **quebra o build** via `public-pages-safety.test.ts`.
+- A lista de termos proibidos é **deliberadamente pequena** (20 itens, escolhidos em 2026-04 como os mais relevantes no mercado brasileiro). Expansão futura (novos fármacos GLP-1, novos nomes comerciais) é edição trivial da constante `FORBIDDEN_TERMS`.
+- "GLP-1" **não** está na lista: é classe terapêutica (não nome comercial) e o uso atual em `/sobre`/`/termos` é contexto regulatório citando norma Anvisa.
+- `plans.medication` continua disponível nas rotas autenticadas. O sintoma concreto que motivou `[7.6]` (exposição pública) está fechado; uso legítimo (mostrar pra paciente pós-aceite) permanece intocado.
+- Hint do card "Recebido neste mês" nunca mais volta a conter `+` com número de repasses — teste unitário garante.
+
+**Implementação.**
+
+- `src/app/planos/page.tsx` · remove `medication` do `select()` do `loadPlans()` e do tipo `Plan` local; remove o `<p>{plan.medication}</p>` do card. Comentário explícito citando CFM 2.336/2023.
+- `src/app/public-pages-safety.test.ts` · smoke test com 3 casos: (1) varre arquivos e falha se achar termo proibido, (2) valida que o regex detecta os casos alvo, (3) valida que o regex não dispara em termos permitidos ("análogos de GLP-1", "GLP-1", "apetite e metabolismo", "obesidade e sobrepeso", "Nota Técnica Anvisa nº 200/2025", etc.). Fallback informativo com instruções em caso de falha.
+- `src/lib/doctor-dashboard-copy.ts` · lib pura com `countAwaitingConfirmation`, `formatReceivedThisMonthHint`, `formatPendingConfirmationNote`. Exclui `draft` de "aguardando" (status pre-approval).
+- `src/lib/doctor-dashboard-copy.test.ts` · 12 testes cobrindo todos os estados (0/1/2+ awaiting, draft-only, ausência do `+`, singular/plural, texto "neste mês ou no próximo").
+- `src/app/medico/(shell)/page.tsx` · card atualizado via helpers + parágrafo abaixo da grid quando há pendências.
+
+**Trade-offs.**
+
+- **Falsos positivos no tripwire**: baixíssimo. Os 20 termos são nomes próprios específicos; nenhum é palavra comum em português. Se futuramente um fármaco novo chegar ao mercado, o teste ainda vai proteger os já listados — o novo precisa entrar na lista manualmente. Isso é aceito: a alternativa (regex mais frouxa) gera ruído.
+- **Copy mais pessimista**: a nota sob a grid pode deixar a médica ansiosa sobre quando o dinheiro cai. Compensação: a realidade operacional é assim (depende de cron no M+1), e esconder a verdade gera frustração maior. Follow-up opcional (PR-065-B) pode mostrar data prevista por payout baseada em `approved_at + SLA`.
+- **`plans.medication` invisível em `/planos`**: operador perde um pequeno contexto comercial. Mitigação: o nome do medicamento é mostrado no fluxo autenticado (onde o paciente realmente aceita), e `/planos` hoje é majoritariamente informativo pós-consulta.
+
+**Consequências.**
+
+- **Finding [7.6]** ✅ RESOLVED. Exposição pública de medicamento nominal eliminada em produção; tripwire permanente contra regressão.
+- **Finding [2.5]** ✅ RESOLVED. Hint desambiguado; nota abaixo da grid explica incerteza de timing.
+- **Finding [7.5]** ✅ RESOLVED (retroativamente via PR-020; esta decisão só atualiza o documento).
+- **Total MÉDIOs fecha de 9 pra 6**: restam 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4-B (webhooks externos), 10.8 (soft delete CFM 20 anos), 17.5, 17.6, 17.7, 17.8 — note que vários MÉDIOs pendentes são operacionais (WhatsApp template compliance, documentação, etc.) ou dependem de janelas dedicadas.
+
+**Tests.** `public-pages-safety.test.ts` (3 novos) + `doctor-dashboard-copy.test.ts` (12 novos) + `legacy-purchase-gate.test.ts` (já existia, 7 casos) = 22 no total novo. Suíte global: 1218/1218 passing.
+
+**Próximos pendentes.** `[2.4]` (`no_show_doctor` automation — PR separado, envolve refund + clawback + WA), `[10.8]` (soft delete CFM 20 anos — PR-066 proposto), `[7.4]` (DPO email operacional — aguarda MX/SPF/DKIM + ticketing), `[7.7]` (funil de lead sem email — produto).
+
+---
+
 ## D-072 · Snapshot de identidade do ator em campos de audit (PR-064 · finding 10.6) · 2026-04-20
 
 **Contexto.** A plataforma tem ~15 colunas que referenciam `auth.users(id)` com `on delete set null`. Algumas dessas colunas são campos de audit com semântica imutável — "quem aprovou este payout?", "quem aceitou este plano?", "quem editou o endereço de entrega?". Especificamente:

@@ -23,7 +23,6 @@ type Plan = {
   slug: string;
   name: string;
   description: string | null;
-  medication: string | null;
   cycle_days: number;
   price_cents: number;
   price_pix_cents: number;
@@ -32,13 +31,19 @@ type Plan = {
   sort_order: number;
 };
 
+// PR-065 · D-073 · audit [7.6]
+// Deliberadamente NÃO expomos `plans.medication` na página pública.
+// Princípio ativo / nome comercial do medicamento manipulado só aparece
+// após consulta (rotas autenticadas `/paciente/oferta`, `/paciente/renovar`,
+// `/medico/...`). Renderizar nome de medicamento sem autenticação = risco
+// CFM 2.336/2023 Art. 19 (vedação de publicidade de medicamento ao leigo).
 async function loadPlans(): Promise<Plan[]> {
   try {
     const sb = getSupabaseAnon();
     const { data, error } = await sb
       .from("plans")
       .select(
-        "id, slug, name, description, medication, cycle_days, price_cents, price_pix_cents, features, highlight, sort_order"
+        "id, slug, name, description, cycle_days, price_cents, price_pix_cents, features, highlight, sort_order"
       )
       .eq("active", true)
       .order("sort_order", { ascending: true });
@@ -321,16 +326,6 @@ function PlanCard({ plan }: { plan: Plan }) {
         >
           {plan.name}
         </h3>
-        {plan.medication && (
-          <p
-            className={
-              "mt-1 text-[0.85rem] " +
-              (isHighlight ? "text-cream-100/70" : "text-ink-400")
-            }
-          >
-            {plan.medication}
-          </p>
-        )}
         {plan.description && (
           <p
             className={

@@ -947,12 +947,11 @@ _Fim da PARTE 2. Seguir pra PARTE 3 (Lentes 1+2 Paciente/Médica + 7+8 Produto/O
 - **Correção:** (a) endpoint `/api/medico/appointments/[id]/no-show-doctor` que cria trigger automático: refund 100% ao paciente + clawback da médica + envio de WA de reagendamento; (b) SLA "no_show_doctor > 2h sem ação → alerta admin no inbox".
 - **Observador:** paciente, médica, admin, financeiro.
 
-### [2.5 🟡 MÉDIO] Hint "Recebido neste mês" pode induzir erro com repasses em andamento
+### [2.5 🟡 MÉDIO → ✅ RESOLVIDO (PR-065 · D-073)] Hint "Recebido neste mês" pode induzir erro com repasses em andamento
 
-- **Onde:** `src/app/medico/(shell)/page.tsx:253-263`.
+- **Onde:** `src/app/medico/(shell)/page.tsx`.
 - **Achado:** card mostra `Recebido neste mês: R$ X` e abaixo `+ N repasses em andamento`. Médica pode somar mentalmente e acreditar que recebe no mês corrente. Mas `approved` e `pix_sent` podem virar `confirmed` no próximo mês (cron roda dia 1). O `+` induz soma mental errada.
-- **Risco:** médica faz planejamento financeiro baseado em número que não vai acontecer em M+0.
-- **Correção:** separar dois cards ou adicionar texto "pode cair neste ou no próximo mês, conforme confirmação bancária". Melhor: mostrar data prevista de confirmação baseada no `approved_at + SLA`.
+- **Resolução (PR-065 · D-073):** Lib pura `src/lib/doctor-dashboard-copy.ts` com helpers `countAwaitingConfirmation`, `formatReceivedThisMonthHint`, `formatPendingConfirmationNote`. Hint novo: `"N repasse(s) aguardando confirmação"` (sem `+`, sem "em andamento" ambíguo). Nota abaixo da grid quando há pendências: `"Você tem N repasse(s) em andamento. Esse valor pode/podem cair neste mês ou no próximo, conforme confirmação bancária."` com link pra `/medico/repasses`. `draft` (pre-approval do admin) explicitamente excluído de "awaiting" — só `approved + pix_sent` contam. **12 testes novos garantem que `+` nunca volta e o plural/singular bate.** Follow-up opcional (PR-065-B) pode calcular data prevista baseada em `approved_at + SLA` bancário.
 - **Observador:** médica.
 
 ### [2.6 🟢 SEGURO] Pontos positivos do fluxo da médica
@@ -1000,18 +999,22 @@ _Fim da PARTE 2. Seguir pra PARTE 3 (Lentes 1+2 Paciente/Médica + 7+8 Produto/O
 - **Correção:** (a) validar MX/SPF/DKIM; (b) integrar com ticketing simples (Email → Notion/GitHub issue); (c) SLA de resposta ≤ 15 dias documentado em `/privacidade`; (d) smoke test DNS `dig MX institutonovamedida.com.br`.
 - **Observador:** DPO, ANPD, paciente.
 
-### [7.5 🟡 MÉDIO] Rotas antigas (`/checkout/[plano]`, `/agendar/[plano]`) vivas com `noindex` mas acessíveis por URL direta
+### [7.5 🟡 MÉDIO → ✅ RESOLVIDO (PR-020 · retroativamente confirmado PR-065 · D-073)] Rotas antigas (`/checkout/[plano]`, `/agendar/[plano]`) vivas com `noindex` mas acessíveis por URL direta
 
 - **Onde:** mesmo que `[1.1]`. Risco de produto + SEO.
 - **Achado:** o `noindex` cobre indexação futura, mas não limpa links existentes em Google cache, redes sociais, email marketing antigo, cartões de visita digitais. Paciente colando URL antiga paga direto sem consulta.
-- **Correção:** ver `[1.1]` (gate server-side).
+- **Resolução:** PR-020 (D-044) implementou `src/lib/legacy-purchase-gate.ts::isLegacyPurchaseEnabled()` com default `false` em produção. Ambas `/checkout/[plano]` e `/agendar/[plano]` fazem `redirect("/?aviso=consulta_primeiro")` server-side antes de qualquer render. Teste de contrato em `legacy-purchase-gate.test.ts` (7 casos) garante que override explícito é reconhecido só via `"true"`/`"false"` literal (valores ambíguos como `"yes"`, `"1"`, `"on"` caem no default `false` por strict parsing). PR-065 só atualiza esse documento; o código já está blindado desde o PR-020.
 
-### [7.6 🟡 MÉDIO] Landing usa expressões que podem cair em proibição CFM de divulgação de medicamento a leigo
+### [7.6 🟡 MÉDIO → ✅ RESOLVIDO (PR-065 · D-073)] Landing usa expressões que podem cair em proibição CFM de divulgação de medicamento a leigo
 
-- **Onde:** `src/components/Hero.tsx:53-60` ("formas mais modernas de tratar o emagrecimento — atuando direto no apetite e no metabolismo"), `src/components/Shift.tsx`, `src/components/Access.tsx`.
-- **Achado:** copy genérica de **mecanismo de ação de análogos de GLP-1** (apetite/metabolismo) sem nomear medicamento. CFM Res. 2.336/2023 Art. 19 veda publicidade de medicamento direta ao leigo. A linha é tênue: se páginas públicas têm palavras "Tirzepatida/Semaglutida/Monjaro/Ozempic/Mounjaro" renderizadas **sem autenticação**, é infração.
-- **Correção:** (a) garantir que nenhum medicamento nominalmente aparece nas páginas `/`, `/sobre`, `/planos`, `/termos`, `/privacidade` (verificar com `rg`); (b) manter copy focada em "tratamento clínico do obesidade/sobrepeso com acompanhamento"; (c) passar revisão de marketing médico (profissional especializado em regulatório CFM).
-- **Observador:** CFM, marketing, advogado.
+- **Onde:** `src/components/Hero.tsx`, `src/app/planos/page.tsx` (exibia `plans.medication` — potencialmente "Tirzepatida"/"Semaglutida"), `src/app/sobre/page.tsx`, `src/app/termos/page.tsx`.
+- **Achado:** copy genérica de **mecanismo de ação de análogos de GLP-1** (apetite/metabolismo) sem nomear medicamento. CFM Res. 2.336/2023 Art. 19 veda publicidade de medicamento direta ao leigo. Risco concreto identificado no PR-065: `/planos` (acessível por URL direta, só `noindex`) renderizava `plan.medication` vindo do DB — campo que contém nome do medicamento prescrito.
+- **Resolução (PR-065 · D-073):**
+  - Removido `plan.medication` do `select()` e do render em `src/app/planos/page.tsx`. O campo continua disponível nas rotas autenticadas (`/paciente/oferta`, `/paciente/renovar`, `/medico/...`).
+  - Tripwire permanente: `src/app/public-pages-safety.test.ts` varre fontes de TODAS as páginas não-autenticadas + `src/components/*.tsx` e falha o build se encontrar qualquer nome comercial (Ozempic, Mounjaro, Wegovy, Rybelsus, Saxenda, Victoza, Trulicity, Byetta, Bydureon) ou princípio ativo (Tirzepatida, Semaglutida, Liraglutida, Dulaglutida, Exenatida) em boundary de palavra case-insensitive.
+  - Copy existente em `/sobre` e `/termos` ("análogos de GLP-1") mantido: é classe terapêutica (não nome comercial) em contexto regulatório explícito citando Nota Técnica Anvisa 200/2025 — legalmente defensável.
+  - `Hero.tsx`/`Shift.tsx`/`Access.tsx` revisados — nenhum nome nominal presente, mecanismo de ação genérico continua (não é infração, é comunicação clínica legítima).
+- **Follow-up opcional:** revisão humana por profissional em regulatório CFM. Tripwire cobre a regressão técnica; nuance de copy segue sendo responsabilidade de marketing médico.
 
 ### [7.7 🟡 MÉDIO] Funil de lead não captura email — só nome + telefone + respostas
 
@@ -1130,7 +1133,7 @@ _Fim da PARTE 2. Seguir pra PARTE 3 (Lentes 1+2 Paciente/Médica + 7+8 Produto/O
 |---|---|---|
 | 🔴 CRÍTICO | **3** | 1.1, 2.1, 7.1, 8.2 |
 | 🟠 ALTO | **7** | 1.2, 1.3, 2.2, 2.3, 7.2, 7.3, 8.3, 8.4 |
-| 🟡 MÉDIO | **9** | 1.4, 1.6, 1.7, 2.4, 2.5, 7.4, 7.5, 7.6, 7.7, 8.1 (recalibrado), ~~1.5 (PR-057 · D-068)~~, ~~8.5 (PR-057 · D-068)~~, ~~8.6 (PR-040 · D-059)~~, ~~8.7 (PR-058 · D-069)~~ |
+| 🟡 MÉDIO | **6** | 1.4, 1.6, 1.7, 2.4, 7.4, 7.7, 8.1 (recalibrado), ~~1.5 (PR-057 · D-068)~~, ~~2.5 (PR-065 · D-073)~~, ~~7.5 (PR-020, confirmado PR-065 · D-073)~~, ~~7.6 (PR-065 · D-073)~~, ~~8.5 (PR-057 · D-068)~~, ~~8.6 (PR-040 · D-059)~~, ~~8.7 (PR-058 · D-069)~~ |
 | 🟢 SEGURO | **4** | 1.8, 2.6, 7.8, 8.8 |
 
 **Observação:** [8.1] foi **recalibrado de CRÍTICO para MÉDIO** em 2026-04-20: os crons já estão corretos em UTC e documentados nos `route.ts`. O problema remanescente é preferência operacional (horários matinais), não bug técnico.
