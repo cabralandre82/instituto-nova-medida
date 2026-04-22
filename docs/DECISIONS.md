@@ -5,6 +5,68 @@
 
 ---
 
+## D-074 · Soft delete para prontuário e audit financeiro (PR-066 · finding 10.8) · 2026-04-20
+
+**Contexto.** `DELETE FROM appointments WHERE ...` em Postgres é destrutivo e irreversível a menos que exista backup Point-in-Time dedicado. CFM Res. 1.821/2007 Art. 8º exige retenção do prontuário por 20 anos; um `DELETE` acidental (admin solo pelo SQL Studio, migration com `TRUNCATE`, cron buggy, hotfix mal pensado) perde registros clínicos de forma muitas vezes impossível de recuperar sem destruir outros dados válidos do backup. O código atual não tem nenhum `.delete()` em tabelas clínicas (confirmado via grep de toda `src/` em 2026-04-20), então o vetor de risco é 100% operacional e acidental.
+
+Tabelas já protegidas (fora do escopo): `plan_acceptances` (trigger `trg_plan_acceptances_immutable`, D-049), `admin_audit_log`/`patient_access_log`/`document_access_log`/`checkout_consents`/`appointment_state_transition_log` (triggers imutáveis). Essas bloqueiam tanto UPDATE quanto DELETE — soft delete não se aplica porque o registro **nunca** deve mudar, nem mesmo pra marcar como "morto".
+
+**Alternativas consideradas.**
+
+1. `REVOKE DELETE` no role `authenticated`/`anon`. Bloqueia muito, mas `service_role` (que o app usa via `getSupabaseAdmin()`) bypassa; o vetor "admin no SQL Studio" continua aberto.
+2. Backup Point-in-Time + monitoração. Alto custo de SRE; não impede o erro acontecer, só dá caminho de volta.
+3. **Triggers `BEFORE DELETE` que levantam exceção** (Postgres-native, semântica clara). Admin no SQL Studio vê a mensagem exata e decide se quer fazer o bypass explícito. Escolhida.
+4. Colunas `deleted_at/deleted_by/deleted_reason` com pattern de soft delete. Orthogonal ao trigger — permite remover row da superfície lógica (queries do app filtram `deleted_at IS NULL`) sem perder o registro. Escolhida em conjunto com (3).
+
+**Decisão.**
+
+1. **Escopo (onda A)**: `appointments`, `fulfillments`, `doctor_earnings`, `doctor_payouts`. São as 4 tabelas que compõem o prontuário clínico-financeiro central (consulta → tratamento → earning → payout). Qualquer uma delas perdida gera inconsistência com as demais (ex: payout sem earning deletado = auditoria confusa).
+2. **Colunas novas** (nullable, default null): `deleted_at timestamptz`, `deleted_by uuid references auth.users(id) on delete set null`, `deleted_by_email text` (snapshot padrão D-072), `deleted_reason text`.
+3. **Trigger `prevent_hard_delete_<table>` BEFORE DELETE** em cada tabela: levanta `raise exception 'PR-066 · D-074 · hard delete proibido em <tabela>. Use soft delete...'` a menos que a GUC de sessão `app.soft_delete.allow_hard_delete='true'` esteja setada. Bypass documentado apenas para operações DBA excepcionais via `psql` (`begin; set local app.soft_delete.allow_hard_delete='true'; delete ...; commit;`) — nunca pela aplicação. Helper `soft_delete_hard_delete_allowed()` é `stable` e lê `current_setting(..., true)` (missing_ok).
+4. **Trigger `enforce_soft_delete_fields` BEFORE UPDATE OF deleted_at, deleted_reason** em cada tabela: quando `deleted_at` transita de null → not null, exige `deleted_reason` não vazio (`length(trim()) > 0`). Evita soft delete sem motivo (log incompleto).
+5. **CHECK constraint `*_soft_delete_reason_chk`**: `deleted_at IS NULL OR (deleted_reason IS NOT NULL AND length(trim(deleted_reason)) > 0)`. Criada com `NOT VALID` + `VALIDATE CONSTRAINT` imediato (todas rows atuais têm `deleted_at IS NULL`, então passa). Cobre caso em que a trigger for bypassada por `ALTER TABLE DISABLE TRIGGER` pontual.
+6. **Índices parciais `idx_<table>_active_*` WHERE deleted_at IS NULL**: cobrem os padrões de acesso mais frequentes (por `doctor_id+scheduled_at`, `customer_id+scheduled_at`, `doctor_id+status`, `customer_id+created_at`, etc.). Mantêm performance mesmo com histórico acumulado de soft deletes.
+7. **Sem views `*_active`**: call-sites atuais não precisam mudar porque `deleted_at IS NULL` é universal hoje. Quando o soft delete for usado concretamente, o call-site relevante adiciona `.is("deleted_at", null)` explicitamente — mais explícito, menos mágica, menor pegada. Helper `addActiveFilter(q)` em `src/lib/soft-delete.ts` deixa a chamada one-liner.
+8. **Lib canônica** `src/lib/soft-delete.ts`: exporta `softDelete(supabase, { table, id, reason, actor, now? })` com validação defensiva (reason mínimo 4 chars, sanitiza control chars, trunca em 500 chars), idempotência (já soft-deletado → `{ ok: true, alreadyDeleted: true }`), race handling (`UPDATE ... WHERE deleted_at IS NULL ... RETURNING` + re-read), normalização do actor via `normalizeActorSnapshot` (D-072). Whitelist de tabelas (`SOFT_DELETE_TABLES`) previne uso acidental em tabela não-protegida. `describeSoftDeleteProtection(table)` documenta os objetos SQL associados (triggers, constraint, índices parciais) pra introspecção em testes/debug.
+9. **Sem `logAdminAction` aqui**: a lib foca só na mecânica de escrita segura. O call-site que dispara o soft delete (futuramente: rota admin) já tem a responsabilidade separada de logar via `admin_audit_log`.
+
+**Invariantes.**
+
+- `DELETE FROM {appointments|fulfillments|doctor_earnings|doctor_payouts}` levanta exceção, sempre, a menos que a sessão tenha `SET LOCAL app.soft_delete.allow_hard_delete='true'`.
+- `UPDATE` que seta `deleted_at` com `deleted_reason` null/vazio levanta exceção.
+- Row persistida com `deleted_at IS NOT NULL` e `deleted_reason` vazio é fisicamente impossível (CHECK constraint).
+- `softDelete()` da lib é idempotente: chamar duas vezes no mesmo id retorna `alreadyDeleted: true` na segunda vez; não sobrescreve `deleted_at`.
+- `softDelete()` respeita race condition: se dois callers disparam simultaneamente, só um grava; o outro recebe `alreadyDeleted: true` após re-leitura (`UPDATE ... WHERE deleted_at IS NULL` não retorna row).
+- `TRUNCATE` é operação de super-user; não capturada por triggers. Mitigação: `service_role` do Supabase não tem `TRUNCATE` por padrão; só `postgres` (owner) consegue. É aceitável — super-user privilege é ambiente de emergência.
+- Whitelist `SOFT_DELETE_TABLES` no TS espelha exatamente as tabelas cobertas pela migration. Adicionar outra tabela requer migration nova **e** edição do array — dupla barreira contra uso errado.
+
+**Implementação.**
+
+- `supabase/migrations/20260511000000_soft_delete_clinical_tables.sql` (~340 linhas): 4 × 4 colunas + 4 triggers `prevent_hard_delete_*` + 4 triggers `enforce_soft_delete_*` (compartilhando a função genérica `enforce_soft_delete_fields`) + 8 índices parciais + 4 CHECK constraints + helper `soft_delete_hard_delete_allowed()`. Idempotente (`if not exists`, `drop trigger if exists`).
+- `src/lib/soft-delete.ts` (~260 linhas): `softDelete()`, `addActiveFilter()`, `describeSoftDeleteProtection()`, constantes `SOFT_DELETE_TABLES`, tipos `SoftDeleteTable`, `SoftDeleteInput`, `SoftDeleteResult`, `SoftDeleteError` (`invalid_table`/`invalid_id`/`invalid_reason`/`not_found`/`db_error`). Zero deps externas (usa `actor-snapshot.ts` + `logger.ts` do projeto).
+- `src/lib/soft-delete.test.ts` (~270 linhas, 18 testes): validação de input (table fora do escopo, id vazio/curto, reason curto/só espaço, reason com control chars, reason longo truncado); idempotência (já deletado, not_found, db_error no select); integração com actor snapshot (trim, lowercase, kind=system força userId=null, actor vazio); race handling (UPDATE sem row → re-read ok; UPDATE com error → db_error); whitelist de tabelas (parametrização com `it.each(SOFT_DELETE_TABLES)`); `describeSoftDeleteProtection` espelha os nomes SQL.
+- Nenhum call-site do app alterado: grep confirma que nenhum `.delete()` hoje atinge as 4 tabelas do escopo. Quando alguém for deletar (admin UI futura), chamar `softDelete()` da lib.
+
+**Trade-offs.**
+
+- **Call-sites não filtram `deleted_at IS NULL` hoje**: em produção, `deleted_at` é sempre NULL (nenhuma UI de soft delete existe ainda), então queries devolvem o estado correto por acaso. Quando a primeira UI de soft delete for implementada, o PR responsável vai precisar varrer SELECTs relevantes e adicionar `.is("deleted_at", null)` (ou `addActiveFilter()`). Alternativa rejeitada: RLS policy auto-filtrando — afeta `service_role` de formas difíceis de prever, e criar view paralela gera duplicação de 4 entidades.
+- **Bypass GUC por sessão é soft**: um admin determinado pode fazer o bypass. Esse é o desenho — a intenção é *evitar acidente*, não construir sandbox adversarial contra o DBA. Evento bypassado deixa `notice` no log de Postgres (observável).
+- **`doctor_earnings` e `doctor_payouts` soft-delete**: essas tabelas têm triggers financeiros de INSERT que ligam `earnings → payouts`. Soft delete não quebra isso (row continua existindo, só com `deleted_at`), mas callers que geram payout precisariam filtrar `deleted_at IS NULL` nos earnings agregados — isso é trabalho do PR-066-B quando o soft delete for exercitado de verdade.
+- **Onda B explicitamente diferida**: `customers` e `leads` têm política de anonimização LGPD própria (D-051, D-052), soft delete seria redundante. `doctor_billing_documents`, `doctor_payment_methods`, `doctor_availability` têm `.delete()` legítimo no app (não são prontuário, são config operacional). Expandir o escopo agora adicionaria complexidade sem endereçar risco regulatório novo.
+
+**Consequências.**
+
+- **Finding [10.8]** ✅ RESOLVIDO. `DELETE` acidental nas 4 tabelas clínicas é fisicamente bloqueado. Histórico de prontuário passa a ser recuperável via `deleted_at` mesmo se alguém tentar deletar explicitamente.
+- Primeiro uso real de soft delete em produção será por uma UI administrativa futura — o mecanismo está pronto, aguardando demanda.
+- Backlog futuro **PR-066-B**: quando primeira UI de soft delete entrar, varrer call-sites relevantes pra adicionar `addActiveFilter()` onde a operação quiser só rows ativas. Antes disso não há trabalho reativo.
+- Backlog futuro **PR-066-C**: dashboard `/admin/soft-deleted` pra que o operador veja o que foi soft-deletado e por quê. Só faz sentido quando houver UI de soft delete; por ora, consulta `SELECT ... WHERE deleted_at IS NOT NULL` ad-hoc no SQL Studio já serve.
+
+**Tests.** 18 novos no `src/lib/soft-delete.test.ts`. Suíte global: **1218 → 1236**. tsc 0 erros, eslint 0 warnings.
+
+**Próximos pendentes.** `[2.4]` (automação `no_show_doctor`), `[7.4]` (DPO email operacional — aguarda MX/SPF/DKIM), `[7.7]` (funil lead sem email — produto), `[10.6-B]` (onda B snapshot ator), `[11.2-21.3]` (MÉDIOs das PARTES 4+5).
+
+---
+
 ## D-073 · Limpezas MÉDIAS · guard-rail CFM em páginas públicas + copy de repasse (PR-065 · findings 2.5, 7.5, 7.6) · 2026-04-20
 
 **Contexto.** Três achados MÉDIOS acumulados desde a auditoria, cada um com superfície pequena mas consequência binária séria:

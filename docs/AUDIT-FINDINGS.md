@@ -1391,12 +1391,21 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 - **Verificação (2026-04-20):** `supabase/migrations/20260419030000_asaas_payments.sql:117` declara `cpf text not null unique check (length(regexp_replace(cpf, '[^0-9]', '', 'g')) = 11)`. Postgres impede inserção duplicada via constraint UNIQUE; `INSERT` concorrente em race-condition resulta em erro `23505 unique_violation`, tratado em `src/app/api/checkout/route.ts` e `src/app/api/agendar/reserve/route.ts` que sempre fazem lookup `select … from customers where cpf=$1` antes de inserir.
 - **Defesa adicional:** o D-065 (PR-054) endurece o caminho de UPDATE quando o customer já tem `user_id` — atacante não consegue sobrescrever PII de um CPF cadastrado pra "tomar" o cadastro.
 
-### [10.8 🟡 MÉDIO] Nenhum soft delete — `DELETE FROM appointments` destrói histórico
+### [10.8 🟡 MÉDIO] Nenhum soft delete — `DELETE FROM appointments` destrói histórico ✅ RESOLVIDO (Onda A, PR-066)
 
 - **Onde:** todas tabelas.
 - **Achado:** Postgres `DELETE` é destrutivo. CFM exige retenção 20 anos do prontuário (Res. 1.821/2007 Art. 8º). Um `DELETE` acidental (admin solo, migration com `TRUNCATE`, cron buggy) perde registros imutáveis.
 - **Correção:** (a) adicionar `deleted_at timestamptz` em tabelas CFM-críticas (`appointments`, `prescriptions` se surgir, `plan_acceptances` — já imutável, ok); (b) policy RLS filtrando `deleted_at IS NULL` em queries normais; (c) backup contínuo Supabase com retention ≥ 30 dias; (d) `FORBID DELETE` trigger nas tabelas médicas.
 - **Observador:** CFM, paciente, advogado.
+- **Resolução (PR-066, D-074):** migration `20260511000000_soft_delete_clinical_tables.sql` adicionou:
+  - Colunas `deleted_at/deleted_by/deleted_by_email/deleted_reason` nas 4 tabelas CFM-core: `appointments`, `fulfillments`, `doctor_earnings`, `doctor_payouts`.
+  - Trigger `prevent_hard_delete_<table>` em `BEFORE DELETE` que levanta `raise exception` a menos que a GUC `app.soft_delete.allow_hard_delete='true'` esteja setada na sessão (bypass explícito de DBA via `psql`, nunca pelo app).
+  - Trigger `enforce_soft_delete_fields` em `BEFORE UPDATE OF deleted_at, deleted_reason` que exige `deleted_reason` não vazio quando `deleted_at` transita null → not null.
+  - CHECK constraint `*_soft_delete_reason_chk` garantindo a invariante em disco (além do trigger).
+  - 8 índices parciais `WHERE deleted_at IS NULL` cobrindo padrões de acesso frequentes.
+  - Lib `src/lib/soft-delete.ts` com `softDelete()` (validação, idempotência, race handling, integração D-072) + `addActiveFilter()` + `describeSoftDeleteProtection()`. 18 testes.
+  - Tabelas já imutáveis (`plan_acceptances`, `admin_audit_log`, `patient_access_log`, `document_access_log`, `checkout_consents`, `appointment_state_transition_log`) continuam cobertas pelas respectivas triggers D-048/D-049/D-051/D-064/D-066/D-070.
+  - Ver `docs/DECISIONS.md#D-074`.
 
 ### [10.9 🟢 SEGURO] Boa infra de dados já presente
 
@@ -1493,7 +1502,7 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 |---|---|---|
 | 🔴 CRÍTICO | **3** | 10.1, 17.1 (+ uma menção forte a 9.1 dependendo do horizonte; **9.1 resolvido em Ondas 2C+2D+2E**) |
 | 🟠 ALTO | **5** | ~~9.1~~, ~~9.2~~, ~~22.1~~, ~~22.2~~, 10.2, 10.3, 17.2, 17.3, 17.4 (conta: 9 original; 4 resolvidos) |
-| 🟡 MÉDIO | **9** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4 (parcial PR-061 · D-071; escopo app-gerado fechado, webhooks externos → 10.4-B), ~~10.5 (PR-059 · D-070)~~, ~~10.6 (onda A PR-064 · D-072; onda B → 10.6-B)~~, ~~10.7 (já tinha UNIQUE)~~, 10.8, 17.5, 17.6, 17.7, 17.8 |
+| 🟡 MÉDIO | **9** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4 (parcial PR-061 · D-071; escopo app-gerado fechado, webhooks externos → 10.4-B), ~~10.5 (PR-059 · D-070)~~, ~~10.6 (onda A PR-064 · D-072; onda B → 10.6-B)~~, ~~10.7 (já tinha UNIQUE)~~, ~~10.8 (PR-066 · D-074)~~, 17.5, 17.6, 17.7, 17.8 |
 | 🟢 SEGURO | **4** | 9.7, 22.7, 10.9, 17.9 |
 
 **Interpretação:** toda família 9.x (prompt-injection + AI-agents) está efetivamente fechada pra superfície atual. Quando LLM externo for plugado, seguir o check-list de 9 itens em `AGENTS.md` — as primitivas (`prompt-envelope`, `prompt-redact`, `customer-display`) já estão prontas. Backlog atual migra 100% pra findings não-AI (observabilidade, financeiro, LGPD).
