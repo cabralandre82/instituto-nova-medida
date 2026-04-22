@@ -1505,11 +1505,27 @@ original era tabela física — rejeitada pra não duplicar dados, já que
   - 49 testes novos (suite 1236 → 1285).
 - **Observador:** paciente, admin, suporte.
 
-### [17.8 🟡 MÉDIO] Magic-link emails enviados sem log aplicativo
+### ~~[17.8 🟡 MÉDIO]~~ **✅ RESOLVED (PR-070 · D-078 · 2026-04-20)** Magic-link emails enviados sem log aplicativo
 
-- **Onde:** `/api/auth/magic-link`, `/api/paciente/auth/magic-link`.
-- **Achado:** Supabase Auth envia email, não retorna confirmação de entrega. Se falhou (SPF/DKIM, domínio bloqueado Yahoo), admin só descobre via reclamação.
-- **Correção:** (a) trocar para provider SMTP próprio com webhook de entrega (Resend/Postmark) configurado no Supabase Auth; (b) tabela `auth_email_log (to, kind, sent_at, delivered_at, failed_reason)` — Resend manda webhook de bounce/complaint que alimenta.
+- **Onde:** `/api/auth/magic-link`, `/api/paciente/auth/magic-link`, `/api/auth/callback`.
+- **Achado original:** Supabase Auth envia email, não retorna confirmação de entrega. Se falhou (SPF/DKIM, domínio bloqueado Yahoo), admin só descobre via reclamação. Nem temos log aplicativo de "quem pediu link, quando, por qual IP, qual foi o estado" — triagem impossível, forense ausente, detecção de abuso cega.
+- **Resolução (escopo interno, PR-070 · D-078):** Implementada **trilha forense completa de emissão + verificação de magic-link** com política LGPD-safe:
+  - Nova migration `20260514000000_magic_link_issued_log.sql` com tabela imutável:
+    - `email_hash` SHA-256 hex 64 chars (determinístico, LGPD-safe — nunca armazena email plaintext);
+    - `email_domain` em cleartext (métrica de provedor útil sem PII direta);
+    - `role`, `action` (10 estados), `reason`, `route`, `ip`, `user_agent`, `next_path`, `metadata`, `issued_at`;
+    - 4 índices forenses ((email_hash, issued_at desc), (action, issued_at desc), (ip, issued_at desc), (issued_at desc));
+    - Triggers `prevent_magic_link_mutation` em UPDATE/DELETE com bypass controlado via GUC `app.magic_link_log.allow_mutation`;
+    - RLS deny-by-default + FORCE (apenas `service_role` via `getSupabaseAdmin()`).
+  - Nova lib `src/lib/magic-link-log.ts` — `hashEmail`, `extractEmailDomain`, `buildMagicLinkContext`, `logMagicLinkEvent` (fail-soft, aceita `email=null` apenas em `verify_failed`/`rate_limited`, truncamento defensivo de reason/route/next_path/UA/metadata).
+  - 3 endpoints instrumentados:
+    - `POST /api/auth/magic-link` — emite `issued` ou `rate_limited` / `silenced_no_account` / `silenced_no_role` / `provider_error`.
+    - `POST /api/paciente/auth/magic-link` — inclui `silenced_no_customer`, `silenced_wrong_scope`, `auto_provisioned` (paciente auto-criado).
+    - `GET /api/auth/callback` — emite `verified` ou `verify_failed` (cliente admin separado pra não acoplar log à criação de sessão).
+  - **Taxonomia de 10 `action` states:** `issued`, `silenced_no_account`, `silenced_no_role`, `silenced_wrong_scope`, `silenced_no_customer`, `rate_limited`, `provider_error`, `auto_provisioned`, `verified`, `verify_failed`.
+  - **Triagem de "não recebi o link" vira 1 query:** `select * from magic_link_issued_log where email_hash = sha256('alice@yahoo.com.br') order by issued_at desc`. 
+  - 32 testes novos (suite 1335 → 1367).
+- **Escopo residual (fora do PR-070):** bounce/complaint webhook de provedor SMTP próprio (Resend/Postmark) — requer decisão operacional sobre troca do provedor default de emails da Supabase. Pode ser reaberto como PR-070-B quando volume justificar (hoje é 1 médica + 1 admin + ~poucos pacientes).
 - **Observador:** admin solo, paciente, médica.
 
 ### [17.9 🟢 SEGURO] Pontos fortes do audit trail atual
@@ -1532,7 +1548,7 @@ original era tabela física — rejeitada pra não duplicar dados, já que
 |---|---|---|
 | 🔴 CRÍTICO | **3** | 10.1, 17.1 (+ uma menção forte a 9.1 dependendo do horizonte; **9.1 resolvido em Ondas 2C+2D+2E**) |
 | 🟠 ALTO | **5** | ~~9.1~~, ~~9.2~~, ~~22.1~~, ~~22.2~~, 10.2, 10.3, 17.2, 17.3, 17.4 (conta: 9 original; 4 resolvidos) |
-| 🟡 MÉDIO | **6** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4 (parcial PR-061 · D-071; escopo app-gerado fechado, webhooks externos → 10.4-B), ~~10.5 (PR-059 · D-070)~~, ~~10.6 (onda A PR-064 · D-072; onda B → 10.6-B)~~, ~~10.7 (já tinha UNIQUE)~~, ~~10.8 (PR-066 · D-074)~~, ~~17.5 (PR-069 · D-077)~~, ~~17.6 (PR-068 · D-076)~~, ~~17.7 (PR-067 · D-075)~~, 17.8 |
+| 🟡 MÉDIO | **5** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4 (parcial PR-061 · D-071; escopo app-gerado fechado, webhooks externos → 10.4-B), ~~10.5 (PR-059 · D-070)~~, ~~10.6 (onda A PR-064 · D-072; onda B → 10.6-B)~~, ~~10.7 (já tinha UNIQUE)~~, ~~10.8 (PR-066 · D-074)~~, ~~17.5 (PR-069 · D-077)~~, ~~17.6 (PR-068 · D-076)~~, ~~17.7 (PR-067 · D-075)~~, ~~17.8 (PR-070 · D-078)~~ |
 | 🟢 SEGURO | **4** | 9.7, 22.7, 10.9, 17.9 |
 
 **Interpretação:** toda família 9.x (prompt-injection + AI-agents) está efetivamente fechada pra superfície atual. Quando LLM externo for plugado, seguir o check-list de 9 itens em `AGENTS.md` — as primitivas (`prompt-envelope`, `prompt-redact`, `customer-display`) já estão prontas. Backlog atual migra 100% pra findings não-AI (observabilidade, financeiro, LGPD).

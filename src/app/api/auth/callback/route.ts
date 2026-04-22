@@ -20,13 +20,26 @@
 
 import { NextResponse } from "next/server";
 import type { EmailOtpType } from "@supabase/supabase-js";
+import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSupabaseRouteHandler } from "@/lib/supabase-server";
 import { logger } from "@/lib/logger";
+import {
+  buildMagicLinkContext,
+  logMagicLinkEvent,
+  type MagicLinkRole,
+} from "@/lib/magic-link-log";
 
 const log = logger.with({ route: "/api/auth/callback" });
+const ROUTE = "/api/auth/callback";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+function resolveRole(appMetadata: unknown): MagicLinkRole {
+  const role = (appMetadata as { role?: string } | null)?.role;
+  if (role === "admin" || role === "doctor" || role === "patient") return role;
+  return null;
+}
 
 const VALID_OTP_TYPES: ReadonlySet<EmailOtpType> = new Set<EmailOtpType>([
   "signup",
@@ -56,16 +69,33 @@ export async function GET(req: Request) {
       ? "/paciente/login"
       : "/admin/login";
 
-  const fail = (reason: "invalid" | "expired" | "callback") =>
-    NextResponse.redirect(new URL(`${loginBase}?error=${reason}`, req.url));
-
   const supabase = getSupabaseRouteHandler();
+  // Cliente admin separado pro log (fail-soft; não reusa o session-
+  // writing client pra não acoplar o log à criação da sessão).
+  const admin = getSupabaseAdmin();
+  const context = buildMagicLinkContext(req, ROUTE);
+
+  const fail = (
+    reason: "invalid" | "expired" | "callback",
+    detail?: { email?: string | null; role?: MagicLinkRole; err?: string }
+  ) => {
+    void logMagicLinkEvent(admin, {
+      email: detail?.email ?? null,
+      action: "verify_failed",
+      role: detail?.role,
+      reason: detail?.err ?? reason,
+      context,
+      nextPath: safeNext,
+      metadata: { reason_code: reason },
+    });
+    return NextResponse.redirect(new URL(`${loginBase}?error=${reason}`, req.url));
+  };
 
   if (tokenHash && type) {
     if (!VALID_OTP_TYPES.has(type as EmailOtpType)) {
-      return fail("invalid");
+      return fail("invalid", { err: `type desconhecido: ${type}` });
     }
-    const { error } = await supabase.auth.verifyOtp({
+    const { data, error } = await supabase.auth.verifyOtp({
       token_hash: tokenHash,
       type: type as EmailOtpType,
     });
@@ -74,22 +104,41 @@ export async function GET(req: Request) {
       const reason = error.message?.toLowerCase().includes("expired")
         ? "expired"
         : "callback";
-      return fail(reason);
+      return fail(reason, { err: error.message });
     }
+    // Sucesso: extrai email + role do usuário autenticado pra trilha.
+    const user = data.user;
+    void logMagicLinkEvent(admin, {
+      email: user?.email ?? null,
+      action: "verified",
+      role: resolveRole(user?.app_metadata),
+      context,
+      nextPath: safeNext,
+      metadata: { otp_type: type },
+    });
     return NextResponse.redirect(new URL(safeNext, req.url));
   }
 
   if (code) {
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
+    const { data, error } = await supabase.auth.exchangeCodeForSession(code);
     if (error) {
       log.error("exchangeCodeForSession", { err: error });
       const reason = error.message?.toLowerCase().includes("expired")
         ? "expired"
         : "callback";
-      return fail(reason);
+      return fail(reason, { err: error.message });
     }
+    const user = data.user;
+    void logMagicLinkEvent(admin, {
+      email: user?.email ?? null,
+      action: "verified",
+      role: resolveRole(user?.app_metadata),
+      context,
+      nextPath: safeNext,
+      metadata: { flow: "pkce" },
+    });
     return NextResponse.redirect(new URL(safeNext, req.url));
   }
 
-  return fail("invalid");
+  return fail("invalid", { err: "sem token_hash nem code" });
 }

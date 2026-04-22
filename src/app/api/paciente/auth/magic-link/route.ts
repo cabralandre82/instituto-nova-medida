@@ -19,8 +19,13 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { logger } from "@/lib/logger";
+import {
+  buildMagicLinkContext,
+  logMagicLinkEvent,
+} from "@/lib/magic-link-log";
 
 const log = logger.with({ route: "/api/paciente/auth/magic-link" });
+const ROUTE = "/api/paciente/auth/magic-link";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -66,7 +71,15 @@ export async function POST(req: Request) {
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     req.headers.get("x-real-ip") ||
     "unknown";
+  const supabase = getSupabaseAdmin();
+  const context = buildMagicLinkContext(req, ROUTE);
+
   if (!rateLimitOk(ip)) {
+    void logMagicLinkEvent(supabase, {
+      email,
+      action: "rate_limited",
+      context,
+    });
     return NextResponse.json(
       { ok: false, error: "Muitas tentativas. Aguarde 15 minutos." },
       { status: 429 },
@@ -79,8 +92,6 @@ export async function POST(req: Request) {
       ? rawNext
       : "/paciente";
 
-  const supabase = getSupabaseAdmin();
-
   // 1. Procura customer pelo email (fonte da verdade do "paciente")
   const { data: customer } = await supabase
     .from("customers")
@@ -90,6 +101,12 @@ export async function POST(req: Request) {
 
   // Se não é customer, silêncio (anti-enumeração + anti-abuso de magic-link)
   if (!customer) {
+    void logMagicLinkEvent(supabase, {
+      email,
+      action: "silenced_no_customer",
+      context,
+      nextPath: safeNext,
+    });
     return NextResponse.json({ ok: true });
   }
 
@@ -100,9 +117,16 @@ export async function POST(req: Request) {
   });
   if (listErr) {
     log.error("listUsers", { err: listErr });
+    void logMagicLinkEvent(supabase, {
+      email,
+      action: "provider_error",
+      reason: `listUsers: ${listErr.message ?? "unknown"}`,
+      context,
+    });
     return NextResponse.json({ ok: true });
   }
   let target = list.users.find((u) => u.email?.toLowerCase() === email);
+  let autoProvisioned = false;
 
   // 3. Não existe auth.user → cria com role=patient
   if (!target) {
@@ -113,9 +137,24 @@ export async function POST(req: Request) {
     });
     if (createErr || !created.user) {
       log.error("createUser", { err: createErr });
+      void logMagicLinkEvent(supabase, {
+        email,
+        action: "provider_error",
+        reason: `createUser: ${createErr?.message ?? "unknown"}`,
+        context,
+      });
       return NextResponse.json({ ok: true });
     }
     target = created.user;
+    autoProvisioned = true;
+    void logMagicLinkEvent(supabase, {
+      email,
+      action: "auto_provisioned",
+      role: "patient",
+      context,
+      nextPath: safeNext,
+      metadata: { customer_id: customer.id },
+    });
     // Trigger SQL já vincula customers.user_id, mas garantimos aqui
     // (caso a migration 018 ainda não tenha rodado).
     if (!customer.user_id) {
@@ -132,6 +171,14 @@ export async function POST(req: Request) {
       if (meta.role === "admin" || meta.role === "doctor") {
         // Conta com role específica — não deixa login como paciente
         // pra não mesclar escopos
+        void logMagicLinkEvent(supabase, {
+          email,
+          action: "silenced_wrong_scope",
+          reason: `role=${meta.role} tentou fluxo de paciente`,
+          role: meta.role,
+          context,
+          nextPath: safeNext,
+        });
         return NextResponse.json({ ok: true });
       }
       const { error: upErr } = await supabase.auth.admin.updateUserById(
@@ -142,6 +189,12 @@ export async function POST(req: Request) {
       );
       if (upErr) {
         log.error("upgrade role", { err: upErr });
+        void logMagicLinkEvent(supabase, {
+          email,
+          action: "provider_error",
+          reason: `updateUserById: ${upErr.message ?? "unknown"}`,
+          context,
+        });
         return NextResponse.json({ ok: true });
       }
     }
@@ -164,6 +217,24 @@ export async function POST(req: Request) {
   });
   if (linkErr) {
     log.error("signInWithOtp", { err: linkErr });
+    void logMagicLinkEvent(supabase, {
+      email,
+      action: "provider_error",
+      reason: `signInWithOtp: ${linkErr.message ?? "unknown"}`,
+      role: "patient",
+      context,
+      nextPath: safeNext,
+      metadata: { auto_provisioned: autoProvisioned },
+    });
+  } else {
+    void logMagicLinkEvent(supabase, {
+      email,
+      action: "issued",
+      role: "patient",
+      context,
+      nextPath: safeNext,
+      metadata: { auto_provisioned: autoProvisioned },
+    });
   }
 
   return NextResponse.json({ ok: true });

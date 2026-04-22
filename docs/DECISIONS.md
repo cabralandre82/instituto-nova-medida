@@ -5,6 +5,217 @@
 
 ---
 
+## D-078 · Trilha forense de emissões e verificações de magic-link em `magic_link_issued_log` (PR-070 · finding 17.8) · 2026-04-20
+
+**Contexto.** Magic-link é o único método de autenticação da plataforma
+(admin, médica e paciente). Emitido via `supabase.auth.signInWithOtp`
+em 2 rotas e verificado via `supabase.auth.verifyOtp` em 1 rota:
+
+- `POST /api/auth/magic-link` · admin + médica
+- `POST /api/paciente/auth/magic-link` · paciente (com possível
+  auto-provisionamento)
+- `GET /api/auth/callback` · verifica token_hash ou code
+
+O Supabase **não expõe log aplicativo** dessas operações — o painel
+dele serve pra debug operacional da própria Supabase, não é audit
+trail nosso. Consequências:
+
+- **Triagem impossível.** Usuário reporta "não recebi o link". Sem
+  rastro próprio só resta achar a culpa ("spam?", "digitou certo?")
+  ou pedir à Supabase (que demora + não é SLA nosso).
+- **Forense ausente.** Sem trilha, não conseguimos responder "quando
+  o link pra alice@yahoo foi emitido?", "qual IP disparou?", "qual
+  foi o motivo de não ter enviado?".
+- **Detecção de abuso cega.** Enumeração de emails e brute force de
+  contas deixam rastro nas respostas (rate-limited, silenced_*) mas
+  sem log nós só observamos no servidor em tempo real.
+
+Finding [17.8 🟡 MÉDIO] da auditoria capturou isso.
+
+**Alternativas.**
+
+- **A. Depender do log da Supabase.** Rejeitado. Não é SLA nosso,
+  não é consultável pelo operador e não cobre states lógicos
+  (silenced_no_account, silenced_wrong_scope) que são decisões
+  internas nossas.
+- **B. Armazenar email em plaintext.** Rejeitado. LGPD Art. 6º
+  princípio da minimização: se consigo responder "alice recebeu
+  link?" com hash determinístico, não preciso armazenar o email
+  inteiro em disco indefinidamente. Evita também que um dump
+  de `magic_link_issued_log` vaze mailing list.
+- **C. Email hasheado com salt por usuário.** Rejeitado. Perderia a
+  propriedade "reproduzir hash dado o email" que é exatamente o
+  que o admin precisa pra triagem. Não agrega segurança significativa
+  (superfície de ataque é quem tem `service_role`, e nesse ponto
+  já é game over).
+- **D. `email_hash` determinístico sem salt + RLS deny-all +
+  imutabilidade.** **ESCOLHIDA.** Reproduz busca ("alice@yahoo
+  recebeu link?") sem expor base consultável em caso de leak; RLS
+  nega todas as operações exceto via `service_role`; imutabilidade
+  impede apagar evidência forense.
+
+**Decisão.** Tabela imutável `magic_link_issued_log` + lib
+`magic-link-log.ts` com política LGPD-safe.
+
+**Schema (migration `20260514000000`).**
+
+```sql
+create table public.magic_link_issued_log (
+  id            uuid pk default gen_random_uuid(),
+  email_hash    text not null check (email_hash ~ '^[0-9a-f]{64}$'),
+  email_domain  text check (char_length <= 253),
+  role          text,  -- admin|doctor|patient|null
+  action        text not null check (action in (10 valores)),
+  reason        text check (char_length <= 500),
+  route         text not null check (char_length between 1 and 200),
+  ip            inet,
+  user_agent    text check (char_length <= 500),
+  next_path     text,
+  metadata      jsonb default '{}',
+  issued_at     timestamptz default now()
+);
+-- 4 índices forenses: (email_hash, issued_at desc),
+-- (action, issued_at desc), (ip, issued_at desc) WHERE ip IS NOT NULL,
+-- (issued_at desc).
+-- Triggers prevent_magic_link_mutation em UPDATE e DELETE,
+-- bypass via SET LOCAL app.magic_link_log.allow_mutation = 'true'.
+-- RLS deny-by-default + FORCE; nenhuma policy.
+```
+
+**Taxonomia de `action`.** 10 estados, cobrem os 3 endpoints:
+
+- `issued` — `signInWithOtp` retornou sucesso.
+- `silenced_no_account` — email não cadastrado em `auth.users`
+  (anti-enumeração — resposta HTTP 200, sem enviar nada).
+- `silenced_no_role` — usuário existe mas sem role autorizado
+  (ex: `role=null`).
+- `silenced_wrong_scope` — role existe mas é de outro escopo
+  (ex: role=admin tentou login de paciente).
+- `silenced_no_customer` — paciente: não há `customer` com esse
+  email, então magic-link não é oferecido (anti-abuso).
+- `rate_limited` — IP bateu rate-limit (5 por 15 min).
+- `provider_error` — `signInWithOtp`/`listUsers`/`createUser`/
+  `updateUserById` retornou erro.
+- `auto_provisioned` — paciente: criou `auth.user` com role=patient
+  antes de emitir (só no fluxo de paciente).
+- `verified` — `verifyOtp` ou `exchangeCodeForSession` retornou
+  sucesso; email + role extraídos do `data.user`.
+- `verify_failed` — `verifyOtp`/`exchangeCodeForSession` retornou
+  erro (link inválido, expirado, type desconhecido).
+
+**Lib `src/lib/magic-link-log.ts`.**
+
+- `hashEmail(email)` — `SHA-256(email.trim().toLowerCase())` hex 64
+  chars, lança em email vazio.
+- `extractEmailDomain(email)` — retorna domínio lowercase trunc 253
+  pra métrica de provedor; `null` em malformado.
+- `buildMagicLinkContext(req, route)` — IP via
+  `x-forwarded-for`[0] → `x-real-ip`; UA trunc 500.
+- `logMagicLinkEvent(supabase, { email, action, role?, reason?,
+  nextPath?, metadata?, context })` — fail-soft. Aceita `email=null`
+  apenas em `verify_failed` e `rate_limited` (onde o caller
+  realmente pode não ter acesso ao email). Para outras actions sem
+  email, devolve `{ok: false, code: 'missing_email'}` sem inserir —
+  bug do caller. Para `email` vazio/inválido, usa hash fallback
+  determinístico `SHA-256("unknown:<action>:<iso-minute>")` pra
+  preservar formato e permitir agrupar, documentado nesta ADR.
+- `MagicLinkAction` union, `MagicLinkRole` union sincronizados com
+  o CHECK do DB.
+- Trunca `reason` (500), `route` (200), `next_path` (500), strings
+  em `metadata` (2048). Metadata `undefined` omitida.
+
+**Integração nos 3 endpoints.**
+
+- `POST /api/auth/magic-link` — `rate_limited`,
+  `provider_error (listUsers)`, `silenced_no_account`,
+  `silenced_no_role` (com `reason=role=X`), `provider_error
+  (signInWithOtp)`, `issued`.
+- `POST /api/paciente/auth/magic-link` — `rate_limited`,
+  `silenced_no_customer`, `provider_error (listUsers/createUser/
+  updateUserById/signInWithOtp)`, `silenced_wrong_scope` (role
+  admin/doctor → rota paciente), `auto_provisioned` (quando cria
+  auth.user), `issued` com `metadata.auto_provisioned: boolean`.
+- `GET /api/auth/callback` — `verify_failed` (type inválido,
+  verifyOtp erro, exchangeCodeForSession erro, sem params),
+  `verified` (com role extraída de `data.user.app_metadata`).
+  Usa cliente admin separado (`getSupabaseAdmin()`) pra o log,
+  não reusa o `getSupabaseRouteHandler()` que está escrevendo
+  cookies de sessão — evita acoplamento conceitual.
+
+**Todas as chamadas são `void logMagicLinkEvent(...)`** — fail-soft
+explícito: erro no log nunca bloqueia resposta ao usuário. Privar
+de receber link porque audit está offline é pior que perder uma
+linha.
+
+**Invariantes.**
+
+- I1. `email_hash` sempre 64 hex chars (CHECK do DB + validação TS).
+- I2. Tabela nunca permite UPDATE/DELETE sem GUC explícita.
+- I3. RLS deny-all → acesso apenas via `service_role`.
+- I4. Não armazenamos email plaintext, token, nem próprio `token_hash`
+  do magic-link.
+- I5. `verify_failed` e `rate_limited` podem ter email=null
+  (gravam com hash unknown). Outras actions exigem email válido.
+
+**Trade-offs.**
+
+- **Hash determinístico vs salted.** Optamos por determinístico
+  porque o caso de uso dominante é reproduzir "busca por email".
+  Ataque hipotético: quem tem `service_role` já tem acesso direto
+  à `auth.users.email`, então hash salted não adicionaria proteção.
+- **Sem purga automática.** Retenção eterna por ora (~5 linhas/dia
+  esperado). Quando volume exigir (>1M linhas), criar cron de purga
+  pós-365d. Boundary explícito.
+- **Auto-provisionamento registrado separado.** `auto_provisioned`
+  é log próprio; `issued` que o segue traz `metadata.auto_provisioned: true`.
+  Permite query "quantos pacientes foram criados via magic-link" sem
+  precisar join com `auth.users`.
+
+**Consequências.**
+
+- Finding [17.8 🟡 MÉDIO] fechado. MÉDIOs caem de 6 pra 5.
+- Triagem de "não recebi o link" vira consulta de 1 query:
+  `select action, issued_at, reason, ip from magic_link_issued_log
+  where email_hash = <sha256 do email> order by issued_at desc`.
+- Detecção de abuso ganha superfície: `rate_limited` + `silenced_*`
+  agrupados por IP revela tentativas de enumeração.
+- Integração zero-breaking: fluxo de login/callback inalterado pra
+  usuário final; só acrescenta log fail-soft.
+- 32 testes novos; suíte global 1335 → 1367.
+
+**Limitações conhecidas.**
+
+- **Não há UI `/admin/magic-links` ainda.** Consulta atual via SQL
+  editor ou via `getSupabaseAdmin()` em script. UI dedicada fica
+  como PR-070-B opcional — não era escopo do finding.
+- **`verify_failed` sem email** (token malformado) agrupa tudo em
+  hash `unknown:verify_failed:<iso-minute>`. Perde granularidade
+  individual mas permite detectar rajadas temporais. Aceito.
+- **Não correlaciona issued→verified automaticamente.** Consulta
+  manual com `where email_hash=X order by issued_at` intercala
+  ambos; UI futura pode costurar.
+
+**Tests.**
+
+- `src/lib/magic-link-log.test.ts` (32 testes):
+  - `hashEmail`: determinismo × 2, normalização case/trim × 3,
+    distinção × 1, empty → throw × 3, tipo errado × 2 (9 testes).
+  - `extractEmailDomain`: 7 testes.
+  - `buildMagicLinkContext`: 4 testes.
+  - `logMagicLinkEvent`: 12 testes.
+- Suíte global: 72 arquivos, 1367 testes.
+
+**Artefatos.**
+
+- `supabase/migrations/20260514000000_magic_link_issued_log.sql` · novo
+- `src/lib/magic-link-log.ts` · novo
+- `src/lib/magic-link-log.test.ts` · novo
+- `src/app/api/auth/magic-link/route.ts` · integração
+- `src/app/api/paciente/auth/magic-link/route.ts` · integração
+- `src/app/api/auth/callback/route.ts` · integração
+
+---
+
 ## D-077 · Correlação temporal entre falhas de cron e demais fontes de erro, sem tabela física nova (PR-069 · finding 17.5) · 2026-04-20
 
 **Contexto.** O operador solo via `/admin/crons` consegue ver que um
