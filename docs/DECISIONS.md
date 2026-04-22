@@ -5,6 +5,155 @@
 
 ---
 
+## D-075 · Snapshot forense do body + telefone-destino em `appointment_notifications` (PR-067 · finding 17.7) · 2026-04-20
+
+**Contexto.** `appointment_notifications` (migrations 004 e 011) hoje
+registra `kind`, `template_name`, `status`, `sent_at`, `message_id` e
+`error`, mas **não persiste o corpo textual efetivamente composto nem
+o telefone de destino no momento do envio**. O body é montado em
+`src/lib/wa-templates.ts` substituindo variáveis do template Meta e o
+`customers.phone` é lido live em `dispatch()`. Duas classes de falha
+forense:
+
+1. **Reclamação de conteúdo** ("não recebi essa mensagem" ou "o link
+   estava errado"): o operador solo não consegue reconstituir o que
+   seria/foi enviado — só sabe que `kind='t_minus_15min'` virou `sent`.
+   CDC Art. 39 VIII e CFM 2.314/2022 exigem prova de comunicação
+   transacional.
+2. **Troca de telefone** (após PR-056): paciente atualiza telefone via
+   `/paciente/meus-dados`; mensagens futuras vão pro novo número, mas
+   **sem snapshot no envio** perdemos a evidência de "naquele dia a
+   mensagem foi pra 5511xxx4444" — crucial se o paciente alega não ter
+   recebido.
+
+Logs do cron ajudariam parcialmente, mas expiram em 180 dias (D-059) e
+não cobrem o texto final (apenas `template_name` e variáveis brutas).
+
+**Alternativas.**
+
+1. **Tabela separada `appointment_notification_attempts` (append-only):**
+   cada tentativa vira linha imutável. Mais robusto (captura retries com
+   body diferente), mas dobra o volume de escritas e a complexidade de
+   joins. Rejeitado pelo MVP porque o ganho marginal ainda não se
+   justifica — pode ser adotado depois se volume ultrapassar 1k
+   mensagens/dia.
+2. **Gravar só em `sent`:** só preencher `body` quando `status → sent`.
+   Simples, mas perde evidência de "o que *seria* enviado" em `failed`,
+   que é justamente quando o operador mais precisa debugar.
+3. **Adotado (D-075) — gravar antes do dispatch, imutável após envio:**
+   colunas `body`, `target_phone`, `rendered_at` em
+   `appointment_notifications`. O worker renderiza + grava snapshot
+   ANTES do HTTP pra Meta; se falha, body + phone ficam no banco pra
+   inspeção. Retry pode re-renderizar (caso dados tenham mudado). Uma
+   vez `sent_at` preenchido, trigger `trg_an_body_immutable_after_send`
+   bloqueia alteração de `body`/`target_phone`/`rendered_at`/`sent_at`
+   — virou evidência jurídica imutável.
+
+**Decisão.**
+
+1. **Colunas novas** em `public.appointment_notifications`:
+   - `body text` — corpo final renderizado (pt_BR, com variáveis
+     substituídas), limitado a 8000 chars (WA template máx teórico é
+     ~4096).
+   - `target_phone text` — telefone de destino normalizado (dígitos
+     apenas, sem `+`), truncado em 32 chars.
+   - `rendered_at timestamptz` — quando o body foi composto (para
+     correlação com logs do cron).
+
+2. **Trigger `trg_an_body_immutable_after_send`** (BEFORE UPDATE):
+   - Se `old.sent_at IS NOT NULL`: bloqueia qualquer UPDATE que altere
+     `body`, `target_phone`, `rendered_at` ou zere `sent_at`. Levanta
+     `raise exception 'PR-067 · D-075 · ... imutáveis após sent_at'`.
+   - Se `old.sent_at IS NULL`: permite reescrita — retry pode gerar
+     body diferente se dados mudaram (PR-056 permite paciente atualizar
+     telefone via UI).
+
+3. **Índice parcial forense** `idx_an_target_phone_sent` em
+   `(target_phone, sent_at desc) where target_phone is not null and
+   sent_at is not null` — permite admin responder "me mostra tudo que
+   foi enviado pro número X, mais recente primeiro" em O(log n).
+
+4. **Lib canônica `src/lib/appointment-notifications.ts`**:
+   - `renderNotificationBody(kind, ctx): {body, templateName,
+     targetPhone}` — PURA, determinística, cobre os 10 kinds documentados
+     em `docs/WHATSAPP_TEMPLATES.md`. Templates textuais espelhados 1:1
+     na lib (ground-truth para forense mesmo se Meta divergir).
+   - `recordBodySnapshot(supabase, {notificationId, body, targetPhone,
+     now?})` — UPDATE guardado por `.is("sent_at", null)` pra não
+     acionar o trigger em linhas já enviadas. Idempotente: segunda
+     chamada em linha já-enviada retorna `{ok:true, updated:false,
+     alreadySent:true}` sem disparar exceção.
+   - `maskPhoneForAdmin(phone, {visible?})` — helper de UI que mantém
+     DDI + DDD visíveis e mascara o resto com `*`. Default preserva 4
+     últimos dígitos. Fail-soft: entrada inválida → `"****"`, nula →
+     `"—"`.
+   - `normalizePhoneDigits()`, `replaceVars()` — helpers expostos pra
+     testes.
+
+5. **Integração** em `src/lib/notifications.ts::processDuePending`:
+   `snapshotBodyForRow()` chamado **antes** do `dispatch()` pra cada
+   linha. Falha de snapshot é WARN no logger (não-fatal) — não bloqueia
+   dispatch. Dispatch + UPDATE final de `status` permanecem iguais ao
+   desenho D-031.
+
+6. **UI `/admin/notifications`**: coluna nova "Conteúdo" com telefone
+   mascarado + `<details>` colapsável com o body completo. Admin pode
+   abrir pra auditar uma mensagem específica sem expor telefones em
+   massa na listagem.
+
+**Invariantes.**
+
+- Uma vez `sent_at` preenchido, `(body, target_phone, rendered_at,
+  sent_at)` formam evidência jurídica imutável (trigger DB nível).
+- RLS existente (`an_admin_only`) não muda — só admin (JWT
+  `role='admin'`) enxerga qualquer linha. Paciente/médica não têm acesso
+  direto (o que é forense-correto).
+- `recordBodySnapshot` é idempotente: chamadas extras em linha já
+  enviada retornam `alreadySent:true` sem disparar o trigger (aparam
+  pelo `.is("sent_at", null)` na query).
+- Body renderizado é determinístico em função do contexto de entrada
+  (PURA). Se o mesmo appointment for re-renderizado minutos depois com
+  os mesmos dados, produz o mesmo string exato.
+
+**Trade-offs.**
+
+- Storage: cada linha ganha ~200-500 bytes extras. Volume MVP ~50
+  mensagens/dia = +30 MB/ano. Desprezível.
+- Divergência teórica entre o `body` rendered aqui e o que a Meta
+  efetivamente enviou: se a Meta substituir variáveis de forma
+  diferente (ex: corrigir acento numa variável), nossa evidência
+  mostra o que *tentamos* enviar, não o que o usuário leu. Mitigação:
+  docstring deixa claro que ground-truth é "pretenção de envio"; Meta
+  não tem API pra recuperar o body final do webhook delivered.
+- Retry que re-renderiza pode produzir body diferente entre tentativas
+  `failed`; após `sent_at`, só o último fica gravado. Aceitável
+  (auditamos o que chegou ao paciente).
+
+**Consequências.**
+
+- Paciente reclamando de mensagem errada: admin abre `/admin/notifications`,
+  filtra por `appointment_id`, expande o body e tem o texto integral.
+- Paciente trocar telefone depois: `target_phone` preserva o snapshot
+  do dia — prova forense do destino real.
+- Base para PR-067-B (futuro): expor uma API restrita que permite
+  paciente (autenticado) baixar o histórico das próprias mensagens em
+  PDF assinado (LGPD Art. 9º, direito à confirmação de tratamento).
+- Base para alertas automáticos: detectar body com placeholders não
+  substituídos (`{{1}}` ainda literal) e abortar send.
+
+**Testes.**
+
+- `src/lib/appointment-notifications.test.ts` (49 testes): cobre
+  `replaceVars`, `normalizePhoneDigits`, `maskPhoneForAdmin` (incluindo
+  edge cases `visible=0`, telefones de 10/13 dígitos, nulo), render
+  pra todos os 10 kinds com validação de template + placeholders +
+  payload fallback + exaustividade estática, e `recordBodySnapshot`
+  com happy path + idempotência (already-sent) + not-found + db_error.
+- `npx tsc --noEmit` e `npx next lint` passam sem warnings.
+- Suite global: 1236 → 1285 testes (+49).
+
+---
+
 ## D-074 · Soft delete para prontuário e audit financeiro (PR-066 · finding 10.8) · 2026-04-20
 
 **Contexto.** `DELETE FROM appointments WHERE ...` em Postgres é destrutivo e irreversível a menos que exista backup Point-in-Time dedicado. CFM Res. 1.821/2007 Art. 8º exige retenção do prontuário por 20 anos; um `DELETE` acidental (admin solo pelo SQL Studio, migration com `TRUNCATE`, cron buggy, hotfix mal pensado) perde registros clínicos de forma muitas vezes impossível de recuperar sem destruir outros dados válidos do backup. O código atual não tem nenhum `.delete()` em tabelas clínicas (confirmado via grep de toda `src/` em 2026-04-20), então o vetor de risco é 100% operacional e acidental.

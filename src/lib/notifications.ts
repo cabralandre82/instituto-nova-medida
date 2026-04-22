@@ -44,6 +44,11 @@ import {
   KIND_TO_TEMPLATE,
   type NotificationKind,
 } from "@/lib/wa-templates";
+import {
+  renderNotificationBody,
+  recordBodySnapshot,
+  type RenderContext,
+} from "@/lib/appointment-notifications";
 
 const PATIENT_CONSULTA_PATH = "/consulta";
 
@@ -303,6 +308,52 @@ export type ProcessReport = {
   }>;
 };
 
+/**
+ * PR-067 · D-075 — Renderiza body + telefone-destino e persiste em
+ * `appointment_notifications.{body,target_phone,rendered_at}` via lib
+ * canônica (`recordBodySnapshot`). Guard `sent_at IS NULL` garante
+ * idempotência em retry sem disparar o trigger de imutabilidade.
+ *
+ * Falhas não-fatais: se o snapshot não grava (erro de rede, trigger
+ * mudou semântica etc.), o dispatch HTTP prossegue normalmente. A
+ * perda é do *forense*, não da operação.
+ */
+async function snapshotBodyForRow(
+  supabase: SupabaseClient,
+  row: NotificationRow
+): Promise<void> {
+  const appt = row.appointments;
+  if (!appt) return;
+  const customer = appt.customers;
+  if (!customer) return;
+
+  const scheduledAt = new Date(appt.scheduled_at);
+  const consultaUrl = `${publicBaseUrl()}${PATIENT_CONSULTA_PATH}/${appt.id}`;
+  const ctx: RenderContext = {
+    customerName: customer.name,
+    customerPhone: customer.phone,
+    doctorDisplay:
+      appt.doctors?.display_name || appt.doctors?.full_name || "Médica",
+    scheduledAt,
+    consultaUrl,
+    salaValidaAte: appt.scheduled_until
+      ? new Date(appt.scheduled_until)
+      : new Date(scheduledAt.getTime() + 30 * 60_000),
+    reagendamentoUrl: consultaUrl,
+    payload: (row.payload ?? null) as RenderContext["payload"],
+    baseUrl: publicBaseUrl(),
+  };
+
+  const rendered = renderNotificationBody(row.kind as NotificationKind, ctx);
+  if (!rendered.body) return; // kind desconhecido: não grava.
+
+  await recordBodySnapshot(supabase, {
+    notificationId: row.id,
+    body: rendered.body,
+    targetPhone: rendered.targetPhone,
+  });
+}
+
 export async function processDuePending(limit = 20): Promise<ProcessReport> {
   const supabase = getSupabaseAdmin();
   const rows = await loadDueNotifications(supabase, limit);
@@ -316,6 +367,18 @@ export async function processDuePending(limit = 20): Promise<ProcessReport> {
   };
 
   for (const row of rows) {
+    // PR-067 · D-075 · finding 17.7 — snapshot forense antes do dispatch.
+    // Re-renderiza body + target_phone a cada tentativa (antes de sent_at).
+    // Uma vez sent_at preenchido, o trigger DB `trg_an_body_immutable_
+    // after_send` bloqueia reescrita; `recordBodySnapshot` respeita isso
+    // via guard `.is("sent_at", null)` e vira no-op idempotente.
+    await snapshotBodyForRow(supabase, row).catch((err) => {
+      log.warn("body snapshot failed (non-fatal)", {
+        notification_id: row.id,
+        err,
+      });
+    });
+
     const outcome = await dispatch(row);
 
     if (outcome.ok) {

@@ -1468,11 +1468,18 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 - **Correção:** simétrica a `doctor_reliability_events` — registrar no_show, cancelamento tardio, refund solicitado. Com política de bloqueio automatizado opcional.
 - **Observador:** admin solo.
 
-### [17.7 🟡 MÉDIO] `appointment_notifications` registra envio, mas conteúdo exato não persiste
+### [17.7 🟡 MÉDIO] ~~`appointment_notifications` registra envio, mas conteúdo exato não persiste~~ ✅ RESOLVIDO (PR-067 · D-075 · 2026-04-20)
 
-- **Onde:** migration `20260420100000_appointment_notifications_scheduler.sql`.
+- **Onde:** migration `20260420100000_appointment_notifications_scheduler.sql` (base) + `20260512000000_appointment_notifications_body_snapshot.sql` (fix).
 - **Achado:** registra `kind` e `sent_at`, mas `body` do WhatsApp é composto em `lib/*-messages.ts` e **não persiste**. Se paciente diz "não recebi" ou "a mensagem era errada", admin não tem evidência.
-- **Correção:** adicionar coluna `body text` e `target_phone text` + salvar antes do send + RLS restritivo (só admin).
+- **Resolução (PR-067 · D-075):**
+  - Colunas `body text`, `target_phone text`, `rendered_at timestamptz` em `appointment_notifications`, com trigger `trg_an_body_immutable_after_send` que bloqueia alteração após `sent_at` ficar preenchido (evidência jurídica imutável).
+  - Permite reescrita enquanto `sent_at IS NULL` — retries podem re-renderizar se dados mudarem (PR-056 deixa paciente trocar telefone).
+  - Índice parcial `idx_an_target_phone_sent(target_phone, sent_at desc) where ... not null` pra lookup forense.
+  - Lib canônica `src/lib/appointment-notifications.ts`: `renderNotificationBody()` PURA (espelha os 10 templates Meta 1:1), `recordBodySnapshot()` idempotente (guard `.is("sent_at", null)` + distinção not-found vs already-sent), `maskPhoneForAdmin()` com DDI+DDD visíveis.
+  - Integração em `src/lib/notifications.ts::processDuePending` via `snapshotBodyForRow()` **antes** do dispatch — body e phone ficam gravados mesmo se Meta falhar (evidência do que *seria* enviado).
+  - UI `/admin/notifications` ganha coluna "Conteúdo" com telefone mascarado + `<details>` expandível do body.
+  - 49 testes novos (suite 1236 → 1285).
 - **Observador:** paciente, admin, suporte.
 
 ### [17.8 🟡 MÉDIO] Magic-link emails enviados sem log aplicativo
@@ -1502,7 +1509,7 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 |---|---|---|
 | 🔴 CRÍTICO | **3** | 10.1, 17.1 (+ uma menção forte a 9.1 dependendo do horizonte; **9.1 resolvido em Ondas 2C+2D+2E**) |
 | 🟠 ALTO | **5** | ~~9.1~~, ~~9.2~~, ~~22.1~~, ~~22.2~~, 10.2, 10.3, 17.2, 17.3, 17.4 (conta: 9 original; 4 resolvidos) |
-| 🟡 MÉDIO | **9** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4 (parcial PR-061 · D-071; escopo app-gerado fechado, webhooks externos → 10.4-B), ~~10.5 (PR-059 · D-070)~~, ~~10.6 (onda A PR-064 · D-072; onda B → 10.6-B)~~, ~~10.7 (já tinha UNIQUE)~~, ~~10.8 (PR-066 · D-074)~~, 17.5, 17.6, 17.7, 17.8 |
+| 🟡 MÉDIO | **8** | ~~9.3~~, ~~9.4~~, 9.5, 9.6, 22.3, 22.4, 22.5, 22.6, 10.4 (parcial PR-061 · D-071; escopo app-gerado fechado, webhooks externos → 10.4-B), ~~10.5 (PR-059 · D-070)~~, ~~10.6 (onda A PR-064 · D-072; onda B → 10.6-B)~~, ~~10.7 (já tinha UNIQUE)~~, ~~10.8 (PR-066 · D-074)~~, 17.5, 17.6, ~~17.7 (PR-067 · D-075)~~, 17.8 |
 | 🟢 SEGURO | **4** | 9.7, 22.7, 10.9, 17.9 |
 
 **Interpretação:** toda família 9.x (prompt-injection + AI-agents) está efetivamente fechada pra superfície atual. Quando LLM externo for plugado, seguir o check-list de 9 itens em `AGENTS.md` — as primitivas (`prompt-envelope`, `prompt-redact`, `customer-display`) já estão prontas. Backlog atual migra 100% pra findings não-AI (observabilidade, financeiro, LGPD).

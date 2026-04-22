@@ -24,6 +24,7 @@ import { NotificationRetryButton } from "./_NotificationRetryButton";
 import { NotificationFilters } from "./_NotificationFilters";
 import { formatDateBR } from "@/lib/datetime-br";
 import { logger } from "@/lib/logger";
+import { maskPhoneForAdmin } from "@/lib/appointment-notifications";
 
 const log = logger.with({ route: "/admin/notifications" });
 
@@ -43,6 +44,9 @@ type NotificationRow = {
   sent_at: string | null;
   message_id: string | null;
   error: string | null;
+  body: string | null;
+  target_phone: string | null;
+  rendered_at: string | null;
   created_at: string;
   appointments: {
     id: string;
@@ -140,7 +144,7 @@ async function loadRows({
   let query = supabase
     .from("appointment_notifications")
     .select(
-      "id, appointment_id, kind, template_name, status, scheduled_for, sent_at, message_id, error, created_at, appointments ( id, scheduled_at, status, customers ( name ), doctors ( display_name, full_name ) )",
+      "id, appointment_id, kind, template_name, status, scheduled_for, sent_at, message_id, error, body, target_phone, rendered_at, created_at, appointments ( id, scheduled_at, status, customers ( name ), doctors ( display_name, full_name ) )",
       { count: "exact" }
     );
 
@@ -273,12 +277,13 @@ export default async function NotificationsPage({
           </p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[900px]">
+            <table className="w-full min-w-[1080px]">
               <thead className="bg-cream-50 border-b border-ink-100">
                 <tr className="text-left text-[0.72rem] uppercase tracking-[0.12em] text-ink-500 font-medium">
                   <th className="px-4 py-2.5">Status</th>
                   <th className="px-4 py-2.5">Tipo</th>
                   <th className="px-4 py-2.5">Consulta</th>
+                  <th className="px-4 py-2.5">Conteúdo</th>
                   <th className="px-4 py-2.5">Agendado para</th>
                   <th className="px-4 py-2.5">Enviado</th>
                   <th className="px-4 py-2.5">Erro / msg_id</th>
@@ -321,6 +326,29 @@ export default async function NotificationsPage({
                           {r.appointment_id.slice(0, 8)}
                         </span>
                       </div>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-ink-600 max-w-[260px]">
+                      {r.target_phone ? (
+                        <div className="font-mono text-ink-700 mb-1">
+                          {maskPhoneForAdmin(r.target_phone)}
+                        </div>
+                      ) : (
+                        <div className="text-ink-400 italic mb-1">
+                          (sem snapshot)
+                        </div>
+                      )}
+                      {r.body ? (
+                        <details className="cursor-pointer group">
+                          <summary className="text-ink-500 group-hover:text-ink-700 transition-colors text-[0.7rem] uppercase tracking-wide">
+                            Ver mensagem
+                          </summary>
+                          <pre className="mt-1 whitespace-pre-wrap text-[0.72rem] text-ink-600 bg-cream-50 rounded p-2 max-h-48 overflow-y-auto">
+                            {r.body}
+                          </pre>
+                        </details>
+                      ) : (
+                        <span className="text-ink-400 italic">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-sm text-ink-600 font-mono">
                       {fmtDateTime(r.scheduled_for)}
