@@ -604,40 +604,55 @@ desassistido + risco de reclamação regulatória.
 
 ---
 
-## 16 · Paciente diz que não recebeu magic link (PR-070)
+## 16 · Paciente diz que não recebeu magic link (PR-070 / PR-070-B)
 
 **Contexto:** D-078 instalou trilha forense em `magic_link_issued_log`.
 Toda emissão + verificação de magic-link é logada com email **hasheado**
 (SHA-256 LGPD-safe), IP, UA, route e `action` taxonômica.
 
-**Passos:**
+**Caminho primário — UI `/admin/magic-links` (D-084):**
 
 1. Pedir o email exato do paciente por WA.
-2. SQL Editor no Supabase Studio — calcular hash e buscar:
+2. Abrir `/admin/magic-links`.
+3. No filtro **Email**, colar o endereço plaintext. O servidor calcula
+   o SHA-256 antes da query — email plaintext **nunca** é armazenado
+   nem logado como query literal.
+4. Opcional: restringir com **Action**, **Role**, **IP** ou data.
+5. Ler a coluna **Action** na linha mais recente + o campo `reason`
+   (quando há erro), cruzando com a tabela abaixo.
 
-   ```sql
-   -- cria o hash exato como a lib faz (normaliza: trim + lower)
-   with probe as (
-     select encode(
-       digest(lower(trim('alice@yahoo.com.br')), 'sha256'),
-       'hex'
-     ) as h
-   )
-   select
-     action,
-     reason,
-     role,
-     route,
-     issued_at,
-     ip,
-     metadata
-   from magic_link_issued_log, probe
-   where email_hash = probe.h
-   order by issued_at desc
-   limit 20;
-   ```
+O topo da página já mostra 4 cards com contagens das **últimas 24h**
+(total, emitidos, verificados, incidentes) — independentes dos filtros.
+Se "incidentes" passa de 0 sem motivo óbvio, investigar spike
+(enumeração em curso, SMTP quebrado, etc).
 
-3. Interpretar o `action`:
+**Fallback — SQL Editor no Supabase Studio:**
+
+Se a UI estiver indisponível ou se precisar de query mais complexa:
+
+```sql
+-- cria o hash exato como a lib faz (normaliza: trim + lower)
+with probe as (
+  select encode(
+    digest(lower(trim('alice@yahoo.com.br')), 'sha256'),
+    'hex'
+  ) as h
+)
+select
+  action,
+  reason,
+  role,
+  route,
+  issued_at,
+  ip,
+  metadata
+from magic_link_issued_log, probe
+where email_hash = probe.h
+order by issued_at desc
+limit 20;
+```
+
+**Interpretação do `action`:**
 
 | `action` | Significado | Ação |
 |---|---|---|
@@ -652,12 +667,14 @@ Toda emissão + verificação de magic-link é logada com email **hasheado**
 | `verified` | Paciente clicou no link e trocou por sessão | Bem-sucedido — se reclamou mesmo assim, é problema no device dele, não na plataforma. |
 | `verify_failed` | Paciente clicou em link expirado / inválido | Link tem validade curta; pedir novo. |
 
-4. Se `action=issued` mas paciente reclama:
-   - Checar `/admin/errors?source=whatsapp_delivery` — às vezes
-     confundem "email" com "WhatsApp".
-   - Checar caixa de spam do provedor dele (Yahoo/Gmail agressivo
-     com SMTP novo).
-   - Reenviar.
+**Se `action=issued` mas paciente reclama:**
+
+- Checar `/admin/errors?source=whatsapp_delivery` — às vezes
+  confundem "email" com "WhatsApp".
+- Checar caixa de spam do provedor dele (Yahoo/Gmail agressivo
+  com SMTP novo).
+- Reenviar (paciente mesmo pede em `/paciente/login`; admin **não** deve
+  reemitir pelo Studio — viola o modelo mental de magic-link).
 
 **Bypass último recurso (admin só):** você pode criar sessão
 pelo Supabase Studio → Authentication → Users → ação "Send magic
@@ -1032,6 +1049,7 @@ Sempre loga em `appointment_state_transition_log` com `action='bypassed'`.
 
 ---
 
-*Última revisão: 2026-04-20 · D-083 · PR-073-B/C (adiciona cron
-`expire-appointment-credits` na tabela §10 e reescreve §15 pra usar
-`/admin/credits` como caminho primário, mantendo SQL fallback)*
+*Última revisão: 2026-04-20 · D-084 · PR-070-B (§16 reescrito pra usar
+`/admin/magic-links` como caminho primário, mantendo SQL fallback).
+Revisão anterior: D-083 · PR-073-B/C (cron `expire-appointment-credits`
+em §10 + §15 apontando pra `/admin/credits`).*

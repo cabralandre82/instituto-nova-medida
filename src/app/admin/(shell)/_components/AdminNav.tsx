@@ -19,6 +19,7 @@ const NAV = [
   { href: "/admin/health", label: "Saúde" },
   { href: "/admin/crons", label: "Crons" },
   { href: "/admin/errors", label: "Erros" },
+  { href: "/admin/magic-links", label: "Magic-links" },
 ];
 
 export function AdminNav() {

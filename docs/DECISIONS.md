@@ -5,6 +5,140 @@
 
 ---
 
+## D-084 · UI admin de trilha forense de magic-link em `/admin/magic-links` (PR-070-B · follow-up finding 17.8) · 2026-04-20
+
+**Contexto.** D-078 instalou a tabela `magic_link_issued_log` com trilha
+forense completa (SHA-256 do email, IP, UA, route, 10 actions
+taxonômicas, imutabilidade). O PR original justificou não construir UI
+dedicada: volume esperado é baixo (~5 linhas/dia em prod estável) e
+`RUNBOOK.md §16` documenta a consulta SQL canônica no Supabase Studio.
+
+O problema que ficou: essa consulta depende de o operador lembrar
+(ou colar do runbook):
+
+```sql
+with probe as (
+  select encode(digest(lower(trim($1)), 'sha256'), 'hex') as h
+)
+select * from magic_link_issued_log
+ where email_hash = (select h from probe)
+ order by issued_at desc limit 50;
+```
+
+Em momento de stress ("paciente ligou, disse que não recebeu"), a
+fricção de abrir Studio, trocar de contexto, colar SQL, e voltar é
+subestimada. Consolidar em `/admin/magic-links` é puro ganho de UX pra
+operador solo — mesma query, menos passos, mesma superfície de risco
+(ninguém novo na organização precisa aprender SQL pra triar um link).
+
+**Decisão.** UI dedicada **read-only** consumindo a tabela existente.
+
+### Design
+
+- Página `src/app/admin/(shell)/magic-links/page.tsx` server component.
+- Listagem das últimas **200** linhas ordenadas por `issued_at DESC`.
+- Filtros, todos compostos via AND:
+    - **Email** (plaintext no input, hasheado no servidor via
+      `hashEmail()` antes do `WHERE email_hash = ?`). Email digitado
+      **nunca** vira query literal — mesma invariante criptográfica do
+      INSERT path.
+    - **Action** (select com os 10 valores de `MagicLinkAction`
+      documentados em D-078).
+    - **Role** (`admin`/`doctor`/`patient`).
+    - **IP** (texto livre, validado por regex `^[0-9a-fA-F:.]+$`
+      pra rejeitar injection via query param; Postgres `inet` faz a
+      validação semântica).
+    - **Intervalo de datas** BRT via `admin-list-filters.parseDateRange`.
+- Filtros reusam `parseSearch` / `parseStatusFilter` / `parseDateRange`
+  de `admin-list-filters.ts` (PR-058) — consistente com o resto das
+  listagens admin.
+- Resumo no topo: 4 cards contando eventos das **últimas 24h** por
+  bucket:
+    - Total.
+    - Emitidos (`issued + auto_provisioned`).
+    - Verificados (token usado).
+    - Incidentes (`rate_limited + provider_error + verify_failed`).
+  A contagem 24h **ignora filtros** — operador quer heatmap absoluto
+  pra detectar spike (ex: aumento súbito em `rate_limited` indica
+  enumeração em curso).
+- Seção "Troubleshooting rápido" no rodapé espelha o §16 do RUNBOOK
+  com 5 casos comuns (emitido mas não chegou, silenced_no_account,
+  rate_limited, provider_error) — reduz "vou abrir o runbook" pra
+  "está aqui embaixo".
+
+### Privacidade
+
+A decisão crítica: **email plaintext nunca aparece em lugar nenhum**.
+
+1. No input de busca o operador digita plaintext, mas o servidor
+   hasheia via `hashEmail()` **antes** do `WHERE`. Se logs de request
+   forem habilitados no futuro, ainda aparecerá o query param `?email=X`
+   — trade-off aceito porque o filtro precisa ser URL-shareable
+   (operador pode mandar link no WhatsApp pro desenvolvedor); a
+   alternativa (POST + session state) criaria fricção pior que o risco.
+2. A listagem mostra só:
+    - `email_hash` truncado em 8 chars + `…` (prefixo suficiente pra
+      agrupar visualmente linhas do mesmo user sem revelar a identidade
+      plena).
+    - `email_domain` cleartext (decisão explícita em D-078 — domínio
+      é métrica operacional, não PII direta).
+3. Hash completo fica no `title` do elemento (tooltip) pra quem
+   precisar copiar pra query SQL externa.
+
+### Escopo deliberadamente restrito
+
+- **Read-only.** Sem botão "reenviar": isso exige autenticação do
+  paciente/médica, não do admin. Admin reemitir link viola o modelo
+  mental de magic-link (só o dono do email deve disparar).
+- **Sem delete.** Audit trail é imutável por design (D-078 tem trigger
+  BEFORE DELETE bloqueando).
+- **Sem exportação CSV.** Se precisar, SQL Studio é one-liner. Exportação
+  em UI cria problema de LGPD (quem tem acesso ao arquivo) que não vale
+  a pena pagar por volume pequeno.
+
+### Por que não agregar em `/admin/errors`?
+
+`/admin/errors` é a view unificada de 5 fontes (cron, asaas, daily,
+notification, whatsapp) via `error-log.ts`. Magic-links não são "erro"
+na maior parte dos casos — a maioria das linhas é `issued` legítimo.
+Misturar causaria ruído; separar mantém `/admin/errors` focado em
+failure modes reais.
+
+### Artefatos
+
+- `src/app/admin/(shell)/magic-links/page.tsx` (nova página).
+- `src/app/admin/(shell)/_components/AdminNav.tsx` — item "Magic-links"
+  no final do nav (junto com Erros).
+- `docs/RUNBOOK.md` §16 — atualizado pra apontar `/admin/magic-links`
+  como caminho primário, SQL como fallback.
+- `docs/PRS-PENDING.md` — PR-070-B marcado como concluído.
+
+### Trade-offs aceitos
+
+- **Filtros sem pagination.** Limit fixo em 200. Em ~5 linhas/dia
+  volume, cobre ~40 dias — acima disso operador refina com filtro
+  de data. Alternativa (paginação real com `before`/`after` cursor)
+  seria overkill.
+- **Query de 24h é segunda chamada separada.** Poderia ser inline
+  num RPC único, mas duas queries independentes mantém a lógica
+  server-side trivial e aceita o extra round-trip (<50ms) em troca
+  de simplicidade.
+- **Sem filter por `route`.** Reduziria complexidade do formulário
+  sem ganho operacional claro (há só 3 routes que logam: `/api/auth/
+  magic-link`, `/api/paciente/auth/magic-link`, `/api/auth/callback`).
+
+### Tests
+
+Sem testes unitários novos pra esta página — é server component
+com queries diretas, `hashEmail()` já testado em `magic-link-log.test.ts`,
+filtros reusam `admin-list-filters.ts` (testes dedicados). Suite
+estável em 1440 testes.
+
+**Risco.** Muito baixo. Read-only, admin-only, consumindo tabela
+existente com imutabilidade garantida. Nenhum side effect possível.
+
+---
+
 ## D-083 · Sweep físico de `appointment_credits` expirados + UI admin dedicada (PR-073-B/C · follow-up finding 2.4) · 2026-04-20
 
 **Contexto.** D-081 instalou `appointment_credits` com status terminal
