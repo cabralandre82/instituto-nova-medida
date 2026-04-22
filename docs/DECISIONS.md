@@ -5,6 +5,191 @@
 
 ---
 
+## D-080 · Atalhos de auto-atendimento no dashboard do paciente + preços sob demanda em `/renovar` (PR-072 · findings 1.7 + 1.6) · 2026-04-20
+
+**Contexto.** Dois achados MÉDIOS da auditoria eram UX adjacentes que
+pesavam no ombro do admin solo:
+
+- **[1.7]** Dashboard `/paciente` não tinha atalho pra (a) "ver minha
+  receita vigente" (URL Memed) nem (b) "revisar meu endereço de
+  entrega". Consequência real: paciente perdia a URL (email marketing
+  antigo, celular trocado, inbox cheio) e pedia no WhatsApp — ciclo
+  crônico que drenava atenção do operador solo e não escalava.
+- **[1.6]** `/paciente/renovar` mostrava grade de planos com
+  "R$ 650,00 · 90 dias · PIX" + "ou R$ 750 em cartão" grudado em
+  "Seu plano atual", logo abaixo do CTA "Agendar reconsulta".
+  Paciente em `expiring_soon` abre a página pra entender como
+  renovar, encontra valor alto sem contexto clínico, sente fricção
+  ("vão me cobrar de novo?"), churn.
+
+Ambos os dados já existem (prescrição via `appointments.memed_prescription_url`
+imutável pós-D-030 · PR-030; endereço em `customers.address_*` com
+fluxo de edição estabelecido pelo PR-056 · D-067).
+
+**Decisão.** Dois componentes independentes no mesmo PR (ambos
+puramente UX/frontend, zero breaking changes, zero schema):
+
+### 1. Atalhos no dashboard (`/paciente` — finding 1.7)
+
+- **Lib pura `src/lib/patient-quick-links.ts`** com:
+  - `getPatientQuickLinks(supabase, customerId)` — orquestrador IO.
+  - Roda 2 queries em paralelo via `Promise.allSettled` (uma falha
+    não derruba a outra, dashboard continua renderizando).
+  - Prescrição: pega a ÚLTIMA `appointments` com
+    `memed_prescription_url NOT NULL`, ordenada por `finalized_at
+    desc, ended_at desc`.
+  - Endereço: `customers` joined nada — consulta direta.
+  - Retorna discriminated unions `LatestPrescription` (`ready` |
+    `none`) e `ShippingAddress` (`ready` | `incomplete` |
+    `missing`) para forçar exaustividade no render.
+  - **Fail-soft**: erro de banco → `log.error` + fallback `none`/
+    `missing`. Dashboard NUNCA crasha por falha em atalho opcional.
+
+- **Helpers puros testáveis**:
+  - `toLatestPrescription(row)` — aplica `isHttpsLink` (rejeita
+    `javascript:` / URLs malformadas) + `pickIssuedAt` (prefere
+    `finalized_at`, cai em `ended_at`) + `extractDoctorName`
+    (display_name → full_name → "Médica" fallback).
+  - `toShippingAddress(row)` — classifica em `ready` (todos os 6
+    campos obrigatórios), `incomplete` (alguns presentes mas
+    faltando campos → CTA "completar") ou `missing` (nenhum campo
+    → CTA "cadastrar"). Invariante: `REQUIRED_ADDRESS_FIELDS`
+    exclui `complement` (opcional por definição).
+
+- **UI no dashboard** (`src/app/paciente/(shell)/page.tsx`):
+  - Nova seção `QuickLinksSection` entre "Próxima consulta" e
+    "Consultas recentes". Só renderiza se **pelo menos um** atalho
+    tiver conteúdo (evita "card vazio" em paciente novo).
+  - `PrescriptionQuickLink` — link externo pro Memed (`target=_blank,
+    rel=noopener noreferrer`) + link secundário "Ver consulta".
+  - `ShippingQuickLink` — três estados: ready (summary line +
+    "Revisar endereço" linkando `/paciente/meus-dados/atualizar`
+    existente no PR-056), incomplete/missing (CTA "Cadastrar
+    endereço" com aviso sobre atraso de entrega).
+  - Cabeçalho "Atalhos" + link "Meus dados →" pro hub completo.
+
+### 2. Preços sob demanda em `/renovar` (finding 1.6)
+
+Três correções do finding item-por-item em
+`src/app/paciente/(shell)/renovar/page.tsx`:
+
+- **(a) Preços atrás de `<details>` HTML nativo**. Zero JS custom,
+  zero client component. `<summary>` "Ver valores de referência
+  (N plano(s))" com indicador "clique pra expandir ↓" que alterna
+  via `group-open:hidden`/`hidden group-open:inline` (Tailwind).
+  Paciente que quer apenas agendar reconsulta não é mais
+  confrontado com valores — só expande quem quer a referência.
+- **(b) "ou R$ 750 em cartão"** substituído por "parcelamento
+  disponível após a reconsulta" (conforme prescrição literal do
+  finding). Remove âncora numérica específica que induzia cálculo
+  mental.
+- **(c) Copy reforçado**: parágrafo acima do toggle explicita "os
+  valores são referência: o preço final pode variar conforme a
+  médica ajustar a dose ou trocar de plano". Nota adicional dentro
+  do toggle reforça a incerteza clínica. `plan.medication` removido
+  da renderização (consistente com [1.6] que queria reduzir
+  ansiedade — manter "Tirzepatida" + "R$ 650" juntos era parte do
+  problema).
+
+**Alternativas descartadas.**
+
+- **Página `/paciente/receita`** dedicada pra listar todas as
+  prescrições históricas. Rejeitado pra MVP: 1 paciente, fluxo
+  clínico tem raramente mais de uma receita ativa, atalho direto
+  resolve 99% dos casos. Se virar demanda, PR-072-B.
+- **Client component em `/renovar`** com useState pra toggle de
+  preços. Rejeitado: `<details>` nativo é acessível por padrão
+  (teclado, screen reader), SEO-friendly, não quebra sem JS,
+  zero custo de hidratação.
+- **Remover inteiramente a grade de planos** de `/renovar`.
+  Rejeitado: transparência de preço é positiva pra decisão;
+  problema era **fricção visual não-solicitada**, não a informação
+  em si.
+- **Sync Memed via API** pra detectar se receita expirou. Rejeitado:
+  requer parceria/credenciais Memed, complexidade alta, valor
+  marginal (Memed já mostra status na própria página que o link
+  abre).
+
+**Invariantes.**
+
+- I1. Atalho de receita só aparece se há `appointments.memed_prescription_url`
+  válido (http/https). `javascript:` / vazio / malformado → kind
+  `none`, atalho some.
+- I2. Atalho de endereço aparece **sempre** que paciente tem ao
+  menos 1 campo preenchido — em `incomplete`/`missing` converte-se
+  em convite pra completar cadastro (não é lacuna silenciosa).
+- I3. `/renovar` nunca mostra preços **antes** de o paciente
+  interagir com o toggle. Padrão default fechado.
+- I4. Prescrição cita `finalized_at` da consulta — imutável
+  pós-D-030. Mesmo se admin editar manualmente no SQL Studio (bypass
+  soft-delete), o timestamp é âncora histórica, não mutável do
+  caller.
+
+**Trade-offs.**
+
+- **Prescrição única vs. histórico**: mostramos só a mais recente.
+  Se médica re-prescreveu no follow-up, aparece a nova. Histórico
+  completo fica em `/paciente/consultas/[id]` (já existia). Trade
+  aceito: simplicidade > completude no atalho.
+- **`<details>` sem animação**: custo de expand é zero, experiência
+  HTML pura. Aceitável pelo ganho em acessibilidade/robustez.
+- **Fail-soft com `log.error`**: se DB sumir, o dashboard continua
+  (UpcomingCard, TreatmentCard, Consultas recentes continuam). Os
+  atalhos somem silenciosamente. Alternativa "mostra erro" foi
+  rejeitada — usuário já está estressado com o site parcialmente
+  fora; desaparecer atalhos opcionais é menos ruim que erro de UI.
+
+**Consequências.**
+
+- Findings [1.7] e [1.6] fechados. MÉDIOs caem de 5 pra 3 na PARTE 1+2.
+- Alívio operacional direto: paciente encontra a receita sozinho →
+  admin não precisa reenviar via WhatsApp.
+- Canal de renovação perde ruído visual → conversão esperada
+  +modesta (A/B não medido; decisão baseada em heurística UX).
+
+**Limitações conhecidas.**
+
+- Farmácias próximas / parceiras (finding [1.7] item c) fica fora do
+  escopo — depende de parceria comercial ainda não estabelecida.
+  Vira PR-072-B quando houver farmácia parceira registrada.
+- `address_complement` como opcional é assumido — se o fluxo
+  evoluir pra exigir complemento em zonas urbanas grandes, a lib
+  absorve com 1 linha (`REQUIRED_ADDRESS_FIELDS`).
+- Nenhum A/B testing — decisão é qualitativa, baseada no finding.
+  Métricas de "pediu receita no WhatsApp" seriam o teste natural.
+
+**Testes.**
+
+- `src/lib/patient-quick-links.test.ts` — **32 testes novos**:
+  - `pickIssuedAt` × 4 (prefere finalized_at, fallback ended_at,
+    both null, whitespace-as-null).
+  - `extractDoctorName` × 7 (display_name > full_name > fallback,
+    array shape, empty array, null total, whitespace normalização).
+  - `toLatestPrescription` × 10 (null row, happy path, http
+    aceito, `javascript:` rejeitado, URL inválida, url null, url
+    whitespace, sem timestamps, trim defensivo, array shape de
+    doctors).
+  - `toShippingAddress` × 11 (null row, all null, all whitespace,
+    happy path, sem complement, complement whitespace, faltando CEP,
+    faltando UF+cidade, faltando street, whitespace-as-missing,
+    invariante REQUIRED_ADDRESS_FIELDS).
+
+- Suíte global: 72 arquivos → **73** / 1370 testes → **1402** (+32).
+- `src/app/public-pages-safety.test.ts` continua passando (mudanças
+  em `/renovar` são rota autenticada; sem vazamento de CFM).
+
+**Artefatos.**
+
+- `src/lib/patient-quick-links.ts` · novo (lib pura + IO canônico).
+- `src/lib/patient-quick-links.test.ts` · novo (32 testes).
+- `src/app/paciente/(shell)/page.tsx` · novo `QuickLinksSection` +
+  `PrescriptionQuickLink` + `ShippingQuickLink`.
+- `src/app/paciente/(shell)/renovar/page.tsx` · preços em
+  `<details>` + copy revisado + remoção de `plan.medication` +
+  substituição de "R$ X em cartão" por "parcelamento disponível".
+
+---
+
 ## D-079 · Deprecação suave de `appointments.status='pending_payment'` (PR-071 · finding 1.4) · 2026-04-20
 
 **Contexto.** `appointments.status='pending_payment'` é resíduo do fluxo

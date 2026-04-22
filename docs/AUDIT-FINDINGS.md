@@ -892,20 +892,20 @@ _Fim da PARTE 2. Seguir pra PARTE 3 (Lentes 1+2 Paciente/Médica + 7+8 Produto/O
 - **Correção:** introduzir `NEXT_PUBLIC_WA_SUPPORT_NUMBER` + helper `src/lib/contact.ts` exportando `supportWhatsappUrl(message)`. Migrar todas ocorrências. Documentar no runbook ("mudou o telefone? troque a env var e faça deploy").
 - **Observador:** paciente, admin solo.
 
-### [1.6 🟡 MÉDIO] `/paciente/renovar` exibe preços altos sem contexto, mesmo pra quem ainda não decidiu renovar
+### [1.6 🟡 MÉDIO] `/paciente/renovar` exibe preços altos sem contexto, mesmo pra quem ainda não decidiu renovar ✅ RESOLVED (PR-072)
 
 - **Onde:** `src/app/paciente/(shell)/renovar/page.tsx:168-211`.
 - **Achado:** o paciente em `expiring_soon` abre a página pra "Agendar reconsulta" (CTA principal correto), mas logo abaixo vê grid de planos com **"R$ 650,00 · 90 dias · PIX"** grudado em "Seu plano atual". Sem contexto clínico, valor pode criar ansiedade ("será que vão me cobrar de novo?"), especialmente se o paciente ainda não consumiu o ciclo atual inteiro.
 - **Risco:** fricção de renovação, churn.
-- **Correção:** (a) exibir preços só depois que o paciente clicar "Ver valores para referência"; (b) substituir "ou R$ 750 em cartão" por "parcelamento disponível após a reconsulta"; (c) reforçar texto "o preço final pode variar conforme a médica ajustar a dose".
+- **Correção aplicada (PR-072 · D-080):** (a) preços embalados em `<details>` HTML nativo, colapsados por padrão — "Ver valores de referência" é 1 clique consciente; (b) "ou R$ 750 em cartão" substituído por "parcelamento disponível após a reconsulta"; (c) copy acima do toggle reforça "os valores são referência: o preço final pode variar conforme a médica ajustar a dose ou trocar de plano" + nota adicional dentro do toggle. `plan.medication` removido da renderização (mesma lógica de [1.6] — manter nome comercial + preço juntos era parte da âncora indesejada). Zero JS custom, zero client component — `<details>`/`<summary>` é primitivo HTML, acessível por padrão.
 - **Observador:** paciente, equipe clínica.
 
-### [1.7 🟡 MÉDIO] Dashboard do paciente não surface endereço/prescrição/histórico farmacêutico de forma rápida
+### [1.7 🟡 MÉDIO] Dashboard do paciente não surface endereço/prescrição/histórico farmacêutico de forma rápida ✅ RESOLVED (PR-072)
 
 - **Onde:** `src/app/paciente/(shell)/page.tsx`.
 - **Achado:** dashboard mostra próxima consulta + tratamento atual + 3 últimas consultas. Falta: (a) atalho para "ver minha prescrição vigente" (memed URL), (b) atalho para "ver meu endereço de entrega cadastrado", (c) "minhas farmácias próximas / farmácia parceira" (quando houver).
 - **Risco:** paciente pede pro suporte "manda minha receita" repetidamente — consome atenção do solo admin.
-- **Correção:** adicionar bloco `InfoCell` com link "Receita atual (Memed)" quando houver `memed_prescription_url` em appointment finalizado, e link "Revisar endereço" que abre `/paciente/enderecos` (onda futura).
+- **Correção aplicada (PR-072 · D-080):** (a) nova seção `QuickLinksSection` entre "Próxima consulta" e "Consultas recentes", alimentada por `src/lib/patient-quick-links.ts` (lib pura + IO canônica, fail-soft via `Promise.allSettled`). Atalho "Receita atual" mostra URL direta ao Memed da última `appointments.memed_prescription_url` válida (http/https), marcada por "emitida por {médica} em DD/MM/AAAA". Atalho "Endereço de entrega" resume `customers.address_*` e linka `/paciente/meus-dados/atualizar` (PR-056). Ambos os atalhos têm 3 estados declarativos (`ready`/`incomplete`/`missing`) com copy específico pra cada cenário. 32 testes unitários cobrem helpers puros (`isHttpsLink`, `toLatestPrescription`, `toShippingAddress`, `extractDoctorName`). **(c)** farmácias parceiras fica pendente — depende de parceria comercial ainda não estabelecida; vira PR-072-B.
 - **Observador:** paciente, admin solo.
 
 ### [1.8 🟢 SEGURO] Pontos positivos da jornada do paciente

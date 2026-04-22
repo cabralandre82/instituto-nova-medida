@@ -147,15 +147,28 @@ export default async function RenovarPage() {
         </div>
       </section>
 
+      {/**
+        * PR-072 · D-080 · finding 1.6:
+        * Preços escondidos atrás de <details> nativo. Paciente em
+        * `expiring_soon` que ainda não decidiu renovar não é mais
+        * confrontado com "R$ 650" sem contexto — quem quer ver
+        * expande com um clique, quem não quer segue no CTA acima.
+        * Sem JS custom (details/summary é primitivo HTML), sem
+        * necessidade de converter a página em client component.
+        */}
       <section>
         <h2 className="font-serif text-[1.3rem] text-ink-800 mb-2">
-          Para referência: planos disponíveis
+          Planos disponíveis
         </h2>
         <p className="text-sm text-ink-500 mb-5 max-w-2xl">
           A contratação do plano novo é feita <strong>depois da
           reconsulta</strong>, a partir da indicação da médica. Você
           recebe um link pessoal para revisar a prescrição, aceitar e
-          pagar — tudo aqui na sua área.
+          pagar — tudo aqui na sua área.{" "}
+          <span className="text-ink-500">
+            Os valores abaixo são referência: o preço final pode variar
+            conforme a médica ajustar a dose ou trocar de plano.
+          </span>
         </p>
 
         {plans.length === 0 ? (
@@ -163,49 +176,69 @@ export default async function RenovarPage() {
             Nenhum plano ativo no momento. Fale com a equipe.
           </p>
         ) : (
-          <div className="grid md:grid-cols-2 gap-4">
-            {plans.map((p) => {
-              const isRecommended = renewal.recommendedPlanSlug === p.slug;
-              return (
-                <div
-                  key={p.slug}
-                  className={`rounded-2xl border p-6 ${
-                    isRecommended
-                      ? "border-sage-300 bg-sage-50"
-                      : "border-ink-100 bg-white"
-                  }`}
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
-                    <h3 className="font-serif text-[1.2rem] text-ink-800">
-                      {p.name}
-                    </h3>
-                    {isRecommended && (
-                      <span className="text-[0.7rem] uppercase tracking-wide text-sage-700 font-semibold">
-                        Seu plano atual
-                      </span>
+          <details className="group rounded-2xl border border-ink-100 bg-cream-50 p-5">
+            <summary className="cursor-pointer list-none flex flex-wrap items-center justify-between gap-3 text-sm font-medium text-ink-700">
+              <span>
+                Ver valores de referência ({plans.length} plano
+                {plans.length === 1 ? "" : "s"})
+              </span>
+              <span className="text-xs text-ink-500 group-open:hidden">
+                clique pra expandir ↓
+              </span>
+              <span className="text-xs text-ink-500 hidden group-open:inline">
+                clique pra recolher ↑
+              </span>
+            </summary>
+
+            <div className="mt-5 grid md:grid-cols-2 gap-4">
+              {plans.map((p) => {
+                const isRecommended =
+                  renewal.recommendedPlanSlug === p.slug;
+                return (
+                  <div
+                    key={p.slug}
+                    className={`rounded-xl border p-5 ${
+                      isRecommended
+                        ? "border-sage-300 bg-sage-50"
+                        : "border-ink-100 bg-white"
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
+                      <h3 className="font-serif text-[1.15rem] text-ink-800">
+                        {p.name}
+                      </h3>
+                      {isRecommended && (
+                        <span className="text-[0.7rem] uppercase tracking-wide text-sage-700 font-semibold">
+                          Seu plano atual
+                        </span>
+                      )}
+                    </div>
+                    {p.description && (
+                      <p className="text-sm text-ink-600 mt-2">
+                        {p.description}
+                      </p>
                     )}
+                    <div className="mt-4 flex items-baseline gap-2">
+                      <span className="font-serif text-[1.4rem] text-ink-800">
+                        {brl(p.price_pix_cents)}
+                      </span>
+                      <span className="text-xs text-ink-500">
+                        · {p.cycle_days} dias · PIX
+                      </span>
+                    </div>
+                    <p className="text-xs text-ink-500 mt-1">
+                      parcelamento disponível após a reconsulta
+                    </p>
                   </div>
-                  {p.medication && (
-                    <p className="text-sm text-ink-500">{p.medication}</p>
-                  )}
-                  {p.description && (
-                    <p className="text-sm text-ink-600 mt-2">{p.description}</p>
-                  )}
-                  <div className="mt-4 flex items-baseline gap-2">
-                    <span className="font-serif text-[1.6rem] text-ink-800">
-                      {brl(p.price_pix_cents)}
-                    </span>
-                    <span className="text-xs text-ink-500">
-                      · {p.cycle_days} dias · PIX
-                    </span>
-                  </div>
-                  <p className="text-xs text-ink-500 mt-1">
-                    ou {brl(p.price_cents)} em cartão
-                  </p>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+              <p className="md:col-span-2 text-xs text-ink-500 pt-1">
+                O valor final é definido pela médica junto com a
+                prescrição. Estes são apenas os planos vigentes hoje,
+                sem considerar ajustes de dose ou trocas clínicas.
+              </p>
+            </div>
+          </details>
         )}
       </section>
 

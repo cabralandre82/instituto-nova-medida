@@ -28,6 +28,11 @@ import {
   formatWeekdayLongBR,
 } from "@/lib/datetime-br";
 import { whatsappSupportUrl } from "@/lib/contact";
+import {
+  getPatientQuickLinks,
+  type LatestPrescription,
+  type ShippingAddress,
+} from "@/lib/patient-quick-links";
 import { ActiveFulfillmentCard } from "./_ActiveFulfillmentCard";
 import { PendingOfferCard } from "./_PendingOfferCard";
 
@@ -60,12 +65,14 @@ export default async function PatientDashboard() {
     history,
     pendingOffers,
     activeFulfillments,
+    quickLinks,
   ] = await Promise.all([
     getUpcomingAppointment(supabase, customerId, now),
     getRenewalInfo(supabase, customerId, now),
     listPastAppointments(supabase, customerId, 3),
     listPendingOffers(supabase, customerId),
     listActiveFulfillments(supabase, customerId),
+    getPatientQuickLinks(supabase, customerId),
   ]);
 
   const active = renewal.active;
@@ -142,6 +149,11 @@ export default async function PatientDashboard() {
           hasUpcoming={upcoming !== null}
         />
       </section>
+
+      <QuickLinksSection
+        prescription={quickLinks.latestPrescription}
+        shipping={quickLinks.shippingAddress}
+      />
 
       <section className="rounded-2xl bg-white border border-ink-100 p-6 sm:p-7">
         <div className="flex items-center justify-between mb-4 gap-4">
@@ -441,6 +453,132 @@ function InfoCell({
       <p className="text-[0.75rem] uppercase tracking-wide text-ink-500">{label}</p>
       <p className="mt-1 text-ink-800 font-medium">{value}</p>
       {hint && <p className="mt-0.5 text-xs text-ink-500">{hint}</p>}
+    </div>
+  );
+}
+
+/**
+ * Atalhos de auto-atendimento — PR-072 · D-080 · finding 1.7.
+ * Só renderiza se pelo menos um atalho tiver conteúdo relevante;
+ * em estados totalmente vazios (paciente novo, sem consulta ainda)
+ * some pra não poluir.
+ */
+function QuickLinksSection({
+  prescription,
+  shipping,
+}: {
+  prescription: LatestPrescription;
+  shipping: ShippingAddress;
+}) {
+  const hasPrescription = prescription.kind === "ready";
+  const hasShippingInfo = shipping.kind !== "missing";
+  if (!hasPrescription && !hasShippingInfo) return null;
+
+  return (
+    <section className="mb-10 rounded-2xl bg-white border border-ink-100 p-6 sm:p-7">
+      <div className="flex items-center justify-between mb-4 gap-4">
+        <h2 className="font-serif text-[1.25rem] text-ink-800">
+          Atalhos
+        </h2>
+        <Link
+          href="/paciente/meus-dados"
+          className="text-sm text-sage-700 hover:text-sage-800 whitespace-nowrap"
+        >
+          Meus dados →
+        </Link>
+      </div>
+      <div className="grid sm:grid-cols-2 gap-4">
+        {prescription.kind === "ready" && (
+          <PrescriptionQuickLink data={prescription} />
+        )}
+        <ShippingQuickLink data={shipping} />
+      </div>
+    </section>
+  );
+}
+
+function PrescriptionQuickLink({
+  data,
+}: {
+  data: Extract<LatestPrescription, { kind: "ready" }>;
+}) {
+  return (
+    <div className="rounded-xl border border-sage-200 bg-sage-50 p-5">
+      <p className="text-[0.75rem] uppercase tracking-wide text-sage-700 font-medium">
+        Receita atual
+      </p>
+      <p className="mt-1 text-ink-800 font-medium">Prescrição no Memed</p>
+      <p className="mt-0.5 text-xs text-ink-500">
+        Emitida por {data.doctorName} em {formatDateBR(data.issuedAt)}
+      </p>
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-sm">
+        <a
+          href={data.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-sage-700 hover:text-sage-800 font-medium underline decoration-sage-400"
+        >
+          Abrir receita no Memed →
+        </a>
+        <Link
+          href={`/paciente/consultas/${data.appointmentId}`}
+          className="text-ink-600 hover:text-ink-800"
+        >
+          Ver consulta
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+function ShippingQuickLink({ data }: { data: ShippingAddress }) {
+  if (data.kind === "ready") {
+    return (
+      <div className="rounded-xl border border-ink-100 bg-white p-5">
+        <p className="text-[0.75rem] uppercase tracking-wide text-ink-500">
+          Endereço de entrega
+        </p>
+        <p className="mt-1 text-ink-800 font-medium">{data.summaryLine}</p>
+        {data.complement && (
+          <p className="text-xs text-ink-500">{data.complement}</p>
+        )}
+        <p className="mt-0.5 text-xs text-ink-500">
+          {data.cityState} · CEP {data.zipcode}
+        </p>
+        <div className="mt-3">
+          <Link
+            href="/paciente/meus-dados/atualizar"
+            className="text-sm text-sage-700 hover:text-sage-800 font-medium"
+          >
+            Revisar endereço →
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-cream-300 bg-cream-50 p-5">
+      <p className="text-[0.75rem] uppercase tracking-wide text-ink-500">
+        Endereço de entrega
+      </p>
+      <p className="mt-1 text-ink-800 font-medium">
+        {data.kind === "incomplete"
+          ? "Endereço incompleto"
+          : "Endereço não cadastrado"}
+      </p>
+      <p className="mt-0.5 text-xs text-ink-600">
+        Cadastre antes da primeira entrega pra evitar atraso ou retorno
+        da caixa.
+      </p>
+      <div className="mt-3">
+        <Link
+          href="/paciente/meus-dados/atualizar"
+          className="text-sm text-sage-700 hover:text-sage-800 font-medium"
+        >
+          Cadastrar endereço →
+        </Link>
+      </div>
     </div>
   );
 }
