@@ -5,6 +5,61 @@
 
 ---
 
+## D-067 · Self-service de atualização de PII no `/paciente` · 2026-04-20
+
+**Contexto.** O guard D-065 (PR-054) bloqueia atualização cega de PII nos endpoints `/api/checkout` e `/api/agendar/reserve` quando `customers.user_id` está populado — defesa contra "CPF-takeover" (atacante sobrescrevendo e-mail/endereço de uma vítima com CPF conhecido).
+
+A decisão é correta do ponto de vista de segurança, mas cria uma fricção colateral: **paciente legítimo que mudou de e-mail, telefone ou endereço não tem caminho pra atualizar esses dados**. Ele só tem as telas de compra/agendamento, onde os inputs são aceitos mas silenciosamente ignorados (update_blocked, D-065). Resultado: cobrança/entrega continua indo pro endereço antigo.
+
+O follow-up óbvio: oferecer um fluxo **autenticado**, onde `requirePatient()` prova quem é o dono da conta, e permitir `update_full` sem passar pelo guard defensivo de terceiros.
+
+**Decisão.** Criar `POST /api/paciente/meus-dados/atualizar` + UI em `/paciente/meus-dados/atualizar` com:
+
+1. **Autenticação obrigatória** via `requirePatient()`. Paciente anônimo é redirecionado ao login — não há superfície POST anônima.
+2. **Validação reusa libs existentes:**
+   - Nome via `sanitizeShortText(TEXT_PATTERNS.personName)` (PR-037).
+   - Endereço via `validateAddress` (PR-035 · D-053) — mesmo charset allowlist usado em checkout e edit-shipping.
+   - E-mail: regex simples + lowercase + trim + max 254 (RFC 5321).
+   - Telefone: só dígitos, 10–13 (DDD + número, tolera `+55` prefixado).
+   - **CPF é silenciosamente ignorado** se vier no payload. Não rejeitar evita oracle ("erro porque mandei CPF" vira "campo imutável"); o front simplesmente não envia.
+3. **Lógica pura extraída pra `src/lib/meus-dados-update.ts`** (`parseAndValidateUpdate`, `computeChangedFields`) — testável sem Supabase, 27 testes.
+4. **Diff normalizado** antes do UPDATE:
+   - Se `changedFields.length === 0`, retorna `{ ok: true, updated: false }` sem INSERT no banco nem audit log. Não-evento puro.
+   - Se há diff, executa UPDATE e loga `pii_updated_authenticated` em `patient_access_log` com `changed_fields[]` (só nomes de campo; sem PII bruta), `patient_user_id`, IP, UA, route.
+5. **Reusa a action `pii_updated_authenticated`** criada em PR-054 · D-065 — mesma semântica, mesma trilha LGPD. Actor = `system` (não há admin humano nesse fluxo; a responsabilidade é do próprio paciente autenticado, registrada via `patient_user_id` no metadata).
+6. **Estado anonimizado trava o fluxo.** Se `customers.anonymized_at IS NOT NULL`, a API responde 409 `{ error: 'anonymized' }` e a página renderiza um aviso readonly. Paciente anonimizado não tem PII coerente pra sobrescrever.
+7. **Sync com Asaas: fora de escopo.** Asaas customer continua com snapshot do último checkout. A próxima cobrança já pega os dados persistidos (o `/api/checkout` re-busca do banco — D-065). Se virar dor operacional (invoice chegando com dados velhos), criar follow-up opcional PR-056-B pra chamar `updateCustomer(asaas_customer_id, …)`.
+
+**Shape da resposta:**
+- `200 { ok: true, updated: true, changedFields: string[] }` — UPDATE executado.
+- `200 { ok: true, updated: false, changedFields: [] }` — nada mudou.
+- `400 { ok: false, error: 'body_invalid' | 'validation_failed', fieldErrors? }` — input inválido.
+- `409 { ok: false, error: 'anonymized' }` — conta anonimizada.
+- `500 { ok: false, error: 'read_failed' | 'update_failed' }` — falha de banco (logada).
+
+**UX (UI):**
+- Form único em `/paciente/meus-dados/atualizar` com nome, e-mail, telefone, CEP+auto-complete ViaCEP (via proxy `/api/cep/[cep]`, PR-035 · D-053), rua, número, complemento, bairro, cidade, UF.
+- Defaults populados server-side (zero flash de campos vazios).
+- Feedback inline: `fieldErrors` por campo + mensagens global/sucesso.
+- Link "Atualizar dados" no topo da `/paciente/meus-dados` (só quando não-anonimizado).
+- Navegação lateral existente (`PatientNav`) já tem "Meus dados (LGPD)" — o fluxo fica: sidebar → Meus dados → botão "Atualizar dados".
+
+**Por que `POST` e não `PUT`.** Mantemos coerência com o resto das rotas de paciente. `PUT /api/paciente/fulfillments/[id]/shipping` usa `PUT` porque edita recurso identificado por id na URL. Aqui o "recurso" é implícito — a própria sessão. `POST` numa rota singleton fica mais idiomático.
+
+**Por que reusar `pii_updated_authenticated` em vez de criar nova action.** Semântica é idêntica: "paciente autenticado atualizou própria PII". A distinção entre "via checkout" vs. "via self-service" fica no `metadata.route` e `metadata.self_service: true`, sem poluir o tipo `PatientAccessAction`.
+
+**Consequências:**
+- Paciente recupera autonomia pra manter dados em dia sem passar por guard defensivo nem contato humano.
+- Trilha LGPD continua impecável — todo update de PII no banco é rastreado (seja via checkout/agendar, seja via self-service).
+- Se surgir novo fluxo de atualização (ex.: app mobile), reutiliza `parseAndValidateUpdate` + `computeChangedFields` + o mesmo endpoint.
+- Fricção oposta (paciente tentar alterar CPF) é absorvida silenciosamente — UI não expõe o campo, API ignora se vier; se no futuro for necessário, exigirá fluxo auditado próprio com reverificação.
+
+**Follow-ups opcionais:**
+- **PR-056-B:** sincronização com Asaas quando e-mail/phone/endereço muda (chama `updateCustomer` da lib Asaas). Baixa prioridade enquanto não houver relato de invoice inconsistente.
+- **PR-056-C:** 2FA (OTP por e-mail atual) antes de trocar o e-mail de contato. Só se virar problema de conta comprometida.
+
+---
+
 ## D-066 · Audit trail de signed URLs de Storage (finding 17.4) · 2026-04-20
 
 **Contexto.** Finding [17.4 🟠 ALTO]: quatro rotas emitem signed URLs do Supabase Storage pra documentos financeiros sem deixar rastro. São elas:

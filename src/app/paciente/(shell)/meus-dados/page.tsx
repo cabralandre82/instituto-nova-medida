@@ -15,6 +15,7 @@
  * A tela nunca manipula PII no cliente; renderização é server-side.
  */
 
+import Link from "next/link";
 import { requirePatient } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { formatDateTimeShortBR } from "@/lib/datetime-br";
@@ -130,9 +131,19 @@ export default async function MeusDadosPage() {
 
       {/* Resumo em leitura */}
       <section className="mb-8 rounded-2xl border border-ink-100 bg-white p-6 space-y-4">
-        <h2 className="font-serif text-[1.25rem] text-ink-800">
-          Seu cadastro
-        </h2>
+        <div className="flex items-start justify-between gap-3">
+          <h2 className="font-serif text-[1.25rem] text-ink-800">
+            Seu cadastro
+          </h2>
+          {!data?.anonymized_at && (
+            <Link
+              href="/paciente/meus-dados/atualizar"
+              className="text-xs font-medium text-ink-800 underline underline-offset-2 hover:text-ink-900 whitespace-nowrap"
+            >
+              Atualizar dados
+            </Link>
+          )}
+        </div>
         <dl className="grid sm:grid-cols-2 gap-x-6 gap-y-4 text-sm">
           <div>
             <dt className="text-ink-500">Nome</dt>

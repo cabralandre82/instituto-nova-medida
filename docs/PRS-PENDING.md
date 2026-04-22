@@ -2,7 +2,7 @@
 
 Lista consolidada de PRs identificados na auditoria (`docs/AUDIT-FINDINGS.md`) que **não podem ser abertos só pelo engenheiro**: dependem de dados reais, decisões do operador ou acesso externo.
 
-Atualizado em: **2026-04-20** (pós-PR-055 / D-066 — document_access_log: audit trail de signed URLs de Storage).
+Atualizado em: **2026-04-20** (pós-PR-056 / D-067 — self-service de atualização de PII em `/paciente/meus-dados/atualizar`).
 
 ---
 
@@ -95,9 +95,10 @@ Endereço físico da sede (rua, número, bairro, cidade, UF, CEP): _____________
 
 Enquanto o operador colhe os dados acima, o engenheiro segue com os PRs que não dependem de inputs externos.
 
-**Status pós-PR-055 (2026-04-20):**
+**Status pós-PR-056 (2026-04-20):**
 
 - ✅ Concluídos:
+  - PR-056 (D-067): **self-service de atualização de PII em `/paciente/meus-dados/atualizar`** — destrava a fricção criada pelo guard D-065 (paciente com `customer.user_id` não tinha caminho pra atualizar e-mail/phone/endereço fora do funil de compra, que agora bloqueia silenciosamente). POST `/api/paciente/meus-dados/atualizar` protegido por `requirePatient()`; lib pura `src/lib/meus-dados-update.ts` (`parseAndValidateUpdate` + `computeChangedFields`) reusa `sanitizeShortText(personName)` (PR-037), `validateAddress` (PR-035), regex de e-mail + dígito-only de telefone; CPF silenciosamente ignorado se vier no payload (evita oracle); `anonymized_at` responde 409; diff normalizado (case/lower/digits/complement null-vs-empty) evita UPDATE + log de não-evento; trilha LGPD reusa action `pii_updated_authenticated` (D-065) com `actor_kind='system'` + `metadata.self_service=true` + `changed_fields[]`. UI em `src/app/paciente/(shell)/meus-dados/atualizar/page.tsx` (server) + `_AtualizarForm.tsx` (client com ViaCEP via proxy `/api/cep/[cep]` + máscaras). Link "Atualizar dados" no topo do `/paciente/meus-dados`. **27 testes novos; suíte 1058/1058.** Sem migration, sem breaking changes. Follow-ups opcionais: **PR-056-B** (sync Asaas `updateCustomer`) e **PR-056-C** (OTP antes de trocar e-mail principal).
   - Onda 1A (D-047): PR-024, PR-025, PR-026 (dark patterns + fail-fast CRON_SECRET)
   - Onda 1B (D-048): PR-013, PR-020, PR-030, PR-031 (integridade financeira, prontuário, audit log)
   - Onda 1C (D-049): PR-011, PR-015, PR-021 (acceptance server-side, race em payment, timezone BR)
