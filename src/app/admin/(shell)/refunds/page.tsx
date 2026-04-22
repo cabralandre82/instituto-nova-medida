@@ -20,15 +20,28 @@
  * (`refund_processed_method`, `refund_external_ref`).
  */
 
+import Link from "next/link";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { isAsaasRefundsEnabled } from "@/lib/refunds";
 import { RefundForm } from "./_RefundForm";
 import { formatCurrencyBRL, formatDateTimeBR } from "@/lib/datetime-br";
 import { logger } from "@/lib/logger";
+import {
+  buildAdminListUrl,
+  escapeIlike,
+  hasActiveFilters,
+  parseDateRange,
+  parseSearch,
+  parseStatusFilter,
+} from "@/lib/admin-list-filters";
 
 const log = logger.with({ route: "/admin/refunds" });
 
 export const dynamic = "force-dynamic";
+
+const REFUND_METHODS = ["manual", "asaas_api"] as const;
+type RefundMethod = (typeof REFUND_METHODS)[number];
 
 type PendingRow = {
   id: string;
@@ -102,16 +115,51 @@ async function loadPending(): Promise<PendingRow[]> {
   return (data ?? []) as unknown as PendingRow[];
 }
 
-async function loadProcessed(): Promise<ProcessedRow[]> {
+type ProcessedFilters = {
+  q: string | null;
+  method: RefundMethod | null;
+  fromIso: string | null;
+  toIso: string | null;
+  invertedRange: boolean;
+};
+
+async function loadProcessed(
+  filters: ProcessedFilters
+): Promise<ProcessedRow[]> {
   const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
+
+  // Search por nome do paciente: pre-resolve customer_ids que casam,
+  // depois filtra `customer_id IN (...)`. Mesmo padrão que payouts pra
+  // evitar PostgREST .or() em coluna relacionada (frágil).
+  let customerIdSubset: string[] | null = null;
+  if (filters.q) {
+    customerIdSubset = await resolveCustomersByName(supabase, filters.q);
+    if (customerIdSubset.length === 0) return [];
+  }
+
+  let builder = supabase
     .from("appointments")
     .select(
-      "id, scheduled_at, status, refund_processed_at, refund_processed_method, refund_external_ref, refund_processed_notes, customers ( name ), doctors ( display_name, full_name ), payments ( amount_cents )"
+      "id, scheduled_at, status, refund_processed_at, refund_processed_method, refund_external_ref, refund_processed_notes, customer_id, customers ( name ), doctors ( display_name, full_name ), payments ( amount_cents )"
     )
     .not("refund_processed_at", "is", null)
     .order("refund_processed_at", { ascending: false })
-    .limit(50);
+    .limit(100);
+
+  if (filters.method) {
+    builder = builder.eq("refund_processed_method", filters.method);
+  }
+  if (filters.fromIso) {
+    builder = builder.gte("refund_processed_at", filters.fromIso);
+  }
+  if (filters.toIso) {
+    builder = builder.lte("refund_processed_at", filters.toIso);
+  }
+  if (customerIdSubset) {
+    builder = builder.in("customer_id", customerIdSubset);
+  }
+
+  const { data, error } = await builder;
   if (error) {
     log.error("loadProcessed", { err: error });
     return [];
@@ -119,10 +167,57 @@ async function loadProcessed(): Promise<ProcessedRow[]> {
   return (data ?? []) as unknown as ProcessedRow[];
 }
 
-export default async function RefundsPage() {
+async function resolveCustomersByName(
+  supabase: SupabaseClient,
+  q: string
+): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("customers")
+    .select("id")
+    .ilike("name", `%${escapeIlike(q)}%`)
+    .limit(50);
+  if (error) {
+    log.error("resolveCustomersByName", { err: error });
+    return [];
+  }
+  return ((data ?? []) as { id: string }[]).map((r) => r.id);
+}
+
+type SearchParams = {
+  q?: string;
+  method?: string;
+  from?: string;
+  to?: string;
+};
+
+export default async function RefundsPage({
+  searchParams,
+}: {
+  searchParams: Promise<SearchParams>;
+}) {
+  const params = await searchParams;
+  const q = parseSearch(params.q);
+  const method = parseStatusFilter<RefundMethod>(
+    params.method,
+    REFUND_METHODS
+  );
+  const { fromIso, toIso, invertedRange } = parseDateRange(
+    params.from,
+    params.to
+  );
+
+  const processedFilters: ProcessedFilters = {
+    q,
+    method,
+    fromIso,
+    toIso,
+    invertedRange,
+  };
+  const isFiltered = hasActiveFilters({ q, method, fromIso, toIso });
+
   const [pending, processed] = await Promise.all([
     loadPending(),
-    loadProcessed(),
+    loadProcessed(processedFilters),
   ]);
 
   const asaasEnabled = isAsaasRefundsEnabled();
@@ -157,7 +252,7 @@ export default async function RefundsPage() {
           tone={pending.length > 0 ? "terracotta" : "ink"}
         />
         <Card
-          label="Processados (últimos 50)"
+          label={isFiltered ? "Processados (filtrado)" : "Processados (últimos 100)"}
           value={String(processed.length)}
           hint={processed.length > 0 ? "histórico recente" : "ainda vazio"}
           tone="ink"
@@ -204,10 +299,29 @@ export default async function RefundsPage() {
       {/* Histórico */}
       <section>
         <h2 className="font-serif text-[1.3rem] text-ink-800 mb-4">
-          Histórico
+          Histórico{" "}
+          <span className="text-ink-400 font-sans text-base font-normal">
+            ({processed.length}
+            {isFiltered ? " · filtrado" : ""})
+          </span>
         </h2>
+
+        <ProcessedFilterBar
+          defaults={{
+            q: q ?? "",
+            method: method ?? "",
+            from: typeof params.from === "string" ? params.from : "",
+            to: typeof params.to === "string" ? params.to : "",
+          }}
+          invertedRange={invertedRange}
+        />
+
         {processed.length === 0 ? (
-          <p className="text-ink-500">Sem estornos processados ainda.</p>
+          <p className="text-ink-500">
+            {isFiltered
+              ? "Nenhum estorno processado bate com os filtros."
+              : "Sem estornos processados ainda."}
+          </p>
         ) : (
           <div className="rounded-2xl bg-white border border-ink-100 overflow-hidden">
             <table className="w-full">
@@ -298,6 +412,84 @@ function Card({
       </p>
       <p className="mt-2 text-xs text-ink-500">{hint}</p>
     </div>
+  );
+}
+
+function ProcessedFilterBar({
+  defaults,
+  invertedRange,
+}: {
+  defaults: { q: string; method: string; from: string; to: string };
+  invertedRange: boolean;
+}) {
+  const isFiltered =
+    defaults.q.length > 0 ||
+    defaults.method.length > 0 ||
+    defaults.from.length > 0 ||
+    defaults.to.length > 0;
+
+  return (
+    <form
+      method="get"
+      action="/admin/refunds"
+      className="mb-4 rounded-2xl border border-ink-100 bg-white p-4"
+    >
+      <div className="grid gap-3 md:grid-cols-[1fr_160px_140px_140px_auto]">
+        <input
+          type="search"
+          name="q"
+          defaultValue={defaults.q}
+          placeholder="Buscar histórico por nome do paciente"
+          className="h-10 px-3 rounded-lg border border-ink-200 bg-white text-sm text-ink-800 focus:outline-none focus:border-sage-500"
+          aria-label="Buscar por nome do paciente"
+        />
+        <select
+          name="method"
+          defaultValue={defaults.method}
+          className="h-10 px-3 rounded-lg border border-ink-200 bg-white text-sm text-ink-800 focus:outline-none focus:border-sage-500"
+          aria-label="Filtrar por método"
+        >
+          <option value="">Todos os métodos</option>
+          <option value="manual">Manual</option>
+          <option value="asaas_api">Asaas API</option>
+        </select>
+        <input
+          type="date"
+          name="from"
+          defaultValue={defaults.from}
+          className="h-10 px-3 rounded-lg border border-ink-200 bg-white text-sm text-ink-800 focus:outline-none focus:border-sage-500"
+          aria-label="Processado a partir de"
+        />
+        <input
+          type="date"
+          name="to"
+          defaultValue={defaults.to}
+          className="h-10 px-3 rounded-lg border border-ink-200 bg-white text-sm text-ink-800 focus:outline-none focus:border-sage-500"
+          aria-label="Processado até"
+        />
+        <div className="flex gap-2">
+          <button
+            type="submit"
+            className="h-10 px-4 rounded-lg bg-ink-800 text-white text-sm font-medium hover:bg-ink-700 transition-colors"
+          >
+            Filtrar
+          </button>
+          {isFiltered && (
+            <Link
+              href={buildAdminListUrl("/admin/refunds", {})}
+              className="h-10 px-4 flex items-center rounded-lg border border-ink-200 text-sm text-ink-600 hover:bg-cream-50 transition-colors"
+            >
+              Limpar
+            </Link>
+          )}
+        </div>
+      </div>
+      {invertedRange && (
+        <p className="mt-2 text-xs text-terracotta-700">
+          ⚠ Data inicial maior que a final — corrija pra ver resultados.
+        </p>
+      )}
+    </form>
   );
 }
 

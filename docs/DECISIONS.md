@@ -5,6 +5,61 @@
 
 ---
 
+## D-069 · Filtros + busca em listagens admin (PR-058 · finding 8.7) · 2026-04-20
+
+**Contexto.** A auditoria sinalizou que `/admin/payouts`, `/admin/refunds` e `/admin/fulfillments` eram listas planas, sem busca nem filtro. `/admin/pacientes` (D-045 · 3.B) já tinha trigram-search, criando inconsistência entre as superfícies. Para um operador solo com 100+ fulfillments/mês, "achar o caso do João da Silva de duas semanas atrás" exigia SQL direto no Supabase — fricção inaceitável.
+
+**Decisão.**
+
+1. **Lib `src/lib/admin-list-filters.ts`** — helpers PUROS reutilizáveis pelas 3 páginas:
+   - `parseSearch(raw)`: trim, devolve null se vazio, **trunca em 80 chars** (defesa preventiva contra DoS via query gigante).
+   - `parseStatusFilter<T>(raw, allowlist)`: aceita só valores da allowlist tipada; fora dela retorna null sem erro (UX é "filtro não aplicado", não 500).
+   - `parseDateRange(rawFrom, rawTo)`: `YYYY-MM-DD` interpretado como BRT (UTC-3, sem DST desde 2019). Retorna ISO UTC: `from = 00:00 BRT (=03:00Z)`, `to = 23:59:59.999 BRT (=02:59:59.999Z+1d)`. Valida ano em [2020, 2100], rejeita 31 fev / mês 13 / formato inválido. Sinaliza `invertedRange` se `from > to`.
+   - `parsePeriodFilter(raw)`: `YYYY-MM` exato (usado em `payouts.reference_period`).
+   - `escapeIlike` / `escapeOrValue`: mesmas convenções de `patient-search.ts` pra evitar drift em escape semântico.
+   - `buildAdminListUrl(base, params)`: monta query-string canônica omitindo nulls/vazios.
+   - `hasActiveFilters(params)`: true se qualquer chave não-nula/não-vazia.
+   - **40 testes** cobrindo edge cases (DoS truncation, allowlist, datas inválidas, ano fora da janela, inversão de range, escape).
+
+2. **`/admin/fulfillments`** — `FilterBar` (search por `customer_name`, status full allowlist `FulfillmentStatus`, date range em `created_at`). Modo dual: sem filtro mantém os 4 grupos originais (Pagos / Na farmácia / Despachados / Pendentes); com filtro vira tabela única ordenada `created_at desc`, limite 200.
+
+3. **`/admin/payouts`** — `FilterBar` (search por nome da médica, status payout, `reference_period` YYYY-MM, date range). Mesma UX dual. Search por médica usa **sub-query**: pre-resolve `doctor_ids` via `doctors.display_name OR doctors.full_name ilike` (limit 50) e aplica `doctor_id IN (...)`. Evita `.or()` em coluna relacionada do PostgREST (frágil) e mantém tipagem.
+
+4. **`/admin/refunds`** — `ProcessedFilterBar` aplicada **só na seção Histórico** (Pendentes é fluxo curto e ativo, sem necessidade de filtro). Search por nome do paciente (sub-query → `customer_id IN`), método (`manual`/`asaas_api`), date range em `refund_processed_at`. Limite subiu de 50 → 100. Card "Processados" passa a refletir filtro vs. baseline ("Processados (filtrado)" vs. "Processados (últimos 100)").
+
+**Por que server-form (`method=get`) e não interactivity client-side.** Solo operator + sem JS quebra = melhor SSR puro. URL canônica permite bookmark (e.g. "Pagos de abril/2026" colado direto), back/forward funciona, share-link entre operadores funciona. Nada precisa de hydratação. Custo: cada filter altera ⇒ navegação completa. Aceito porque o volume de uso é baixo.
+
+**Por que sub-query em vez de PostgREST `.or()` em coluna relacionada.** `doctors.display_name.ilike.%X%,doctors.full_name.ilike.%X%` em uma só query exige sintaxe nested filter do PostgREST (`doctors!inner(display_name.ilike.%X%)`) que é frágil em junções e tem suporte irregular entre versões. Pre-resolve em duas queries (1ª: `doctors` por nome, 2ª: `doctor_payouts where doctor_id IN (...)`) é determinístico, fácil de testar e mais eficiente quando a allowlist de médicas é pequena (limit 50). Mesmo padrão para `customers` em refunds.
+
+**Por que limite 200 em fulfillments/payouts e 100 em refunds.** Ordens de grandeza realistas: solo operator vê alguns dezenas de fulfillments/mês; payouts são mensais por médica (1 médica MVP = 1 payout/mês, limite generoso pra anos de histórico); refunds processados são raros, 100 cobre ~2 anos. Quando o produto crescer, paginação real (cursor-based) entra; por enquanto limit alto + filtro substituem paginação.
+
+**Defesa em profundidade:**
+- Status fora da allowlist → null silencioso, não 500.
+- Search > 80 chars → truncado, não bloqueado (UX > rigor).
+- Data inválida (31 fev, mês 13, ano fora de [2020, 2100]) → null, ignorada.
+- `invertedRange` (from > to) → warning visual `⚠ Data inicial maior que a final`, query roda mas retorna vazio (Postgres respeita `gte AND lte`).
+- Aspas duplas e parênteses descartados antes de `ilike`/`or` (reaproveita `escapeIlike`/`escapeOrValue` do patient-search).
+
+**O que NÃO entrou:**
+- **Paginação cursor-based** — limites generosos cobrem >2 anos de histórico em volume MVP. Adicionar quando algum cliente passar de ~100 payouts ou ~200 fulfillments.
+- **Filtro server-side por valor (range de `amount_cents`)** — não pediu ainda; fácil acrescentar reusando o pattern de `from`/`to`.
+- **Salvar filtros como bookmarks no painel** — overengineering pra solo operator.
+- **Filtros nas Pendentes de refunds** — fluxo curto e ativo, filtro adicionaria fricção.
+- **`POST /api/admin/payouts/export` (CSV)** — nice-to-have, candidato a PR-061.
+
+**Consequências:**
+- Solo operator passa a achar qualquer caso histórico via UI (search + date range), sem precisar abrir Supabase Studio.
+- URLs canônicas (`/admin/payouts?status=draft&period=2026-04`) viram artefatos compartilháveis em runbook/digest WhatsApp.
+- `escapeIlike`/`escapeOrValue` agora têm 2 consumers (`patient-search.ts` + `admin-list-filters.ts`); se migrarem pra trigram no futuro, atualizam num lugar só.
+- Lib pura testada com 40 casos cobre edge cases que cada page fazia inline antes (datas, allowlist, escape) — drift entre páginas vira impossível.
+
+**Follow-ups recomendados:**
+- **PR-059** — `[10.5]` state machine de `appointments` via trigger DB (precisa mapear todas as transições do código antes; alto valor estrutural / médio risco).
+- **PR-060** — `[1.4]` deprecar `pending_payment` em appointments (depende de fluxo D-044 100% migrado).
+- **PR-061** — export CSV em `/admin/payouts` (segurança: log em `document_access_log`, mesma regra de PR-055).
+
+---
+
 ## D-068 · Polimento operacional · contato público centralizado + alerta de unknown source (Onda 3A · MÉDIOs 1.5 + 8.5; resolve 8.6 e 10.7) · 2026-04-20
 
 **Contexto.** Primeira investida nos findings 🟡 MÉDIO da auditoria após zerar os ALTOs não-AI. Quatro itens leves agrupados em uma única entrega:

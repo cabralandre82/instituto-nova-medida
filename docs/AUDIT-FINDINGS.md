@@ -1101,13 +1101,14 @@ _Fim da PARTE 2. Seguir pra PARTE 3 (Lentes 1+2 Paciente/Médica + 7+8 Produto/O
 - **Onde:** `src/lib/cron-dashboard.ts`, `src/app/admin/(shell)/crons/page.tsx`, link "Crons" na nav admin. Tabela `cron_runs` já existia desde a auditoria — PR-040 montou a leitura.
 - **Pendente:** alerta proativo via WhatsApp/Slack quando `stuck_count > 0` ou `last_run < now − 2×interval` depende de **PR-043** (drain externo / sink no logger), bloqueado por input operacional (chaves Axiom/Sentry + budget).
 
-### [8.7 🟡 MÉDIO] Admin sem filtros/busca nas listas de payouts, refunds, fulfillments
+### [8.7 ✅ RESOLVED — PR-058 · D-069] Admin sem filtros/busca nas listas de payouts, refunds, fulfillments
 
-- **Onde:** `src/app/admin/(shell)/payouts/page.tsx`, `refunds/page.tsx`, `fulfillments/page.tsx`.
-- **Achado:** `/admin/pacientes` tem trigram search bonito (D-045 · 3.B). As outras listas são planas. Admin solo com 100+ fulfillments/mês não consegue achar "o fulfillment do João da Silva de duas semanas atrás" sem SQL.
-- **Risco:** suporte lento, fricção operacional.
-- **Correção:** reaproveitar `patient-search.ts` + adicionar filtros por status e date range.
-- **Observador:** admin solo.
+- **Status:** ✅ **RESOLVIDO em 2026-04-20 (PR-058 · D-069).**
+- **Solução implementada:** lib pura `src/lib/admin-list-filters.ts` (40 testes) com `parseSearch` (max 80 chars, anti-DoS), `parseStatusFilter` (allowlist tipada), `parseDateRange` (YYYY-MM-DD BRT → ISO UTC, valida 31 fev e ano fora de 2020–2100, sinaliza `invertedRange`), `parsePeriodFilter` (YYYY-MM), `escapeIlike`/`escapeOrValue` (mesmas convenções do `patient-search.ts`), `buildAdminListUrl`/`hasActiveFilters`. As 3 páginas ganharam `FilterBar` server-form (`method=get`, sem JS) que monta query-string canônica. Modo dual: sem filtro mantém UX original (grupos por status); com filtro vira tabela única ordenada por data desc, limite 200.
+  - **`/admin/fulfillments`**: search por `customer_name` (`ilike`), filtro de status (allowlist FulfillmentStatus), date range em `created_at`.
+  - **`/admin/payouts`**: search por nome da médica (`display_name` OR `full_name` resolvido em sub-query → `doctor_id IN (...)`), filtro de status, filtro de `reference_period` (YYYY-MM exato), date range em `created_at`.
+  - **`/admin/refunds`**: aplicado só na seção "Histórico" (Pendentes é fluxo curto e ativo, não precisa filtro). Search por nome do paciente (sub-query → `customer_id IN (...)`), filtro por método (`manual`/`asaas_api`), date range em `refund_processed_at`. Limite subiu de 50 → 100.
+- **Defesa:** input com `> 80 chars` é truncado; status/method fora da allowlist viram null silenciosamente; data inválida não passa pro Supabase. `invertedRange` (from > to) sinaliza warning na UI sem submeter consulta esquisita.
 
 ### [8.8 🟢 SEGURO] Pontos positivos da operação
 
@@ -1129,7 +1130,7 @@ _Fim da PARTE 2. Seguir pra PARTE 3 (Lentes 1+2 Paciente/Médica + 7+8 Produto/O
 |---|---|---|
 | 🔴 CRÍTICO | **3** | 1.1, 2.1, 7.1, 8.2 |
 | 🟠 ALTO | **7** | 1.2, 1.3, 2.2, 2.3, 7.2, 7.3, 8.3, 8.4 |
-| 🟡 MÉDIO | **11** | 1.4, 1.5, 1.6, 1.7, 2.4, 2.5, 7.4, 7.5, 7.6, 7.7, 8.1 (recalibrado), 8.5, ~~8.6 (PR-040 · D-059)~~, 8.7 |
+| 🟡 MÉDIO | **9** | 1.4, 1.6, 1.7, 2.4, 2.5, 7.4, 7.5, 7.6, 7.7, 8.1 (recalibrado), ~~1.5 (PR-057 · D-068)~~, ~~8.5 (PR-057 · D-068)~~, ~~8.6 (PR-040 · D-059)~~, ~~8.7 (PR-058 · D-069)~~ |
 | 🟢 SEGURO | **4** | 1.8, 2.6, 7.8, 8.8 |
 
 **Observação:** [8.1] foi **recalibrado de CRÍTICO para MÉDIO** em 2026-04-20: os crons já estão corretos em UTC e documentados nos `route.ts`. O problema remanescente é preferência operacional (horários matinais), não bug técnico.
