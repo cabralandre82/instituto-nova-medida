@@ -27,6 +27,10 @@ import {
   isStoragePath,
   removeFromStorage,
 } from "@/lib/payout-proofs";
+import {
+  logSignedUrlIssued,
+  buildSignedUrlContext,
+} from "@/lib/signed-url-log";
 import { logger } from "@/lib/logger";
 
 const log = logger.with({ route: "/api/admin/payouts/[id]/proof" });
@@ -37,13 +41,18 @@ export const dynamic = "force-dynamic";
 type RouteParams = { params: Promise<{ id: string }> };
 
 async function loadPayoutPath(payoutId: string): Promise<
-  | { ok: true; storagePath: string | null; rawValue: string | null }
+  | {
+      ok: true;
+      storagePath: string | null;
+      rawValue: string | null;
+      doctorId: string | null;
+    }
   | { ok: false; status: number; error: string }
 > {
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
     .from("doctor_payouts")
-    .select("id, pix_proof_url")
+    .select("id, pix_proof_url, doctor_id")
     .eq("id", payoutId)
     .maybeSingle();
   if (error) {
@@ -52,7 +61,12 @@ async function loadPayoutPath(payoutId: string): Promise<
   }
   if (!data) return { ok: false, status: 404, error: "payout_not_found" };
   const raw = (data.pix_proof_url as string | null) ?? null;
-  return { ok: true, storagePath: isStoragePath(raw) ? raw : null, rawValue: raw };
+  return {
+    ok: true,
+    storagePath: isStoragePath(raw) ? raw : null,
+    rawValue: raw,
+    doctorId: (data.doctor_id as string | null) ?? null,
+  };
 }
 
 export async function POST(req: Request, { params }: RouteParams) {
@@ -164,8 +178,8 @@ export async function POST(req: Request, { params }: RouteParams) {
   return NextResponse.json({ ok: true, path: newPath });
 }
 
-export async function GET(_req: Request, { params }: RouteParams) {
-  await requireAdmin();
+export async function GET(req: Request, { params }: RouteParams) {
+  const admin = await requireAdmin();
   const { id: payoutId } = await params;
 
   const current = await loadPayoutPath(payoutId);
@@ -176,9 +190,33 @@ export async function GET(_req: Request, { params }: RouteParams) {
     );
   }
 
-  // Se é URL externa (legacy), devolve direto
+  const supabase = getSupabaseAdmin();
+  const ctx = buildSignedUrlContext(req, "/api/admin/payouts/[id]/proof");
+
+  // Se é URL externa (legacy), devolve direto — mas ainda AUDITA
+  // (o cliente passa a ter o link; operador investigando vazamento
+  // quer saber quem pediu, mesmo sendo URL externa sem TTL).
   if (current.rawValue && !current.storagePath) {
-    return NextResponse.json({ ok: true, url: current.rawValue, source: "external" });
+    await logSignedUrlIssued(supabase, {
+      actor: {
+        kind: "admin",
+        userId: admin.id,
+        email: admin.email ?? null,
+      },
+      resource: {
+        type: "payout_proof",
+        id: payoutId,
+        doctorId: current.doctorId,
+        storagePath: current.rawValue,
+      },
+      context: ctx,
+      action: "external_url_returned",
+    });
+    return NextResponse.json({
+      ok: true,
+      url: current.rawValue,
+      source: "external",
+    });
   }
 
   if (!current.storagePath) {
@@ -188,8 +226,8 @@ export async function GET(_req: Request, { params }: RouteParams) {
     );
   }
 
-  const supabase = getSupabaseAdmin();
-  const url = await createSignedUrl(supabase, current.storagePath, 60);
+  const TTL = 60;
+  const url = await createSignedUrl(supabase, current.storagePath, TTL);
   if (!url) {
     return NextResponse.json(
       { ok: false, error: "sign_failed" },
@@ -197,7 +235,24 @@ export async function GET(_req: Request, { params }: RouteParams) {
     );
   }
 
-  return NextResponse.json({ ok: true, url, source: "storage", expiresIn: 60 });
+  await logSignedUrlIssued(supabase, {
+    actor: {
+      kind: "admin",
+      userId: admin.id,
+      email: admin.email ?? null,
+    },
+    resource: {
+      type: "payout_proof",
+      id: payoutId,
+      doctorId: current.doctorId,
+      storagePath: current.storagePath,
+    },
+    context: ctx,
+    signedUrlExpiresAt: new Date(Date.now() + TTL * 1000).toISOString(),
+    metadata: { ttl_seconds: TTL },
+  });
+
+  return NextResponse.json({ ok: true, url, source: "storage", expiresIn: TTL });
 }
 
 export async function DELETE(_req: Request, { params }: RouteParams) {

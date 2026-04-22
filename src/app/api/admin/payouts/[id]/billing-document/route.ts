@@ -17,6 +17,10 @@ import {
   isStoragePath,
   removeFromStorage,
 } from "@/lib/billing-documents";
+import {
+  logSignedUrlIssued,
+  buildSignedUrlContext,
+} from "@/lib/signed-url-log";
 import { logger } from "@/lib/logger";
 
 const log = logger.with({ route: "/api/admin/payouts/[id]/billing-document" });
@@ -34,13 +38,13 @@ type DocumentRow = {
 };
 
 async function loadDocument(payoutId: string): Promise<
-  | { ok: true; document: DocumentRow | null }
+  | { ok: true; document: DocumentRow | null; doctorId: string | null }
   | { ok: false; status: number; error: string }
 > {
   const supabase = getSupabaseAdmin();
   const { data: payout, error: payoutErr } = await supabase
     .from("doctor_payouts")
-    .select("id")
+    .select("id, doctor_id")
     .eq("id", payoutId)
     .maybeSingle();
   if (payoutErr) {
@@ -60,11 +64,15 @@ async function loadDocument(payoutId: string): Promise<
     return { ok: false, status: 500, error: "load_failed" };
   }
 
-  return { ok: true, document: (doc as DocumentRow | null) ?? null };
+  return {
+    ok: true,
+    document: (doc as DocumentRow | null) ?? null,
+    doctorId: (payout.doctor_id as string | null) ?? null,
+  };
 }
 
-export async function GET(_req: Request, { params }: RouteParams) {
-  await requireAdmin();
+export async function GET(req: Request, { params }: RouteParams) {
+  const admin = await requireAdmin();
   const { id: payoutId } = await params;
 
   const ctx = await loadDocument(payoutId);
@@ -85,7 +93,30 @@ export async function GET(_req: Request, { params }: RouteParams) {
     );
   }
 
+  const supabase = getSupabaseAdmin();
+  const requestCtx = buildSignedUrlContext(
+    req,
+    "/api/admin/payouts/[id]/billing-document"
+  );
+  const actor = {
+    kind: "admin" as const,
+    userId: admin.id,
+    email: admin.email ?? null,
+  };
+
   if (!isStoragePath(ctx.document.document_url)) {
+    await logSignedUrlIssued(supabase, {
+      actor,
+      resource: {
+        type: "billing_document",
+        id: payoutId,
+        doctorId: ctx.doctorId,
+        storagePath: ctx.document.document_url,
+      },
+      context: requestCtx,
+      action: "external_url_returned",
+      metadata: { document_id: ctx.document.id },
+    });
     return NextResponse.json({
       ok: true,
       url: ctx.document.document_url,
@@ -93,15 +124,29 @@ export async function GET(_req: Request, { params }: RouteParams) {
     });
   }
 
-  const supabase = getSupabaseAdmin();
-  const url = await createSignedUrl(supabase, ctx.document.document_url, 60);
+  const TTL = 60;
+  const url = await createSignedUrl(supabase, ctx.document.document_url, TTL);
   if (!url) {
     return NextResponse.json(
       { ok: false, error: "sign_failed" },
       { status: 500 }
     );
   }
-  return NextResponse.json({ ok: true, url, source: "storage", expiresIn: 60 });
+
+  await logSignedUrlIssued(supabase, {
+    actor,
+    resource: {
+      type: "billing_document",
+      id: payoutId,
+      doctorId: ctx.doctorId,
+      storagePath: ctx.document.document_url,
+    },
+    context: requestCtx,
+    signedUrlExpiresAt: new Date(Date.now() + TTL * 1000).toISOString(),
+    metadata: { document_id: ctx.document.id, ttl_seconds: TTL },
+  });
+
+  return NextResponse.json({ ok: true, url, source: "storage", expiresIn: TTL });
 }
 
 export async function DELETE(_req: Request, { params }: RouteParams) {

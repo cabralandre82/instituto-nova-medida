@@ -5,6 +5,69 @@
 
 ---
 
+## D-066 · Audit trail de signed URLs de Storage (finding 17.4) · 2026-04-20
+
+**Contexto.** Finding [17.4 🟠 ALTO]: quatro rotas emitem signed URLs do Supabase Storage pra documentos financeiros sem deixar rastro. São elas:
+
+- `GET /api/admin/payouts/[id]/proof` — admin baixa comprovante PIX enviado pela médica
+- `GET /api/medico/payouts/[id]/proof` — médica baixa seu próprio comprovante
+- `GET /api/admin/payouts/[id]/billing-document` — admin baixa NF-e/RPA da médica
+- `GET /api/medico/payouts/[id]/billing-document` — médica baixa seu próprio documento fiscal
+
+O conteúdo exposto é sensível: comprovante PIX revela contas bancárias, valores e datas; NF-e contém CNPJ/CPF, endereço fiscal, discriminação de serviço médico e valores — matéria de sigilo profissional + fiscal. Supabase Storage **não audita download de signed URL ao nível aplicativo**: nem o dashboard dele, nem o banco, nem logs mostram "Fulano fez GET nesse objeto em tal horário". A URL tem TTL curto (60s, já configurado) mas, durante esse minuto, quem tiver o link pode baixar e compartilhar. Se amanhã um RPA da médica vazar num grupo de WhatsApp, a plataforma hoje não consegue dizer **quem pediu aquele link**.
+
+A recomendação literal do audit foi composta: (a) proxy de download via endpoint Next.js que stream do Storage e registra `document_access_log`; (b) TTL 60s (já implementado); (c) on-demand (já implementado). O ponto (a) — proxy — resolveria também o problema do compartilhamento: o cliente nunca teria a URL, só o response stream; mas implica mudar a UI (de `<a href>` pra `fetch+blob`) em múltiplos lugares e reescrever o fluxo de download. Fica como **PR-055-B** (opcional, observamos impacto do log antes).
+
+**Decisão.** Implementar a metade auditável do ponto (a) — a tabela `document_access_log` + helper de escrita — **sem** o proxy. O helper é chamado em toda emissão de URL (signed OU legada externa). Resultado: se houver vazamento futuro, temos a shortlist imediata de "quem solicitou essa URL nessa janela temporal".
+
+1. **Tabela `public.document_access_log`** (migration `20260508000000_document_access_log.sql`):
+
+   - `id` uuid pk + `actor_user_id` (FK auth.users nullable), `actor_email` (snapshot), `actor_kind` check `('admin','doctor','system')`.
+   - `resource_type` check `('payout_proof','billing_document')`, `resource_id` (uuid do `doctor_payouts` — chave do contexto), `doctor_id` denormalizado (FK doctors, pra queries "todos os downloads da Dra. X").
+   - `storage_path` (do bucket privado, não é PII sozinho), `signed_url_expires_at` (now()+TTL; NULL quando `external_url_returned`).
+   - `action` check `('signed_url_issued','external_url_returned')`. O segundo cobre URLs legadas já gravadas como URL externa completa no banco — `isStoragePath` devolve false, então a rota devolve direto ao cliente; mesmo sem TTL rastreado, o cliente passa a ter o link e isso é evento auditável.
+   - `ip inet`, `user_agent`, `route`, `metadata jsonb`, `created_at`.
+   - **Constraint de binding** `document_access_log_actor_binding_chk`: `actor_kind IN ('admin','doctor')` exige `actor_user_id NOT NULL`; `actor_kind='system'` exige NULL. Ecoa o padrão de `patient_access_log` (D-052) e `admin_audit_log` (D-045/052).
+   - 4 índices voltados pras queries forenses: por `created_at`, por `doctor_id`, por `actor_user_id`, por `(resource_type, resource_id)`.
+   - **RLS deny-all** pra `anon` e `authenticated`. Service-role-only. Sem trigger de imutabilidade (mesma filosofia do `patient_access_log` — escopo de acesso já restringe).
+
+2. **Lib `src/lib/signed-url-log.ts`** — `logSignedUrlIssued(supabase, input)` failSoft. Nunca lança. Em caso de falha do INSERT, loga via `logger` (D-057) e retorna `{ok:false}`. O caller **não** bloqueia a resposta ao usuário por perda de log. Privar o médico/admin do próprio documento porque o audit está offline é pior que lacuna momentânea de trilha. Helper `buildSignedUrlContext(req, route)` extrai `ip/user-agent/route` padronizado (precedência `x-forwarded-for` primeiro hop → `x-real-ip`). Tipos expostos: `DocumentActorKind | DocumentResourceType | DocumentAccessAction`.
+
+3. **Política de validação client-side (binding)**:
+
+   - `actor.kind='admin'|'doctor'` sem `userId` → retorna `insert_failed` sem tentar o INSERT (falha rápido, espelha constraint DB).
+   - `actor.kind='system'` com `userId` → idem (binding invertido).
+   - `action='external_url_returned'` → força `signed_url_expires_at=NULL` mesmo se caller envia valor (grava só o que faz sentido).
+   - `action='signed_url_issued'` sem `expiresAt` → loga warn ("URL emitida sem TTL rastreado") mas continua o INSERT com NULL. Anomalia operacional, não bloqueante.
+
+4. **Integração nos 4 call-sites**:
+
+   - Cada handler extrai `actor` (admin/doctor via `requireAdmin()/requireDoctor()` — que já devolvem `user.id` e `user.email`).
+   - Cada handler computa `expiresAt = new Date(Date.now() + 60_000).toISOString()` antes de chamar `createSignedUrl`. A fonte da verdade do TTL é o próprio endpoint (constante local `TTL = 60`).
+   - URL externa (legacy) → mesmo assim loga com `action='external_url_returned'` e `expiresAt=null`.
+   - Para `billing_document`, `metadata.document_id` carrega o UUID específico do `doctor_billing_documents` (o `resource_id` principal segue sendo o `payout_id` pra consistência de query).
+
+5. **Resposta HTTP inalterada** — o caller não vê diferença no shape do JSON (`{ok, url, source, expiresIn}`). Auditoria é totalmente transparente ao cliente.
+
+6. **Escopo consciente do que NÃO está aqui**:
+
+   - **Proxy de download** (endpoint que stream do Storage sem entregar URL) — PR-055-B opcional. Requer mudar UI + fetch client-side pra blob, não é trivial.
+   - **Alertas de comportamento anômalo** (ex.: "admin X pegou 47 links em 5min") — depende de drain externo (PR-043).
+   - **Retenção** do `document_access_log` — por padrão fica perene. Se virar muito grande, adicionar política de retenção (ex.: 5 anos fiscais) em migration futura. Tabela leva só 1 linha por download solicitado; ~100 downloads/mês → crescimento irrelevante.
+   - **UI admin pra consultar o log** — não é prioridade. Consulta SQL direta no Supabase dashboard resolve pro operador solo. Dashboard vem se/quando virar necessidade.
+
+**Consequências.**
+
+- **Shortlist forense**: vazamento detectado em T → `SELECT * FROM document_access_log WHERE created_at BETWEEN T-2h AND T+2h AND resource_id=$payout` devolve a lista de quem pediu. Combinado com TTL=60s, a janela de "possíveis distribuidores" é minúscula.
+- **Detecção de enumeração**: anomalia óbvia (mesmo admin/doctor pedindo dezenas de URLs) aparece no `SELECT count(*) FROM document_access_log WHERE actor_user_id=$ AND created_at > now()-'1 hour'`. Alertas automáticos ficam pra PR-043.
+- **LGPD Art. 37** (registro de operações): embora esses documentos não sejam PII do paciente (são da médica e da clínica), o framework normativo da ANPD considera RPA/NF-e dados pessoais da médica — trilha de emissão é compliance, não luxo.
+- **Overhead**: 1 INSERT extra por GET (~2-5ms); negligenciável num endpoint que já faz SELECT + Storage signing.
+- **Nunca bloqueia o usuário**: failSoft garante que a médica sempre consegue baixar seu próprio RPA mesmo se a tabela de log cair.
+
+**Refs.** Finding 17.4 (`docs/AUDIT-FINDINGS.md`). Padrão inspirado em `patient_access_log` (D-051) + `admin_audit_log` (D-045/052). Migration `20260508000000_document_access_log.sql`. Lib `src/lib/signed-url-log.ts`. Testes: `src/lib/signed-url-log.test.ts` (14 casos). Integrado em `src/app/api/admin/payouts/[id]/proof/route.ts`, `src/app/api/medico/payouts/[id]/proof/route.ts`, `src/app/api/admin/payouts/[id]/billing-document/route.ts`, `src/app/api/medico/payouts/[id]/billing-document/route.ts`. Follow-up opcional: **PR-055-B** (proxy de download que elimina URL do client) — depende de decisão de UX (download via stream vs link direto).
+
+---
+
 ## D-065 · Guard de "customer takeover" no upsert por CPF (finding 5.8) · 2026-04-20
 
 **Contexto.** Findings [3.5/3.6] (Parte 1 da auditoria) e [5.8] (Parte 5) descrevem a mesma classe: tanto `/api/checkout` quanto `/api/agendar/reserve` faziam `UPDATE customers SET name=$, email=$, phone=$, address_*=$ WHERE cpf=$` cegamente quando o CPF já existia. Modelo de ameaça:

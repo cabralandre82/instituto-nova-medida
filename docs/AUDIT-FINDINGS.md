@@ -1411,13 +1411,14 @@ _Fim da PARTE 3. Seguir pra PARTE 4 (Lentes 9+22 agentes/LLM adversário + 10+17
 - **Correção:** (a) tabela `patient_access_log (customer_id, by_user_id, action [view, export, edit], at, ip, user_agent)`; (b) registrar em cada rota admin que lê customer; (c) expor em `/paciente/meus-dados` (já sugerido em PR-017) a lista "quem viu seus dados e quando".
 - **Observador:** DPO, ANPD, paciente.
 
-### [17.4 🟠 ALTO] Signed URLs de Storage não são logadas — download fora do sistema
+### [17.4 🟠 ALTO] Signed URLs de Storage não são logadas — download fora do sistema · ✅ RESOLVED (PR-055 · D-066)
 
 - **Onde:** `/api/admin/payouts/[id]/proof`, `/api/medico/payouts/[id]/proof` (billing-documents, payouts-proofs).
 - **Achado:** quem pega a URL pode baixar fora do admin, compartilhar o link (válido ~1h). Supabase Storage não audita download por URL assinada ao nível aplicativo.
 - **Risco:** PHI/financeiro vaza sem trilha.
 - **Correção:** (a) proxy o download via endpoint Next.js (`/api/admin/payouts/[id]/proof/download`) que stream do Storage e registra `document_access_log`; (b) TTL curtíssimo (60s); (c) gerar URL assinada apenas on-demand (request → fetch → redirect).
 - **Observador:** DPO, CISO, auditor financeiro.
+- **Resolução (2026-04-20).** PR-055 · D-066. Tabela imutável `document_access_log` (migration `20260508000000_document_access_log.sql`) com `actor_user_id`/`actor_kind in ('admin','doctor','system')` + binding constraint, `resource_type in ('payout_proof','billing_document')`, `resource_id` (doctor_payouts uuid), `doctor_id` denormalizado, `storage_path`, `signed_url_expires_at`, `action in ('signed_url_issued','external_url_returned')`, `ip inet`, `user_agent`, `route`, `metadata jsonb`; 4 índices forenses (created_at, doctor_id, actor_user_id, resource); RLS deny-all. Lib `src/lib/signed-url-log.ts` com `logSignedUrlIssued()` failSoft (nunca bloqueia a entrega da URL — log perdido é menos grave que privar a médica de baixar o próprio RPA) e helper `buildSignedUrlContext`. Integrado nos 4 call-sites: admin/medico × proof/billing-document. URLs externas legadas também logadas (action=`external_url_returned`). TTL mantido em 60s. **14 testes novos; suíte 1031/1031.** **Bullets (b) e (c) já estavam implementadas (TTL 60s, on-demand).** Bullet (a) proxy stream fica como follow-up opcional **PR-055-B** — requer mudar UI de `<a href>` pra fetch+blob.
 
 ### [17.5 🟡 MÉDIO] `cron_runs` sem correlação com `error-log`
 
@@ -1899,7 +1900,7 @@ Ordem recomendada de ataque (1 = primeiro):
 - ~~Retenção Art. 16 — ghosts inativos sem eliminação automática~~ — ✅ RESOLVED na Onda 2B (PR-033-A, D-052). Cron semanal `/api/internal/cron/retention-anonymize` anonimiza customers sem appointments/fulfillments/acceptances + inativos há > 24 meses; `admin_audit_log`/`patient_access_log` ganharam `actor_kind` formalizando sistema vs humano; bug `patient_access_log.admin_user_id NOT NULL` corrigido.
 - 6.10 Outro lens cruzado
 - ~~17.3 LGPD Art. 37 — sem log de acesso admin ao paciente~~ — ✅ RESOLVED na Onda 2A (PR-032, D-051). Tabela `patient_access_log` + helper `logPatientAccess` integrado em view/export/anonymize/search/lgpd_fulfill/lgpd_reject.
-- 17.4 Signed URLs Storage sem log de download
+- ~~17.4 Signed URLs Storage sem log de download~~ ✅ RESOLVED em PR-055 · D-066 (`document_access_log` + `logSignedUrlIssued` failSoft nos 4 GET routes).
 
 ### Produto/UX (7)
 - 1.2 Dashboard paciente sem tratamento ainda linka `/planos`

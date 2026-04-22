@@ -11,6 +11,10 @@ import { NextResponse } from "next/server";
 import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { createSignedUrl, isStoragePath } from "@/lib/payout-proofs";
+import {
+  logSignedUrlIssued,
+  buildSignedUrlContext,
+} from "@/lib/signed-url-log";
 import { logger } from "@/lib/logger";
 
 const log = logger.with({ route: "/api/medico/payouts/[id]/proof" });
@@ -20,8 +24,8 @@ export const dynamic = "force-dynamic";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
-export async function GET(_req: Request, { params }: RouteParams) {
-  const { doctorId } = await requireDoctor();
+export async function GET(req: Request, { params }: RouteParams) {
+  const { user, doctorId } = await requireDoctor();
   const { id: payoutId } = await params;
 
   const supabase = getSupabaseAdmin();
@@ -56,15 +60,47 @@ export async function GET(_req: Request, { params }: RouteParams) {
     );
   }
 
-  // URL externa (legado / backfill) → devolve direto
+  const ctx = buildSignedUrlContext(req, "/api/medico/payouts/[id]/proof");
+  const actor = {
+    kind: "doctor" as const,
+    userId: user.id,
+    email: user.email ?? null,
+  };
+
+  // URL externa (legado / backfill) → devolve direto, mas audita.
   if (!isStoragePath(raw)) {
+    await logSignedUrlIssued(supabase, {
+      actor,
+      resource: {
+        type: "payout_proof",
+        id: payoutId,
+        doctorId,
+        storagePath: raw,
+      },
+      context: ctx,
+      action: "external_url_returned",
+    });
     return NextResponse.json({ ok: true, url: raw, source: "external" });
   }
 
-  const url = await createSignedUrl(supabase, raw, 60);
+  const TTL = 60;
+  const url = await createSignedUrl(supabase, raw, TTL);
   if (!url) {
     return NextResponse.json({ ok: false, error: "sign_failed" }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, url, source: "storage", expiresIn: 60 });
+  await logSignedUrlIssued(supabase, {
+    actor,
+    resource: {
+      type: "payout_proof",
+      id: payoutId,
+      doctorId,
+      storagePath: raw,
+    },
+    context: ctx,
+    signedUrlExpiresAt: new Date(Date.now() + TTL * 1000).toISOString(),
+    metadata: { ttl_seconds: TTL },
+  });
+
+  return NextResponse.json({ ok: true, url, source: "storage", expiresIn: TTL });
 }
