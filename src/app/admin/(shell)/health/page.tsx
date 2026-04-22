@@ -60,11 +60,12 @@ const STATUS_STYLES: Record<
   },
 };
 
-export default async function HealthPage({
-  searchParams,
-}: {
-  searchParams: SearchParams;
-}) {
+export default async function HealthPage(
+  props: {
+    searchParams: Promise<SearchParams>;
+  }
+) {
+  const searchParams = await props.searchParams;
   const pingExternal = searchParams?.ping === "1";
   const report = await runHealthCheck({ pingExternal });
 

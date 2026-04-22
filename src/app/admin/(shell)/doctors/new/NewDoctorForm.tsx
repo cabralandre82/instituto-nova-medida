@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -206,12 +207,12 @@ export function NewDoctorForm() {
         >
           {submitting ? "Cadastrando..." : "Cadastrar e enviar convite"}
         </button>
-        <a
+        <Link
           href="/admin/doctors"
           className="rounded-xl border border-ink-200 hover:bg-cream-50 text-ink-700 font-medium px-6 py-3 transition-colors"
         >
           Cancelar
-        </a>
+        </Link>
       </div>
     </form>
   );

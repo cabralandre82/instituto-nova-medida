@@ -32,7 +32,7 @@ async function readTo(req: Request): Promise<string> {
 }
 
 export async function POST(req: Request) {
-  const supabase = getSupabaseRouteHandler();
+  const supabase = await getSupabaseRouteHandler();
   await supabase.auth.signOut();
 
   const rawTo = await readTo(req);

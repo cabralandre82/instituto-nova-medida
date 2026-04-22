@@ -14,6 +14,9 @@
  *   - `getSupabaseAnon()`        → para clients/components passando JWT a mão.
  *
  * Doc: https://supabase.com/docs/guides/auth/server-side/nextjs
+ *
+ * Next 15: `cookies()` virou Promise. As factories aqui são `async` pra
+ * resolver isso corretamente, sem `UnsafeUnwrappedCookies`.
  */
 
 import { cookies } from "next/headers";
@@ -36,9 +39,9 @@ function ensureEnv(): void {
  * Tentativas de set/remove cookies viram no-op (Next bloqueia mutação
  * de cookies fora de Server Action / Route Handler).
  */
-export function getSupabaseServer(): SupabaseClient {
+export async function getSupabaseServer(): Promise<SupabaseClient> {
   ensureEnv();
-  const cookieStore = cookies();
+  const cookieStore = await cookies();
   return createServerClient(SUPABASE_URL!, SUPABASE_ANON_KEY!, {
     cookies: {
       get(name: string) {
@@ -58,9 +61,9 @@ export function getSupabaseServer(): SupabaseClient {
  * Cliente Supabase para Route Handlers que **precisam mutar cookies**
  * (callback de magic link, signOut, refresh forçado).
  */
-export function getSupabaseRouteHandler(): SupabaseClient {
+export async function getSupabaseRouteHandler(): Promise<SupabaseClient> {
   ensureEnv();
-  const cookieStore = cookies();
+  const cookieStore = await cookies();
   return createServerClient(SUPABASE_URL!, SUPABASE_ANON_KEY!, {
     cookies: {
       get(name: string) {

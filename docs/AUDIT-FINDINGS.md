@@ -1597,7 +1597,7 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
   3. Validação: `tsc --noEmit` 0 erros, 936/936 testes, `eslint` 0 warnings, smoke HTTP em `/`, `/admin/login`, `/paciente/login`, `/medico/login`.
   4. **Teste empírico do fix CVE-2025-29927:** `curl -H "x-middleware-subrequest: middleware:middleware:middleware:middleware:middleware" http://localhost:3000/admin` retornou **307 → `/admin/login`** (middleware PROCESSOU a request, não bypassou).
 - **Observador:** CISO, SRE, admin solo.
-- **Follow-up detectado (novo) — PR-041-B:** `npm audit` pós-bump mostra 4 advisories `high` residuais na linha 14.x (Image Optimizer DoS, RSC deserialization, rewrite smuggling, next/image cache unbounded). Essas advisories **só têm fix em Next 15.x+** — a linha 14.2.x está efetivamente em EOL para DoS. Mitigantes atuais: hospedagem em Vercel absorve parte dos DoS upstream; superfície de `next/image` é baixa (poucas imagens). Backlog: migração Next 14 → 15 (App Router APIs mudam: `params`/`searchParams`/`cookies()`/`headers()` viram `Promise`).
+- **Follow-up detectado (novo) — PR-041-B:** ✅ RESOLVIDO em PR-041-B · D-085 · 2026-04-20. Bump `next@14.2.35 → 15.5.15` + React `18.3.1 → 19.2.5` fecha os 4 advisories DoS residuais (Image Optimizer SSRF, RSC deserialization, rewrite smuggling, next/image cache poisoning). Codemod `next-async-request-api` + refactor manual de `supabase-server.ts` (factories agora async `Promise<SupabaseClient>` sem `UnsafeUnwrappedCookies`). TSC 0 erros, ESLint 0 erros (1 fix trivial `<a>` → `<Link>` em `NewDoctorForm`), Vitest 1440/1440 verdes, `next build` produção OK. `npm audit` 0 vulnerabilities.
 
 ### [11.2 🟡 MÉDIO] `loadAdminInbox` + dashboard `/admin` fazem N queries sequenciais no mesmo request
 
@@ -1908,7 +1908,7 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
 ### Novos PRs sugeridos (PARTE 5)
 
 41. ~~**PR-041 · Bump Next 14.2.18 → 14.2.latest** (11.1).~~ ✅ RESOLVIDO em D-060 (2026-04-20) — bump para 14.2.35, fix empírica do CVE-2025-29927 CVSS 9.1.
-41-B. **PR-041-B · Migração Next 14 → 15** — endereça advisories DoS residuais (Image Optimizer, RSC deserialization, rewrite smuggling, next/image cache) que só têm fix em 15.x+. Breaking changes: `params`/`searchParams`/`cookies()`/`headers()` viram `Promise<T>`. Planejar janela dedicada com smoke extenso.
+41-B. ~~**PR-041-B · Migração Next 14 → 15** — endereça advisories DoS residuais (Image Optimizer, RSC deserialization, rewrite smuggling, next/image cache) que só têm fix em 15.x+.~~ ✅ RESOLVIDO em D-085 (2026-04-20) — bump 14.2.35 → 15.5.15 + React 18 → 19; codemod automático cobriu 4/340 arquivos (resto já estava Next-15-style); supabase-server factories async; zero UnsafeUnwrappedCookies.
 42. **PR-042 · `fetchWithTimeout` helper + substituir fetch externos** (13.1).
 43. **PR-043 · Sentry + Vercel log drain Axiom + `x-request-id`** (14.1) (junta com PR-034 da P4).
 44. **PR-044 · Runbook DR (Supabase/Vercel/Asaas/Daily down)** (20.1).

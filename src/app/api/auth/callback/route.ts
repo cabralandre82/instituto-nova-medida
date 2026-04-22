@@ -69,7 +69,7 @@ export async function GET(req: Request) {
       ? "/paciente/login"
       : "/admin/login";
 
-  const supabase = getSupabaseRouteHandler();
+  const supabase = await getSupabaseRouteHandler();
   // Cliente admin separado pro log (fail-soft; não reusa o session-
   // writing client pra não acoplar o log à criação da sessão).
   const admin = getSupabaseAdmin();

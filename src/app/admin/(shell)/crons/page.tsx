@@ -77,11 +77,12 @@ const WINDOW_DAYS = 30;
 
 type SearchParams = { days?: string };
 
-export default async function CronsDashboardPage({
-  searchParams,
-}: {
-  searchParams?: SearchParams;
-}) {
+export default async function CronsDashboardPage(
+  props: {
+    searchParams?: Promise<SearchParams>;
+  }
+) {
+  const searchParams = await props.searchParams;
   const days = parseDays(searchParams?.days) ?? WINDOW_DAYS;
   const supabase = getSupabaseAdmin();
   const report = await loadCronDashboard(supabase, {

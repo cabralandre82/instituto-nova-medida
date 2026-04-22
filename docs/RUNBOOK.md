@@ -1049,7 +1049,10 @@ Sempre loga em `appointment_state_transition_log` com `action='bypassed'`.
 
 ---
 
-*Última revisão: 2026-04-20 · D-084 · PR-070-B (§16 reescrito pra usar
-`/admin/magic-links` como caminho primário, mantendo SQL fallback).
-Revisão anterior: D-083 · PR-073-B/C (cron `expire-appointment-credits`
-em §10 + §15 apontando pra `/admin/credits`).*
+*Última revisão: 2026-04-20 · D-085 · PR-041-B (bump Next 14.2.35 →
+15.5.15 + React 18 → 19 — fecha família 11.x 100%; nenhum procedimento
+operacional mudou, mas `supabase-server.ts::getSupabaseServer()` e
+`::getSupabaseRouteHandler()` agora são `async Promise<SupabaseClient>`
+pra quem escrever novo call-site). Revisão anterior: D-084 · PR-070-B
+(§16 reescrito pra usar `/admin/magic-links` como caminho primário,
+mantendo SQL fallback).*

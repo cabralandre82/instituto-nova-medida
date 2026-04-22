@@ -5,6 +5,176 @@
 
 ---
 
+## D-085 · Migração Next.js 14.2.35 → 15.5.15 + React 18 → 19 (PR-041-B · fecha findings 11.x DoS residuais) · 2026-04-20
+
+**Contexto.** PR-041 (D-060) subiu Next de 14.2.18 pra 14.2.35 pra fechar
+CVE-2025-29927. Sobraram 4 advisories DoS de severidade baixa-média
+explicitamente só corrigidas em Next 15:
+
+- Image Optimizer DoS via SSRF (fechado em 15.0).
+- RSC deserialization DoS (fechado em 15.1).
+- Rewrite header smuggling (fechado em 15.2).
+- `next/image` cache poisoning via filename collision (fechado em 15.3).
+
+PRS-PENDING marcou "PR-041-B · requer janela dedicada com smoke
+extenso em todas as rotas SSR" por ser major bump com breaking changes
+nas Request APIs. Hoje essa janela chegou.
+
+**Decisão.** Migrar pra **Next 15.5.15** (último stable da série 15) +
+**React 19.2.5** (stable desde Next 15.1). Não saltar pra 16.2.4
+mesmo ele estando disponível — delta 14→16 acumula duas ondas de
+breaking changes e não há advisory apontando pra 16 especificamente;
+15.5 fecha todo o débito. 16 vira futuro PR-041-C quando e se houver
+motivo.
+
+### Breaking changes mapeadas
+
+1. **Async Request APIs.** `params`, `searchParams`, `cookies()`,
+   `headers()`, `draftMode()` retornam `Promise<T>` em Next 15.
+2. **Caching defaults.** GET Route Handlers e Client Router Cache
+   deixam de cachear por default. Irrelevante pra nós: **todas** as
+   rotas SSR já declaram `export const dynamic = "force-dynamic"`
+   (95 call-sites verificados via grep), invariante mantida desde o
+   início do projeto por filosofia "sem cache em contexto
+   autenticado/transacional".
+3. **React 19.** Stable. `use()` hook, `ref` como prop comum (sem
+   `forwardRef`), hooks `useActionState`, `useOptimistic`, `useFormStatus`
+   novos — nada que precisemos adotar agora. Toda API 18 continua
+   funcionando.
+4. **Node 18.18+ required.** Já atendemos (Vercel roda Node 22 por
+   padrão).
+
+### Estratégia
+
+Três fases, cada uma validada isolada:
+
+**Fase 1: codemod automático.**
+
+```
+npx @next/codemod@canary next-async-request-api src
+```
+
+Analisou 340 arquivos, modificou 4: `crons/page.tsx`, `errors/page.tsx`,
+`health/page.tsx` (todos com `searchParams` não-Promise), e
+`supabase-server.ts` (usava `cookies()` síncrono). Pros demais 336:
+**a base já estava majoritariamente migrada** porque arquivos escritos
+nos PRs recentes (PR-053, PR-056, PR-061, PR-067, PR-070, PR-072,
+PR-073, PR-074, PR-070-B, PR-073-B/C) já adotavam `Promise<T>` por
+disciplina de estilo — pagamos a dívida incrementalmente durante
+todo o Sprint 2. O codemod só fechou os 4 arquivos escritos em
+Next-14-style que não foram revisitados.
+
+**Fase 2: refatoração manual do `supabase-server.ts`.**
+
+O codemod substituiu `cookies()` por
+`cookies() as unknown as UnsafeUnwrappedCookies` — escape hatch oficial
+mas marcado pra remoção em Next 16. Rejeitado: reescrevi as factories
+`getSupabaseServer()` e `getSupabaseRouteHandler()` como `async`
+retornando `Promise<SupabaseClient>`, fazendo `await cookies()` no
+corpo. Propagei o `await` pros 4 call-sites (`auth.ts::getSessionUser`,
+`auth.ts::requireDoctor`, `api/auth/callback/route.ts`,
+`api/auth/signout/route.ts`). Zero `UnsafeUnwrappedCookies` no tree.
+
+**Fase 3: bump + validação.**
+
+```
+npm install next@15.5.15 eslint-config-next@15.5.15 react@19.2.5 \
+            react-dom@19.2.5 @types/react@19 @types/react-dom@19
+```
+
+Validação em 4 gates:
+
+1. `npx tsc --noEmit` — 0 erros.
+2. `npx eslint src` — 1 erro trivial (`<a href="/admin/doctors">` em
+   `NewDoctorForm.tsx` — regra `@next/next/no-html-link-for-pages`
+   mais estrita no ESLint 15; corrigido pra `<Link>`).
+3. `npx vitest run` — 1440/1440 verdes em 74 arquivos. Sem erasures
+   de asserção de API.
+4. `npx next build` — **build produção OK**. Warning cosmético sobre
+   workspace root inference (múltiplos `package-lock.json` em
+   ancestrais) resolvido por `outputFileTracingRoot` se virar ruído;
+   não crítico, não corrigido aqui.
+
+### Por que 15.5.15 e não 15.6.x
+
+15.6 está em canary. 15.5.15 tem 3 meses de prod em ecossistemas
+maiores — maturidade operacional > feature bleeding edge.
+
+### Por que React 19 e não ficar em 18
+
+Next 15.1+ marca React 19 como **default recommended**. Ficar em 18
+pede `experimental.reactCompiler` pra fechar `ref` warnings e gera
+mismatch de versões `@types/react` (19 alinha com react, 18 não).
+Trade-off: zero — React 19 é backward compatible em todas APIs
+18.x que usamos.
+
+### Trade-offs aceitos
+
+- **Warning de workspace root.** Build loga `Next.js inferred your
+  workspace root, but it may not be correct`. Causa: há
+  `package-lock.json` em diretórios pais (provavelmente `~`). Fix
+  seria adicionar `outputFileTracingRoot: __dirname` em
+  `next.config.js`. Deixei pra depois: warning cosmético, build
+  produção funciona, correção arrisca cascata em ambientes CI.
+
+- **Não adotamos React 19 novidades.** `use()`, `useActionState`,
+  `useFormStatus`, `ref` como prop — tudo opcional. O tree continua
+  em estilo 18 puro. Adoção será lazy, conforme componentes forem
+  reescritos por outra razão.
+
+- **Lockfile re-gerado.** `npm install` gerou novo `package-lock.json`
+  (7 adds, 33 removes, 13 changes) — principalmente desapareceram
+  dependências internas antigas do Next 14 que não eram mais exigidas
+  e foram substituídas. 0 vulnerabilities reportadas pelo `npm audit`.
+
+### Artefatos
+
+- `package.json` — versões bumped.
+- `package-lock.json` — regenerado.
+- `src/lib/supabase-server.ts` — factories agora async.
+- `src/lib/auth.ts` — await propagado.
+- `src/app/api/auth/callback/route.ts`, `src/app/api/auth/signout/route.ts`
+  — await propagado.
+- `src/app/admin/(shell)/crons/page.tsx`, `errors/page.tsx`,
+  `health/page.tsx` — `searchParams: Promise<T>` + `await`.
+- `src/app/admin/(shell)/doctors/new/NewDoctorForm.tsx` — `<a>` virou
+  `<Link>` pra fechar regra `no-html-link-for-pages` estrita.
+
+### Risco residual
+
+Baixo-médio:
+
+- **Alto** no caminho de auth (mudei assinatura de `getSupabaseServer`,
+  `getSupabaseRouteHandler`). Mitigado: os 4 call-sites são todos
+  conhecidos e testados; build passou; vitest verde; middleware usa
+  `createServerClient` direto (sem cookies helper), inalterado.
+- **Baixo** em render de páginas: codemod é determinístico, TSC
+  valida o resto.
+- **Baixo** em UX: React 19 é backward compatible; framer-motion
+  11.18.2 já tem peer range `^18 || ^19`.
+
+**Próximo passo post-merge.** Smoke manual em 4 rotas críticas
+(`/admin/login` → magic-link → `/admin`; `/paciente/login` → magic-link
+→ `/paciente`; `/checkout/[plano]` → webhook; `/admin/fulfillments`).
+RUNBOOK-PRODUCTION-CHECKLIST §10 já cobre isso como smoke de 10min.
+
+### Fechamento de findings
+
+Os 4 advisories DoS da linha Next 14 (Image Optimizer SSRF, RSC
+deserialization, rewrite header smuggling, `next/image` cache
+poisoning) foram explicitamente listados como "Follow-up detectado
+(novo) — PR-041-B" dentro do finding `[11.1]` em `AUDIT-FINDINGS.md`
+linha 1600 após o fechamento do CVE-2025-29927 pelo PR-041/D-060.
+Todos ✅ RESOLVED aqui. `[11.1]` propriamente já estava RESOLVED
+desde D-060.
+
+Note que findings [11.2]/[11.3]/[11.4]/[11.5] da auditoria tratam
+de temas ortogonais (N+1 em `loadAdminInbox`, cold-start por
+`runtime=nodejs`, estrutura de perf geral, edge runtime oportunístico)
+e **não são fechados por este PR**.
+
+---
+
 ## D-084 · UI admin de trilha forense de magic-link em `/admin/magic-links` (PR-070-B · follow-up finding 17.8) · 2026-04-20
 
 **Contexto.** D-078 instalou a tabela `magic_link_issued_log` com trilha

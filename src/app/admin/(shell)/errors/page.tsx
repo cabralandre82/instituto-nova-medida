@@ -124,11 +124,12 @@ function formatContextValue(v: string | number | boolean | null): string {
   return String(v);
 }
 
-export default async function AdminErrorsPage({
-  searchParams,
-}: {
-  searchParams: SearchParams;
-}) {
+export default async function AdminErrorsPage(
+  props: {
+    searchParams: Promise<SearchParams>;
+  }
+) {
+  const searchParams = await props.searchParams;
   const windowHours = parseWindow(searchParams?.h);
   const sourceFilter = parseSource(searchParams?.source);
   const anchorIso = parseAnchor(searchParams?.ts);

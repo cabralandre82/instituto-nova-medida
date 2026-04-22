@@ -35,7 +35,7 @@ export type SessionUser = {
  * não `getSession()` (que confia no cookie). Mais lento mas seguro.
  */
 export async function getSessionUser(): Promise<SessionUser | null> {
-  const supabase = getSupabaseServer();
+  const supabase = await getSupabaseServer();
   const { data, error } = await supabase.auth.getUser();
   if (error || !data?.user) return null;
 
@@ -89,7 +89,7 @@ export async function requireDoctor(): Promise<{
     redirect("/medico/login?error=forbidden");
   }
 
-  const supabase = getSupabaseServer();
+  const supabase = await getSupabaseServer();
   const { data, error } = await supabase
     .from("doctors")
     .select("id")
