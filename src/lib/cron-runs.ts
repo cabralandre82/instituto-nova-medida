@@ -60,7 +60,9 @@ export type CronJob =
   | "retention_anonymize"
   | "asaas_events_purge"
   | "expire_appointment_credits"
-  | "stale_presence";
+  | "stale_presence"
+  | "doctor_daily_summary"
+  | "doctor_on_call_reminder";
 
 export async function startCronRun(
   supabase: SupabaseClient,

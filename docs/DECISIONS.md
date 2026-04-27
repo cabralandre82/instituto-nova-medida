@@ -5,6 +5,148 @@
 
 ---
 
+## D-089 · Notificações WhatsApp pra médica (PR-077 · paid + T-15min + resumo amanhã + plantão T-15min) · 2026-04-27
+
+**Contexto.** Toda a infra de notificações WhatsApp (D-031, migration
+011, `appointment_notifications`) foi construída pra **paciente**:
+confirmação de agendamento, T-24h, T-1h, T-15min com link da sala,
+T+10min de pós-consulta, etc. A médica nunca recebeu nada — ela
+descobria sobre uma consulta nova abrindo o painel `/medico/agenda`
+manualmente. Pra produto solo de operação leve isso é fricção
+inaceitável: a médica precisa saber **o que está acontecendo
+agora** sem precisar ficar refrescando dashboard.
+
+Os 4 momentos críticos:
+
+1. **`paid`** — quando paciente paga consulta/plano e webhook Asaas
+   confirma. Médica recebe aviso operacional (revenue chegou +
+   agenda confirmada). Importante porque também valida pra ela que
+   o sistema está fechando ciclo de cobrança.
+2. **`T-15min`** — 15 min antes da consulta agendada, recebe link
+   da sala. Equivalente operacional do `link_sala_consulta` que o
+   paciente já recebe.
+3. **`resumo amanhã`** — diário às ~20h Brasília, sumário das
+   consultas do próximo dia. Permite que ela planeje o dia
+   seguinte sem precisar abrir o dashboard.
+4. **`plantão T-15min`** — 15 min antes do início de bloco
+   recorrente `on_call` (D-088). Avisa que está chegando a hora
+   de abrir o painel `/medico/horarios` (ou `/medico/plantao` em
+   PR-080).
+
+**Decisão.** Criar tabela nova `public.doctor_notifications` (não
+reutilizar `appointment_notifications`), lib gêmea
+`src/lib/doctor-notifications.ts`, 4 helpers WA novos em
+`wa-templates.ts` (em dry-run até templates serem aprovados pela
+Meta no PR-077-B), e estender o cron `wa-reminders` pra processar
+**ambas** as filas no mesmo schedule.
+
+Adicionar 2 crons novos:
+- `/api/internal/cron/doctor-daily-summary` → diário (`0 23 * * *`
+  UTC ≈ 20:00 BRT) enfileira `doctor_daily_summary` por médica.
+- `/api/internal/cron/doctor-on-call-reminder` → a cada minuto,
+  identifica blocos `on_call` cujo início está nos próximos 15-16
+  min e enfileira `doctor_on_call_t_minus_15min`.
+
+Adicionar hooks de enqueue em:
+- `/api/agendar/free` — após reservar slot, enfileira
+  `doctor_t_minus_15min`.
+- `/api/asaas/webhook` — após ativar appointment, enfileira
+  `doctor_paid` + `doctor_t_minus_15min`.
+
+**Alternativas consideradas:**
+
+A. **Reutilizar `appointment_notifications` com kind `doctor_*`**
+   e coluna `recipient` (paciente|médica). Rejeitada:
+
+   - 2 dos 4 kinds (resumo + plantão) NÃO amarram a 1
+     `appointment_id` específico — `appointment_id` viraria
+     nullable, quebrando invariantes da tabela existente.
+   - O trigger `trg_an_body_immutable_after_send` (PR-067/D-075)
+     existe pra requisitos CFM de comunicação **ao paciente**;
+     mensagens internas pra médica não têm o mesmo nível de
+     forense — replicar o trigger seria exagero.
+   - RLS futura precisa diferenciar quem pode ler (médica leria
+     suas próprias notifs em `/medico/notifs` futuro; paciente
+     nunca). Tabela separada simplifica policies.
+
+B. **Cron novo dedicado pra worker da fila da médica.** Rejeitada
+   pra MVP: dobra schedule (custo nominal Vercel + ruído em
+   `cron_runs`), e o cron `wa-reminders` já roda a cada minuto
+   com folga (60s maxDuration). Estender pra processar as duas
+   filas em paralelo via `Promise.all` é gratuito.
+
+C. **Snapshot forense de body pra mensagens da médica** (mesmo
+   esquema do PR-067). Rejeitada: requisito CFM 2.314/2022 +
+   CDC Art. 39 VIII falam de comunicação **ao paciente**, não
+   interna. Custo de implementar (trigger + tests + retention)
+   sem ROI compatível. Se um dia o operador precisar provar
+   "avisei a médica que tinha consulta hoje", o `cron_runs`
+   payload + `doctor_notifications.message_id` + Meta API
+   bastam.
+
+D. **Templates aprovados na Meta antes do release.** Rejeitada
+   pra PR-077-A: aprovação Meta leva 1-7 dias, não bloquearia.
+   Convenção `templates_not_approved` (já usada em PR-031 +
+   `no_show_*`) mantém linha `pending` retrying, então quando
+   o env flag virar true os templates fluem sem mudança de
+   código. PR-077-B (esperado em ≤ 14 dias) submete os 4
+   templates novos.
+
+E. **Dispatcher unificado** entre patient + doctor sides.
+   Rejeitada: um caso de generalização prematura. Hidratação
+   é diferente (doctors.phone vs customers.phone), helpers
+   são diferentes, payload semântico é diferente. Manter 2
+   módulos espelhados (`notifications.ts` + `doctor-notifications.ts`)
+   é mais simples de raciocinar.
+
+**Trade-offs aceitos:**
+
+1. **Templates ficam em dry-run** (`templates_not_approved`)
+   até PR-077-B aprovar na Meta. Worker grava `error="templates_
+   not_approved"` e mantém row `pending` — quando flag virar
+   `WHATSAPP_TEMPLATES_APPROVED=true` E os 4 templates novos
+   forem aprovados, o backlog flui automaticamente. Não há
+   risco de duplicar disparo (idempotência por `message_id` +
+   unique parcial por kind).
+2. **Sem snapshot de body** (justificado no item C acima).
+3. **`doctor_on_call_reminder` usa tolerância de ±1 min** pra
+   detectar matches de start_time do bloco. Vercel cron raramente
+   roda exatamente em :00; tolerância previne miss quando atrasa
+   30s. Trade-off: pode disparar 1 min antes ou depois do alvo
+   exato (irrelevante na prática).
+4. **`doctor_daily_summary` não inclui lista nominal de pacientes**
+   no template inicial (só total + primeiro/último horário).
+   Justificativa: aprovação na Meta de template com placeholders
+   variáveis longos é difícil; lista vai num link no painel,
+   mantendo a mensagem WA curta.
+5. **Sem feature flag dedicada** pra rollout escalonado.
+   Justificativa: operação solo (1 médica), e os templates
+   ficam em dry-run automaticamente até Meta aprovar — esse
+   já é o flag implícito.
+
+**Implicações pra outros PRs:**
+
+- **PR-077-B** — submeter 4 templates novos na Meta:
+  `medica_consulta_paga`, `medica_link_sala`,
+  `medica_resumo_amanha`, `medica_plantao_iniciando`. Quando
+  aprovados, atualizar helpers em `wa-templates.ts` pra usar
+  `sendTemplate` em vez do stub dry-run.
+- **PR-078** — `/admin/appointments` e `/admin/plantao` podem
+  ler `doctor_notifications` pra mostrar "última notificação
+  enviada" como sinal de saúde do agendamento.
+- **PR-079** (on-demand backend) — vai enfileirar
+  `doctor_on_demand_match` (kind novo) quando uma médica
+  aceitar request. A infra atual aceita extensão sem mudança.
+- **PR-081** (plantão programado) — vai correlacionar
+  `doctor_on_call_t_minus_15min` enviado com `doctor_presence`
+  efetiva (médica abriu o painel?) pra detectar no-show de
+  plantão.
+- **PR-082** (observabilidade admin) — dashboard mostra fila
+  de `doctor_notifications` ao lado da fila de
+  `appointment_notifications`.
+
+---
+
 ## D-088 · UI médica edita própria agenda + toggle de plantão (PR-076 · fecha gap operacional) · 2026-04-27
 
 **Contexto.** D-086 (PR-075-A) abriu o agendamento gratuito pelo

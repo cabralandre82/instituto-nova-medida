@@ -9,6 +9,10 @@ import {
   enqueueImmediate,
   scheduleRemindersForAppointment,
 } from "@/lib/notifications";
+import {
+  enqueueDoctorAppointmentReminder,
+  enqueueDoctorPaid,
+} from "@/lib/doctor-notifications";
 import { markRefundProcessed } from "@/lib/refunds";
 import {
   composePaidWhatsAppMessage,
@@ -428,13 +432,29 @@ async function handleEarningsLifecycle(
     // 4) Enfileira notificações WhatsApp (D-031). Idempotente no
     //    provider — webhook Asaas pode chegar em duplicata (CONFIRMED
     //    seguido de RECEIVED) sem efeito colateral.
+    //    + Notificações pra MÉDICA (PR-077 · D-089): doctor_paid
+    //    imediato + doctor_t_minus_15min agendado pra T-15.
     try {
-      const immediateId = await enqueueImmediate(appt.id as string, "confirmacao");
-      const reminders = await scheduleRemindersForAppointment(appt.id as string);
+      const scheduledAtIso = (appt as { scheduled_at?: string }).scheduled_at;
+      const [immediateId, reminders, doctorPaidId, doctorReminderId] =
+        await Promise.all([
+          enqueueImmediate(appt.id as string, "confirmacao"),
+          scheduleRemindersForAppointment(appt.id as string),
+          enqueueDoctorPaid(appt.id as string, appt.doctor_id as string),
+          scheduledAtIso
+            ? enqueueDoctorAppointmentReminder(
+                appt.id as string,
+                appt.doctor_id as string,
+                new Date(scheduledAtIso)
+              )
+            : Promise.resolve(null),
+        ]);
       log.info("notificações enfileiradas", {
         appointment_id: appt.id,
         confirmacao_id: immediateId,
         reminders: reminders.scheduled,
+        doctor_paid_id: doctorPaidId,
+        doctor_reminder_id: doctorReminderId,
       });
     } catch (e) {
       log.error("enqueue notifications falhou", {

@@ -49,6 +49,12 @@
     },
     "src/app/api/internal/cron/stale-presence/route.ts": {
       "maxDuration": 15
+    },
+    "src/app/api/internal/cron/doctor-daily-summary/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/internal/cron/doctor-on-call-reminder/route.ts": {
+      "maxDuration": 30
     }
   },
   "crons": [
@@ -102,6 +108,14 @@
     },
     {
       "path": "/api/internal/cron/stale-presence",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/internal/cron/doctor-daily-summary",
+      "schedule": "0 23 * * *"
+    },
+    {
+      "path": "/api/internal/cron/doctor-on-call-reminder",
       "schedule": "* * * * *"
     }
   ],

@@ -44,6 +44,8 @@ const EXPECTED_JOBS = [
   "asaas_events_purge",
   "expire_appointment_credits",
   "stale_presence",
+  "doctor_daily_summary",
+  "doctor_on_call_reminder",
 ] as const;
 
 const JOB_LABELS: Record<string, string> = {
@@ -57,6 +59,8 @@ const JOB_LABELS: Record<string, string> = {
   asaas_events_purge: "Purge LGPD (asaas_events.payload)",
   expire_appointment_credits: "Expirar créditos de reagendamento",
   stale_presence: "Forçar offline (presença stale da médica)",
+  doctor_daily_summary: "Resumo diário pra médica (~20h BRT)",
+  doctor_on_call_reminder: "Aviso T-15min antes de plantão",
 };
 
 /**
@@ -75,6 +79,8 @@ const JOB_CADENCE: Record<string, string> = {
   asaas_events_purge: "semanal (dom 05:00 UTC)",
   expire_appointment_credits: "diário (12:00 UTC)",
   stale_presence: "a cada 1 min",
+  doctor_daily_summary: "diário (23:00 UTC ≈ 20:00 BRT)",
+  doctor_on_call_reminder: "a cada 1 min",
 };
 
 const WINDOW_DAYS = 30;

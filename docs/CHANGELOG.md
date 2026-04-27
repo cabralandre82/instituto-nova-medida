@@ -6,6 +6,139 @@
 
 ---
 
+## 2026-04-27 · Onda A · #4 · Notificações WhatsApp pra médica (PR-077-A · D-089) · IA
+
+**Por quê:** A médica nunca recebia nada — descobria sobre
+consulta nova abrindo `/medico/agenda` manualmente, sobre
+pagamento confirmado abrindo `/admin/payments`, sobre plantão
+chegando olhando no relógio. Pra produto solo de operação leve
+isso é fricção inaceitável. PR-077-A fecha o gap dos 4 momentos
+mais críticos: paciente pagou, link da sala em 15 min, resumo do
+dia seguinte, plantão começando em 15 min.
+
+**Entregáveis:**
+
+- **`supabase/migrations/20260522000000_doctor_notifications.sql`**:
+  - Tabela `doctor_notifications` (separada de
+    `appointment_notifications` por raciocínio explícito em
+    D-089). Suporta 3 anchors mutuamente complementares:
+    `appointment_id`, `availability_id`, `summary_date`.
+    Pelo menos um precisa estar setado (`dn_anchor_present`
+    CHECK).
+  - 4 kinds canônicos: `doctor_paid`, `doctor_t_minus_15min`,
+    `doctor_daily_summary`, `doctor_on_call_t_minus_15min`.
+  - 3 índices unique parciais (1 por anchor) garantem
+    idempotência sem coluna sintética: `(doctor_id,
+    appointment_id, kind)`, `(doctor_id, summary_date,
+    kind)`, `(doctor_id, availability_id, kind, scheduled_for)`.
+    O último inclui `scheduled_for` porque o mesmo bloco
+    `availability_id` recorrente gera 1 aviso por ocorrência
+    semanal.
+  - Trigger `tg_dn_touch_updated_at`. RLS deny-by-default.
+  - RPC `enqueue_doctor_notification(...)` security definer
+    com `ON CONFLICT DO NOTHING` retornando id ou null.
+- **`src/lib/doctor-notifications.ts`**: Lib gêmea de
+  `notifications.ts` mas hidratando da `doctors` em vez de
+  `customers`. Exporta `enqueueDoctorNotification`,
+  `enqueueDoctorAppointmentReminder` (calcula
+  `scheduled_for = scheduled_at - 15min`),
+  `enqueueDoctorPaid` (immediate), `processDuePendingDoctor`
+  (worker), `tomorrowSPDateString` (helper SP/UTC). 4 helpers
+  WA novos despachados via `switch (row.kind as
+  DoctorNotificationKind)`.
+- **`src/lib/wa-templates.ts`**: 4 helpers novos em dry-run
+  (`templates_not_approved` até PR-077-B):
+  `sendMedicaConsultaPaga`, `sendMedicaLinkSala`,
+  `sendMedicaResumoAmanha`, `sendMedicaPlantaoIniciando`.
+  Registry novo `DOCTOR_KIND_TO_TEMPLATE` mapeando 4 kinds →
+  4 nomes de template Meta.
+- **`src/app/api/internal/cron/wa-reminders/route.ts`**:
+  estendido pra processar AS DUAS filas em paralelo via
+  `Promise.all([processDuePending, processDuePendingDoctor])`.
+  Falha em uma não bloqueia a outra (cada uma com seu
+  `.catch`). Log estruturado com 2 dimensões `patient` +
+  `doctor`. Mesmo schedule `* * * * *`, mesmo `maxDuration`.
+- **`src/app/api/internal/cron/doctor-daily-summary/route.ts`**:
+  cron novo, agendado `0 23 * * *` UTC (≈ 20:00 BRT). Calcula
+  janela "amanhã" em America/Sao_Paulo, agrupa appointments
+  por `doctor_id`, enfileira 1 row de `doctor_daily_summary`
+  por médica com payload `{total_consultas, primeiro_horario,
+  ultimo_horario}`. Idempotente via unique
+  `(doctor_id, summary_date, kind)`.
+- **`src/app/api/internal/cron/doctor-on-call-reminder/route.ts`**:
+  cron novo, agendado `* * * * *`. Pra cada minuto, calcula
+  alvo T = now + 15min em SP, busca availability ativos
+  `type='on_call'` no weekday alvo, filtra app-side por
+  `start_time` = T.HH:MM com tolerância ±1 min, e enfileira
+  `doctor_on_call_t_minus_15min` com `scheduled_for = shift_start
+  - 15min`. Suporta `?dryRun=true`.
+- **`src/lib/cron-runs.ts`**: 2 novos `CronJob` types:
+  `doctor_daily_summary`, `doctor_on_call_reminder`.
+- **`vercel.json`**: 2 novos `functions` + 2 novas `crons`
+  entries.
+- **`src/app/admin/(shell)/crons/page.tsx`**: dashboard
+  reconhece os 2 novos jobs.
+- **Hooks de enqueue:**
+  - `src/app/api/agendar/free/route.ts`: após reserva, chama
+    `enqueueDoctorAppointmentReminder` em paralelo com os 4
+    lembretes do paciente.
+  - `src/app/api/asaas/webhook/route.ts`: após
+    `shouldActivateAppointment`, chama `enqueueDoctorPaid`
+    + `enqueueDoctorAppointmentReminder` em paralelo com
+    `enqueueImmediate('confirmacao')` + reminders.
+- **`src/lib/doctor-notifications.test.ts`**: 8 testes para
+  `tomorrowSPDateString` (DST-safe SP, virada de mês/ano,
+  formato YYYY-MM-DD) e `DOCTOR_KIND_TO_TEMPLATE` (cobertura
+  + sanity de naming).
+
+**Trade-offs aceitos:**
+
+1. **Templates em dry-run até PR-077-B.** Worker grava
+   `error='templates_not_approved'` e mantém row pending —
+   quando 4 templates novos forem aprovados pela Meta E
+   `WHATSAPP_TEMPLATES_APPROVED=true`, backlog flui sozinho.
+   Convenção idêntica ao PR-031 + `no_show_*`.
+2. **Sem snapshot forense de body.** Justificado em D-089:
+   requisitos CFM 2.314/2022 são pra comunicação ao paciente,
+   não interna. `cron_runs.payload` + `message_id` cobrem o
+   nível de forense compatível.
+3. **Cron de plantão usa tolerância ±1 min.** Vercel cron
+   raramente roda exatamente em :00; tolerância previne miss.
+   Trade-off: pode disparar 1 min antes/depois do alvo
+   exato.
+4. **Resumo do dia não lista pacientes nominalmente.** Só
+   total + primeiro/último horário. Aprovação Meta de template
+   com placeholders longos é difícil; lista nominal vai num
+   link no painel.
+5. **Cron de resumo só em SP timezone.** Multi-fuso só
+   relevante em PR-046 (multi-médica em outras UFs). Hoje
+   tudo é fixo SP UTC-3.
+
+**Riscos residuais:**
+
+- Se o `wa-reminders` cron começar a estourar 60s
+  `maxDuration` por causa do dobro de carga (paciente +
+  médica), separar em 2 crons é trivial. Hoje paciente
+  raramente passa de 5 rows/min e médica deve ficar ≤ 3
+  rows/min em pico — folga grande.
+- `tomorrowSPDateString` assume SP fixo UTC-3. Se Brasil
+  voltar a ter DST, é breaking — mas decreto de 2019 aboliu
+  DST sem previsão de retorno.
+- `doctor_on_call_reminder` cron NÃO compensa se a Vercel
+  perder janela (ex: cron parado durante incidente). Se
+  perder o minuto T-15, o aviso nunca dispara. Aceitável
+  porque é um aviso operacional, não crítico — médica ainda
+  vê o plantão pelo `/medico/horarios`. PR-081 vai trazer
+  monitor de plantão que detecta no-show e compensa.
+
+**Testes:** 1493 unit/component (8 novos em
+`doctor-notifications.test.ts`), 78 arquivos. Lint clean.
+Tsc clean. `next build` OK.
+
+**Próximo:** PR-078 — UI admin de appointments + plantão.
+
+---
+
 ## 2026-04-27 · Onda A · #3 · UI médica edita própria agenda + toggle de plantão (PR-076 · D-088) · IA
 
 **Por quê:** PR-075-A (D-086) abriu o agendamento gratuito pelo

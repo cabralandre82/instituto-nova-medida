@@ -69,6 +69,7 @@ import {
   enqueueImmediate,
   scheduleRemindersForAppointment,
 } from "@/lib/notifications";
+import { enqueueDoctorAppointmentReminder } from "@/lib/doctor-notifications";
 import { logger } from "@/lib/logger";
 
 const log = logger.with({ route: "/api/agendar/free" });
@@ -378,10 +379,16 @@ export async function POST(req: Request) {
   }
 
   // 7) Confirma e agenda lembretes (T-24h, T-1h, T-15min, T+10min)
+  //    + enfileira lembrete pra MÉDICA (T-15min) — PR-077 · D-089.
   try {
     await Promise.all([
       enqueueImmediate(appointmentId, "confirmacao"),
       scheduleRemindersForAppointment(appointmentId),
+      enqueueDoctorAppointmentReminder(
+        appointmentId,
+        doctorId,
+        new Date(input.scheduledAt)
+      ),
     ]);
   } catch (e) {
     log.error("notifications setup", { err: e, appointmentId });

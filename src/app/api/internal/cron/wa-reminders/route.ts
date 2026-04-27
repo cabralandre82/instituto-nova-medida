@@ -22,6 +22,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { processDuePending } from "@/lib/notifications";
+import { processDuePendingDoctor } from "@/lib/doctor-notifications";
 import { assertCronRequest } from "@/lib/cron-auth";
 import { logger } from "@/lib/logger";
 
@@ -46,20 +47,48 @@ export async function GET(req: NextRequest) {
   if (unauth) return unauth;
 
   const limit = parseLimit(req);
-  const report = await processDuePending(limit);
 
-  if (report.sent > 0 || report.failed > 0) {
+  // PR-077 · D-089 — processa AS DUAS filas no mesmo cron pra economizar
+  // schedule e maxDuration. As filas são independentes (tabelas
+  // diferentes); falha em uma não bloqueia a outra.
+  const [patientReport, doctorReport] = await Promise.all([
+    processDuePending(limit).catch((err) => {
+      log.error("patient queue threw", { err });
+      return { processed: 0, sent: 0, failed: 0, retried: 0, details: [] };
+    }),
+    processDuePendingDoctor(limit).catch((err) => {
+      log.error("doctor queue threw", { err });
+      return { processed: 0, sent: 0, failed: 0, retried: 0, details: [] };
+    }),
+  ]);
+
+  const totalActivity =
+    patientReport.sent +
+    patientReport.failed +
+    doctorReport.sent +
+    doctorReport.failed;
+
+  if (totalActivity > 0) {
     log.info("run finished", {
-      processed: report.processed,
-      sent: report.sent,
-      failed: report.failed,
-      retried: report.retried,
+      patient: {
+        processed: patientReport.processed,
+        sent: patientReport.sent,
+        failed: patientReport.failed,
+        retried: patientReport.retried,
+      },
+      doctor: {
+        processed: doctorReport.processed,
+        sent: doctorReport.sent,
+        failed: doctorReport.failed,
+        retried: doctorReport.retried,
+      },
     });
   }
 
   return NextResponse.json({
     ok: true,
-    ...report,
+    patient: patientReport,
+    doctor: doctorReport,
     ran_at: new Date().toISOString(),
   });
 }

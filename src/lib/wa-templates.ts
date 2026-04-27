@@ -332,6 +332,92 @@ export async function sendNoShowDoctor(_opts: {
   };
 }
 
+// ─── 12. medica_consulta_paga (PR-077 · D-089) ───────────────────────────
+// Disparada quando o paciente paga consulta/plano e o webhook do Asaas
+// confirma. A médica recebe aviso operacional de que tem revenue +
+// agenda confirmada. Fica em dry-run até o template ser aprovado pela
+// Meta.
+
+export async function sendMedicaConsultaPaga(_opts: {
+  to: string;
+  doctorNome: string;
+  pacienteFirstName: string;
+  consultaDateTime: Date;
+  valorReais: string;
+  painelUrl: string;
+}): Promise<WhatsAppSendResult> {
+  // TODO(PR-077-B): submeter template `medica_consulta_paga` na Meta.
+  return {
+    ok: false,
+    code: null,
+    message: "templates_not_approved",
+    details:
+      "Template medica_consulta_paga aguardando aprovação Meta (PR-077-B).",
+  };
+}
+
+// ─── 13. medica_link_sala (PR-077 · D-089) ───────────────────────────────
+// 15 min antes da consulta agendada, manda link da sala pra médica.
+// Equivalente operacional do `link_sala_consulta` do paciente.
+
+export async function sendMedicaLinkSala(_opts: {
+  to: string;
+  doctorNome: string;
+  pacienteFirstName: string;
+  consultaUrl: string;
+  salaValidaAte: Date;
+}): Promise<WhatsAppSendResult> {
+  // TODO(PR-077-B): submeter template `medica_link_sala` na Meta.
+  return {
+    ok: false,
+    code: null,
+    message: "templates_not_approved",
+    details: "Template medica_link_sala aguardando aprovação Meta (PR-077-B).",
+  };
+}
+
+// ─── 14. medica_resumo_amanha (PR-077 · D-089) ───────────────────────────
+// Resumo diário (~20h Brasília) da agenda do dia seguinte.
+
+export async function sendMedicaResumoAmanha(_opts: {
+  to: string;
+  doctorNome: string;
+  totalConsultas: number;
+  primeiroHorario: string; // "08h00"
+  ultimoHorario: string;   // "16h00"
+  painelUrl: string;
+}): Promise<WhatsAppSendResult> {
+  // TODO(PR-077-B): submeter template `medica_resumo_amanha` na Meta.
+  return {
+    ok: false,
+    code: null,
+    message: "templates_not_approved",
+    details:
+      "Template medica_resumo_amanha aguardando aprovação Meta (PR-077-B).",
+  };
+}
+
+// ─── 15. medica_plantao_iniciando (PR-077 · D-089) ───────────────────────
+// 15 min antes do início de bloco recorrente `on_call`. Avisa pra médica
+// abrir o painel `/medico/plantao` (PR-080) ou `/medico/horarios`.
+
+export async function sendMedicaPlantaoIniciando(_opts: {
+  to: string;
+  doctorNome: string;
+  shiftStart: Date;
+  shiftEnd: Date;
+  painelUrl: string;
+}): Promise<WhatsAppSendResult> {
+  // TODO(PR-077-B): submeter template `medica_plantao_iniciando` na Meta.
+  return {
+    ok: false,
+    code: null,
+    message: "templates_not_approved",
+    details:
+      "Template medica_plantao_iniciando aguardando aprovação Meta (PR-077-B).",
+  };
+}
+
 // ─── Kind ↔ Template dispatcher ──────────────────────────────────────────
 // Usado pelo worker em notifications.ts pra despachar uma linha
 // de appointment_notifications pro helper correto.
@@ -359,4 +445,22 @@ export const KIND_TO_TEMPLATE: Record<NotificationKind, string> = {
   reserva_expirada: "pagamento_pix_pendente", // reuso: PIX expirou / reserva expirou (template novo seria ideal)
   no_show_patient: "no_show_patient_aviso", // TODO Sprint 5: criar/aprovar na Meta
   no_show_doctor: "no_show_doctor_desculpas", // TODO Sprint 5: criar/aprovar na Meta
+};
+
+// ─── Doctor-side notification kinds (PR-077 · D-089) ─────────────────────
+// Vivem em `doctor_notifications` (tabela separada), com worker próprio
+// em `src/lib/doctor-notifications.ts`. Manter o registry aqui pra
+// centralizar mapeamento kind → template_name num lugar só.
+
+export type DoctorNotificationKind =
+  | "doctor_paid"
+  | "doctor_t_minus_15min"
+  | "doctor_daily_summary"
+  | "doctor_on_call_t_minus_15min";
+
+export const DOCTOR_KIND_TO_TEMPLATE: Record<DoctorNotificationKind, string> = {
+  doctor_paid: "medica_consulta_paga",
+  doctor_t_minus_15min: "medica_link_sala",
+  doctor_daily_summary: "medica_resumo_amanha",
+  doctor_on_call_t_minus_15min: "medica_plantao_iniciando",
 };
