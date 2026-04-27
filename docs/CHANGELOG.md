@@ -6,6 +6,119 @@
 
 ---
 
+## 2026-04-27 · Onda A · #9 · Observabilidade de produto: TTM + match rate + cobertura (PR-082 · D-094) · IA
+
+**Por quê:** PRs 079/080/081 entregaram o produto on-demand + plantão.
+Métricas operacionais (TTM, taxa de match, cumprimento de plantão,
+total pago) viviam em SQL ad-hoc no Studio. Operador solo precisa
+de um lugar único pra avaliar saúde de produto sem decorar query.
+PR-082 cria `/admin/observabilidade` como dashboard de métricas
+agregadas com janela configurável.
+
+**Entregáveis (3 frentes):**
+
+1. **Library** (`src/lib/admin-observability.ts` + 52 testes em
+   `admin-observability.test.ts`):
+   - **Constantes**: `OBSERVABILITY_WINDOWS = ['24h', '7d', '30d',
+     '90d']`, `OBSERVABILITY_WINDOW_HOURS` lookup, `COVERAGE_BUCKETS`
+     fixos (0-25, 25-50, 50-75, 75-100), `MAX_ROWS_PER_QUERY=10_000`.
+   - **Helpers puros (testáveis sem Supabase)**:
+     - `computePercentiles(values)`: nearest-rank, retorna
+       p50/p95/p99/avg/min/max + count, filtra NaN/Infinity/negativos,
+       arredonda pra inteiro.
+     - `computeMatchRate({accepted, cancelled, expired})`: null se
+       denominador zero.
+     - `bucketCoverage(ratio)`: clampa [0, 1], NaN→primeiro bucket.
+     - `buildCoverageHistogram(ratios)`: 4 buckets ordenados, sempre
+       presentes (mesmo vazios).
+     - `computeDurationSeconds({startIso, endIso})`: defesa contra
+       null/inválido/negativo.
+     - `resolveWindowRange({windowHours, now?})`: ISO range absoluto.
+     - `resolveDoctorDisplayName({display_name, full_name})`:
+       fallback estável "Médica".
+     - `formatDurationHuman`: Xs / Xm Ys / Xh YmYs / "—".
+     - `formatPctFromRatio`: 1 casa decimal.
+     - `formatCentsBR`: vírgula decimal.
+   - **Aggregators puros**: `aggregateOnDemandStats` (calcula
+     byOutcome, matchRate, timeToMatch [TTM], timeToAbandon,
+     pendingNow), `aggregateFanOutStats` (totalDispatched,
+     uniqueDoctorsReached, avgDispatchesPerRequest,
+     requestsWithZeroOnline, zeroOnlineRate),
+     `aggregateOnCallStats` (byOutcome paid/no_show, fulfillRate,
+     totalPaidCents, coverage percentis com escalonamento ×10000
+     pra compat com `computePercentiles`, histograma 4-bucket,
+     byDoctor ordenado por totalCents desc com fallback de display_name).
+   - **Orquestrador `loadObservabilityReport(supabase, {window,
+     now?})`**: 4 queries paralelas (on_demand_requests + pending atual
+     UNION, dispatches, settlements, doctors lite), cada uma fail-soft.
+     Retorna `ObservabilityReport` completo.
+
+2. **Page** (`src/app/admin/(shell)/observabilidade/page.tsx`):
+   - Server component com `?window=24h|7d|30d|90d` (default 7d).
+     Validação opaque — qualquer outro valor cai pro default
+     (sem oracle pra atacante).
+   - 3 seções (On-demand, Fan-out, Plantão programado) com 4 cards
+     de resumo cada + cards detalhados (PercentileCard pra TTM,
+     CoverageHistogramCard, DoctorBreakdownCard).
+   - **Semáforo de toneamento**: `toneForRate` (sage/amber/terracotta)
+     pra match rate (≥70/40), fulfillment (≥85/60); inverted pra
+     zero-online (≤10/30 — menor é melhor).
+   - **Histograma visual**: barras horizontais com escala ao maior
+     bucket, cores semânticas (terracotta nos buckets baixos,
+     amber no 50-75, sage no 75-100).
+   - Window picker (4 botões), header com timestamp do snapshot
+     + cross-links pra `/admin/plantao` e `/admin/crons`.
+   - Try/catch global com fallback amigável apontando pra
+     `/admin/errors`.
+
+3. **AdminNav**:
+   - Item "Observabilidade" adicionado entre "Saúde" e "Crons".
+
+**Trade-offs aceitos (registrados em D-094):**
+
+- **Sem auto-refresh** — operador recarrega manualmente (snapshot,
+  não real-time).
+- **Sem alerta proativo** — degradação só visível se operador
+  abrir página; PR-043 vai integrar drain externo pra alertas críticos.
+- **Sem export CSV** — dump via SQL Studio se precisar.
+- **Sem comparação período-vs-período** — janela mostra absoluto;
+  trend = 2 prints.
+- **Sem drill-down em request individual** — agregado apenas;
+  detalhe em `/admin/plantao` ou `/admin/pacientes/[id]`.
+- **`MAX_ROWS_PER_QUERY=10_000`** por subquery — em produção
+  explosiva, paginar agregados (não lista).
+- **Sem ranking de médica em on-demand** — só plantão tem
+  breakdown individual (D-091 já decidiu não ranquear on-demand).
+
+**Riscos residuais (mitigações em D-094):**
+
+- Janela curta (24h) com 0 settlements esconde tendência → default
+  7d; janela 30/90d com 1 click.
+- Doctor órfão em settlements → `resolveDoctorDisplayName` fallback
+  "Médica".
+- Janela 90d com volume alto extrapola limit → `MAX_ROWS_PER_QUERY`
+  clampa; PR futuro pagina/agrega no DB.
+
+**Verificação:**
+
+- TSC clean.
+- ESLint clean.
+- Vitest: **1635/1635 testes passando** (52 novos cobrindo
+  helpers puros + aggregators).
+- `next build` clean: `/admin/observabilidade` registrada (334 B).
+
+**Próximas dependências desbloqueadas:**
+
+- **PR-043** (drain externo + alertas): consume
+  `loadObservabilityReport` periodicamente pra alertar quando
+  métricas degradarem.
+- **PR-046** (multi-médica): zero código novo. Breakdown por
+  médica funciona automaticamente.
+- **PR futuro: série temporal**: lib pura é portável — mover
+  queries de janela móvel pra rolling buckets é refactor isolado.
+
+---
+
 ## 2026-04-27 · Onda A · #8 · Plantão programado: monitor + earnings + reliability (PR-081 · D-093) · IA
 
 **Por quê:** D-088 (PR-076) deu à médica UI pra programar plantão.

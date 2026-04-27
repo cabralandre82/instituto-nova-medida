@@ -19,6 +19,7 @@ const NAV = [
   { href: "/admin/notifications", label: "Notificações" },
   { href: "/admin/financeiro", label: "Financeiro" },
   { href: "/admin/health", label: "Saúde" },
+  { href: "/admin/observabilidade", label: "Observabilidade" },
   { href: "/admin/crons", label: "Crons" },
   { href: "/admin/errors", label: "Erros" },
   { href: "/admin/magic-links", label: "Magic-links" },

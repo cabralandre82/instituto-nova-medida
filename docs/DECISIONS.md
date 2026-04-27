@@ -5,6 +5,174 @@
 
 ---
 
+## D-094 · Observabilidade de produto on-demand + plantão (PR-082) · 2026-04-27
+
+**Contexto.** PR-079 (D-091) entregou backend on-demand. PR-080
+(D-092) deu UI funcional. PR-081 (D-093) fechou o ciclo de plantão
+com monitor + earnings + reliability. Mas as métricas operacionais
+do produto ficaram **espalhadas em SQL ad-hoc**:
+
+- "Qual o TTM mediano? Pacientes esperam 1 minuto ou 5?" → SQL no
+  Studio.
+- "Estamos cumprindo plantão? Qual a taxa de no-show da Dra. X?" →
+  SQL no Studio.
+- "Tem demanda sem médica online? Quantos requests expiraram por
+  fila vazia?" → SQL no Studio.
+- "Quanto pagamos de plantão neste mês?" → SQL no Studio.
+
+`/admin/plantao` (D-090) cobre snapshot operacional ("agora"),
+`/admin/crons` (D-059) cobre saúde técnica dos jobs. Faltava a
+**camada de produto** — métricas agregadas que dizem "o produto
+está funcionando bem?".
+
+**Decisão.** Criamos `/admin/observabilidade` como dashboard de
+métricas de produto, com janela configurável (24h / 7d / 30d / 90d),
+agregando 3 dimensões em uma única tela:
+
+1. **On-demand**: total de requests, taxa de match (accepted /
+   accepted+cancelled+expired), TTM (time-to-match) p50/p95/p99/avg/min/max,
+   tempo até abandono (cancel/expired), fila pending agora.
+
+2. **Fan-out**: requests com pelo menos 1 fan-out, médicas únicas
+   notificadas, dispatches médios por request, % de requests
+   sem médica online (zero-online rate — sinaliza inventário
+   insuficiente).
+
+3. **Plantão programado**: total de settlements (paid/no_show), taxa
+   de fulfillment (paid / total), total pago em R$, cobertura
+   p50/p95/avg, histograma de cobertura em 4 buckets (0-25%,
+   25-50%, 50-75%, 75-100%), breakdown por médica ordenado por
+   valor pago descendente.
+
+Cada métrica tem **threshold colorido** (semáforo sage/amber/terracotta)
+calibrado pra disparar alerta visual quando degradar:
+
+- Match rate: ≥70% sage, ≥40% amber, abaixo terracotta.
+- Fulfillment: ≥85% sage, ≥60% amber, abaixo terracotta.
+- Zero-online rate (invertido — menor é melhor): ≤10% sage, ≤30%
+  amber, acima terracotta.
+
+**Por que dashboard server-rendered (sem auto-refresh, sem charts JS)
+em vez de Grafana / Metabase / similar.**
+
+- Operador solo, baseline de eventos baixo (1-2 médicas, dezenas
+  de requests/dia). Métricas mudam em escala de horas, não
+  segundos. Refresh manual é ergonômico nesse volume.
+- Custo zero: zero deps, zero serviços externos, zero auth extra,
+  zero export de dados.
+- Auditoria/LGPD: tudo roda dentro do mesmo perímetro do app
+  (RLS deny-by-default cobre todas as queries). Nenhuma métrica
+  vai pra SaaS externo sem revisão.
+- Trade-off aceito: sem alerting proativo, sem comparação
+  ano-vs-ano, sem drill-down visual. Operador solo abre a página
+  na rotina diária; quando algo ficar terracotta, age. Quando
+  volume crescer, migra pra Metabase/Grafana com confiança nos
+  agregados (computados puros, fácil portar query).
+
+**Por que histograma com 4 buckets fixos (0-25, 25-50, 50-75,
+75-100) em vez de quantis dinâmicos.**
+
+- Buckets de 25% têm semântica clara alinhada com o threshold do
+  settler (`MIN_COVERAGE_FOR_PAYMENT = 0.5`): bloco no bucket
+  inferior = no-show; bucket superior = bom plantão; intermediário =
+  cumprimento parcial.
+- Bins fixos permitem comparação ano-vs-ano sem mudar o eixo.
+- Quantis dinâmicos exigiriam histograma adaptativo — overkill no
+  MVP.
+
+**Por que percentis nearest-rank (sem interpolação linear) em
+`computePercentiles`.**
+
+- Volume baixo (até ~5k samples por janela). Diferença entre
+  nearest-rank e linear é cosmética (≤1s em duração).
+- Algoritmo trivial → 1 implementação testada cobre todos os
+  call-sites.
+- Mais robusto a outliers (p95 não dispara por 1 sample fora da
+  curva).
+
+**Por que `pendingNow` é separado da janela.**
+
+- Pending dentro da janela já entra no `total` agregado. Mas
+  `pendingNow.count` mede a fila REAL (independente de janela)
+  + idade do mais antigo — operacional.
+- Operador olha "tem alguém esperando agora?" sempre, mesmo no
+  modo "30 dias".
+
+**Por que zero-online rate como métrica destacada.**
+
+- Sinal mais forte de "produto não atende a demanda". Outras
+  métricas (match rate baixa, abandono alto) podem ter múltiplas
+  causas (paciente desistiu, médica recusou). Zero-online é
+  inequívoco: não havia ninguém pra atender.
+- Direciona ação clara: ampliar agenda de plantão (D-088),
+  contratar 2ª médica (PR-046), revisar horários de pico.
+
+**Por que breakdown por médica é só pra plantão (não pra on-demand).**
+
+- On-demand: ranking por médica criaria pressão por "competição"
+  no fan-out (a 1ª que clica vence) — toxic. Métricas individuais
+  na fila on-demand não devem ser usadas pra remunerar
+  diferentemente sem MUITO mais infra (D-091 já decidiu não
+  ranquear).
+- Plantão: cumprimento INDIVIDUAL é dado contratual (PJ) já
+  registrado em `doctor_earnings` + `doctor_reliability_events`.
+  Mostrar ranking aqui só consolida dado existente.
+
+**Por que sem métricas históricas em série temporal.**
+
+- Operador solo, MVP cedo. Tendência week-vs-week já está em
+  `/admin/crons`. Pra produto, snapshot agregado em janela móvel
+  é suficiente.
+- Adicionar série temporal exige decisão sobre granularidade
+  (hora? dia?), retenção, agregação rolling vs fixed window.
+  Tudo defer pra quando volume justificar.
+
+**Trade-offs aceitos.**
+
+1. **Sem auto-refresh** — operador recarrega manualmente.
+2. **Sem alerta proativo** — degradação só visível quando operador
+   abre a página. Mitigação: PR-043 vai integrar logger drain
+   externo (Slack/WA) pra alertas críticos.
+3. **Sem export CSV** — operador vai no Studio se precisar de
+   dump. Privilégio de quem fez o produto.
+4. **Sem comparação período-vs-período** — janela mostra absoluto;
+   trend exige operador comparar 2 prints.
+5. **Sem drill-down em request individual** — métricas agregadas
+   apenas. Detalhe por request mora em `/admin/plantao` (snapshot)
+   e `/admin/pacientes/[id]` (histórico paciente).
+6. **MAX_ROWS_PER_QUERY = 10k** por subquery — em produção com
+   crescimento explosivo, paginar agregados (não lista). Pouco
+   provável antes de 6+ meses pós-launch.
+
+**Riscos residuais.**
+
+| Risco | Probabilidade | Mitigação |
+|-------|--------------|-----------|
+| Janela muito curta (24h) com 0 settlements esconde tendência | Média | Default 7d; janela 30d/90d disponível com 1 click. |
+| Coverage histogram usa percentil escalonado (×10000) por compatibilidade com `computePercentiles(int)` | Baixa | Conversão de volta no aggregator com `/100`; testes cobrem. |
+| Pending-now query lê até 500 rows independente de janela | Baixa | Em produção 1 pending por customer (unique parcial), volume nunca passa de dezenas. |
+| Doctor órfão (settlement com doctor_id que não existe em doctors) | Baixa | `resolveDoctorDisplayName` fallback "Médica" + log silencioso. Não quebra render. |
+| Janela 90d com volume alto (futuro) extrapola limit | Baixa | `MAX_ROWS_PER_QUERY=10_000` clampa; PR futuro pagina ou agrega no DB. |
+
+**Observabilidade da observabilidade.** Erros de carregamento da
+página caem em `logger.error` → `/admin/errors` (D-045 · 3.G).
+Render parcial: cada subquery é fail-soft (erro → empty array +
+log), o relatório nunca quebra inteiro.
+
+**Impacto em PRs futuros.**
+
+- **PR-043** (drain externo + alertas): vai consumir
+  `loadObservabilityReport` periodicamente (ou via cron novo) pra
+  disparar alerta no Slack/WA quando match_rate < 50% por X
+  horas, fulfill_rate < 70% por X dias, etc.
+- **PR-046** (multi-médica): zero código novo. Breakdown por
+  médica funciona automaticamente.
+- **PR futuro: série temporal**: lib pura `admin-observability`
+  já é portável — mover queries de janela móvel pra rolling
+  buckets é refactor isolado.
+
+---
+
 ## D-093 · Plantão programado: monitoramento, reliability e earnings (PR-081) · 2026-04-27
 
 **Contexto.** D-088 (PR-076) deu à médica a UI pra programar blocos
