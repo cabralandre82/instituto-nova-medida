@@ -10,7 +10,11 @@ const SHARE_URL = "https://institutonovamedida.com.br";
 // PR-075-A · D-086: depois do lead, oferta principal é o agendamento
 // gratuito imediato — não mais "espere o WhatsApp". O share continua
 // como ação secundária pra quem quer indicar antes de marcar.
+//
+// PR-080 · D-092: além do agendamento, oferecemos "atendimento agora"
+// como caminho alternativo (médica online aceita imediatamente).
 const SCHEDULE_HREF = "/agendar";
+const ON_DEMAND_HREF = "/agendar/agora";
 
 export function Success({
   open,
@@ -126,6 +130,12 @@ export function Success({
                   strokeLinejoin="round"
                 />
               </svg>
+            </a>
+            <a
+              href={ON_DEMAND_HREF}
+              className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-full bg-cream-50 hover:bg-cream-100 text-ink-800 border border-ink-200 text-[0.92rem] font-medium px-6 py-2.5 transition-colors"
+            >
+              Quero atendimento agora →
             </a>
           </div>
 

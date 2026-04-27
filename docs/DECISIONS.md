@@ -5,6 +5,162 @@
 
 ---
 
+## D-092 · UI de atendimento on-demand (paciente + médica) (PR-080) · 2026-04-27
+
+**Contexto.** PR-079/D-091 entregou todo o backend de on-demand
+(tabelas, RPCs, fan-out, cron de expiração) **sem UI**. Era trilho
+desligado da estrada — paciente não tinha rota pra criar request,
+médica não tinha rota pra aceitar. Esta PR conecta UI ↔ backend
+e ativa o produto.
+
+**Decisão.** UI dividida em duas frentes simétricas, ambas com
+**polling client-side** (não SSE/WebSocket):
+
+1. **Paciente — `/agendar/agora`** (server component dual):
+   - Sem cookie de lead → redirect pro quiz (mesma defesa de
+     `/agendar`).
+   - Com pending atual → renderiza `OnDemandWaitingClient`
+     (countdown + polling + cancel).
+   - Sem pending → renderiza `OnDemandForm` (mesmos campos do
+     `FreeBookingForm` + `chiefComplaint` textarea).
+   - Polling em `GET /api/agendar/agora/status?id=...` a cada
+     **3s**. Detecta accepted → redirect pra `consultaUrl` com
+     token assinado (mesmo padrão `/agendar/free`); cancelled →
+     `router.refresh()`; expired → mostra estado vazio com
+     botões "tentar novamente" e "agendar para depois".
+
+2. **Médica — `/medico/plantao`** (server + 2 client panels):
+   - **PresencePanel**: toggle "Entrar/Sair do plantão" + heartbeat
+     automático a cada **30s** (reusa `/api/medico/presence/heartbeat`
+     de PR-075-B). Indicador visual com cor (verde online, âmbar
+     busy, cinza offline).
+   - **PendingRequestsClient**: lista polled de requests pending
+     (todas — fila aberta). Cada item tem nome do paciente
+     (firstName), chief_complaint truncado a 120 chars, idade,
+     countdown TTL, e botão "Aceitar" → POST
+     `/api/medico/on-demand/[id]/accept` → redirect pra
+     `/medico/consultas/[appointmentId]`.
+   - **ScheduleCard**: contexto operacional (bloco on_call ativo
+     agora; próximo bloco nas próximas 4h; ponteiro pra editar
+     em `/medico/horarios`).
+   - **`/medico/plantao/[requestId]`**: deep-link target do
+     template WhatsApp `medica_on_demand_request` (PR-079). Página
+     dedicada de aceite com chief_complaint completo + countdown +
+     botão Aceitar. Estados terminais (accepted/cancelled/expired)
+     mostram banner explicativo sem botão.
+
+3. **Admin — `/admin/plantao`**: card "Fila on-demand"
+   substituiu o placeholder de PR-078. Snapshot read-only
+   (lista de pending + resumo das últimas 24h: aceitos /
+   expirados / cancelados). Sem auto-refresh — admin recarrega
+   a página. Métricas detalhadas (TTM, taxa de match, fila
+   viva auto-refresh) ficam pra PR-082.
+
+**Por que polling e não SSE/WebSocket?**
+
+- **Simplicidade operacional**: Vercel serverless tem limites
+  duros pra conexões long-lived. SSE viraria infra paralela.
+- **Latência aceitável**: 3s de delay no detect de accept é
+  invisível pro UX (UI já tem countdown local + transição
+  animada).
+- **Custo Edge**: 3s × 5min TTL = 100 requests por sessão de
+  paciente esperando. Com volume MVP (1-10 simultâneos), isso é
+  ruído no plano Vercel Hobby.
+- **Trade-off explícito**: se virar problema operacional (50+
+  pacientes simultâneos), reavaliar em PR-082 ou separar via
+  Pusher/Ably.
+
+**Por que `/agendar/agora` (separado de `/agendar`)?**
+
+- Modelos mentais distintos: agendado = "escolho horário";
+  on-demand = "atendimento agora". Misturar num form único
+  com toggle "agora vs depois" sobrecarrega a tela e induz
+  paralisia.
+- Roteamento simples: shell layout idêntico, mas form
+  diferente. Cada rota é cacheável independentemente.
+- Cross-promotion bilateral: `/agendar` tem CTA terracotta
+  "Atendimento agora →" no topo; `/agendar/agora` tem link
+  "Prefiro agendar →" no header. Paciente decide a qualquer
+  momento.
+
+**Por que botão "Aceitar" pode falhar com 409?**
+
+- Race-handling realista: 2+ médicas online recebem WA, ambas
+  clicam quase simultaneamente. RPC atomic D-091 garante que só
+  uma vence. UI mostra toast âmbar "Outra médica acabou de
+  aceitar" e remove item da lista (próximo poll confirma).
+- `_AcceptClient` (deep-link) também trata os 4 estados
+  terminais (`already_accepted`, `already_cancelled`, `expired`,
+  `not_found`) com banner dedicado em vez de erro genérico.
+
+**Por que `setPresenceStatus(busy)` pós-aceite?**
+
+- Quando a médica aceita, ela **vai entrar em consulta agora**.
+  Outras médicas ainda online continuam disponíveis pra próximos
+  requests. `busy` é semantically correto e o filtro de fan-out
+  (PR-079 `isPresenceEligible` + filtro `status === "online"`)
+  já exclui médicas busy.
+- Best-effort: se falhar (rede), médica fica online mas o
+  appointment ativo bloqueia novos auto-aceites via UI da
+  consulta (ela vê a tela de Daily, não a lista de plantão).
+
+**Alternativas consideradas.**
+
+- **UI única paciente com ambos os fluxos**: rejeitada — força
+  toggles que confundem.
+- **Aceitar via QR code/SMS sem login**: rejeitada — médica
+  precisa estar autenticada na sessão (auditoria CFM).
+- **Push notification pro celular da médica**: prematura — WA
+  cobre o caso, e push exige infra cara (FCM/APN).
+- **Não pedir CPF no on-demand**: rejeitada — CPF é necessário
+  pra prontuário (CFM 2.314/2022 art. 5º). Mesmas exigências do
+  free booking.
+- **Cancel auto se o paciente fechar a aba**: rejeitada — sem
+  beacon confiável. TTL de 5min do D-091 já cobre.
+
+**Trade-offs aceitos.**
+
+- *Polling de 3s*: gera ~20 req/min por paciente esperando.
+  Aceitável até 50 simultâneos; reavaliar em PR-082.
+- *Sem persistência se paciente fechar a aba*: o request fica
+  pending no banco; outra médica pode aceitar mesmo sem
+  paciente online. Trade-off: se aceito após paciente sair,
+  appointment vira "scheduled" sem ninguém na sala — médica vê
+  isso e finaliza como `no_show_patient`. Reliability tracking
+  (PR-068) registra. Aceitável MVP.
+- *Sem ranking de TTM por médica*: lista FIFO simples. Em
+  produção com 1-2 médicas, não há decisão a tomar. PR-082 traz
+  métricas se o problema aparecer com 5+.
+- *Botões duplicados (lista + deep-link)*: risco mínimo de
+  cliques duplos porque RPC é atomic. Mostrado: a primeira
+  ganha, a segunda recebe 409.
+- *Cross-promo no Success modal*: 2 CTAs (agendar + agora)
+  podem dispersar conversão. Apostamos que dar a opção é mais
+  importante que maximizar agendamento — paciente que precisa
+  agora abandona se só houver agendamento.
+
+**Implicações.**
+
+- Produto on-demand está **operacional**. Médica pode entrar em
+  `/medico/plantao`, ficar online, e aceitar requests reais
+  (assim que houver paciente).
+- WA pra médica continua em dry-run (`templates_not_approved`)
+  até PR-079-B aprovar templates Meta. **No interim, médica
+  precisa ter `/medico/plantao` aberto pra ver requests** —
+  push WA não chega ainda. Documentado no runbook.
+- `/admin/plantao` ganha visibilidade real da fila on-demand.
+  Operador detecta gargalo (3+ pendings sem aceite) e pode
+  ligar manualmente pra médicas via WhatsApp.
+- Próximo PR (PR-081) traz *plantão programado*: cron monitora
+  blocos on_call ativos com 0 médicas presence=online → registra
+  `doctor_reliability_event` e **gera earnings de plantão**
+  (`earning_kind='on_call_hour'`).
+- Próximo PR (PR-082) traz observabilidade pro admin: TTM
+  (time-to-match) percentil, taxa de match (accepted /
+  total criados), fila viva no `/admin` home.
+
+---
+
 ## D-091 · Backend de atendimento on-demand (PR-079) · 2026-04-27
 
 **Contexto.** Pós-D-088 (médica edita plantão) e D-089 (notifs WA pra

@@ -147,7 +147,7 @@ export default async function AgendarPage({ searchParams }: PageProps) {
         <strong className="text-ink-800">não tem cobrança nesta etapa</strong>.
       </p>
 
-      <div className="mb-8 rounded-2xl border border-sage-200 bg-sage-50/60 p-5">
+      <div className="mb-6 rounded-2xl border border-sage-200 bg-sage-50/60 p-5">
         <p className="text-[0.78rem] uppercase tracking-wider text-sage-700 font-medium">
           Como funciona o pagamento
         </p>
@@ -156,6 +156,24 @@ export default async function AgendarPage({ searchParams }: PageProps) {
           plano de tratamento, você recebe a indicação para revisar com calma
           — só paga se decidir aceitar.
         </p>
+      </div>
+
+      <div className="mb-8 rounded-2xl border border-terracotta-200 bg-terracotta-50/40 p-5 flex items-start justify-between gap-4 flex-wrap">
+        <div className="flex-1 min-w-[200px]">
+          <p className="text-[0.78rem] uppercase tracking-wider text-terracotta-700 font-medium">
+            Precisa agora?
+          </p>
+          <p className="mt-1.5 text-[0.95rem] text-ink-700 leading-relaxed">
+            Solicite atendimento imediato — uma médica online assume
+            sua consulta na hora.
+          </p>
+        </div>
+        <Link
+          href="/agendar/agora"
+          className="shrink-0 inline-flex items-center justify-center gap-2 rounded-full bg-terracotta-700 hover:bg-terracotta-800 text-cream-50 text-[0.92rem] font-medium px-5 py-2.5 transition-colors"
+        >
+          Atendimento agora →
+        </Link>
       </div>
 
       <SlotPickerClient slots={slots} />

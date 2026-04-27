@@ -16,8 +16,11 @@
  *   3. **Agenda recorrente da semana** — todos os blocos `on_call`
  *      ativos (read-only — médica edita em `/medico/horarios` D-088).
  *
- *   4. **Fila on-demand** — placeholder até PR-079 trazer a infra.
- *      Card explica o estado pra evitar mensagem fantasma.
+ *   4. **Fila on-demand** (PR-080 · D-092) — pacientes solicitando
+ *      atendimento agora. Mostra cada request pending com quem é o
+ *      paciente, a queixa principal (truncada), idade e TTL restante.
+ *      Resumo das últimas 24h (aceitos/expirados/cancelados) na
+ *      mesma seção pra contexto operacional.
  *
  * Sem ações destrutivas — admin não força médica online/offline daqui
  * (decisão D-090: respeita autonomia + evita ambiguidade legal de
@@ -36,6 +39,11 @@ import {
   nextOnCallStartUtc,
 } from "@/lib/admin-appointments";
 import { WEEKDAY_LABELS_PT } from "@/lib/doctor-availability";
+import {
+  computeSecondsUntilExpiry,
+  truncateChiefComplaintForWa,
+} from "@/lib/on-demand";
+import { firstName } from "@/lib/wa-templates";
 
 const log = logger.with({ route: "/admin/plantao" });
 
@@ -134,13 +142,111 @@ function isFreshPresence(row: PresenceRow, now: Date): boolean {
   );
 }
 
+type OnDemandPendingRow = {
+  id: string;
+  customer_id: string;
+  expires_at: string;
+  created_at: string;
+  chief_complaint: string;
+};
+
+type OnDemandSummary = {
+  accepted: number;
+  cancelled: number;
+  expired: number;
+  windowHours: number;
+};
+
+const ONDEMAND_SUMMARY_WINDOW_HOURS = 24;
+
+async function loadOnDemandPending(now: Date): Promise<OnDemandPendingRow[]> {
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("on_demand_requests")
+    .select("id, customer_id, expires_at, created_at, chief_complaint")
+    .eq("status", "pending")
+    .gt("expires_at", now.toISOString())
+    .order("created_at", { ascending: true })
+    .limit(50);
+  if (error) {
+    log.error("loadOnDemandPending", { err: error });
+    return [];
+  }
+  return (data ?? []) as OnDemandPendingRow[];
+}
+
+async function loadOnDemandSummary(now: Date): Promise<OnDemandSummary> {
+  const supabase = getSupabaseAdmin();
+  const since = new Date(
+    now.getTime() - ONDEMAND_SUMMARY_WINDOW_HOURS * 60 * 60 * 1000
+  ).toISOString();
+  const { data, error } = await supabase
+    .from("on_demand_requests")
+    .select("status")
+    .gte("created_at", since)
+    .neq("status", "pending");
+  if (error) {
+    log.error("loadOnDemandSummary", { err: error });
+    return {
+      accepted: 0,
+      cancelled: 0,
+      expired: 0,
+      windowHours: ONDEMAND_SUMMARY_WINDOW_HOURS,
+    };
+  }
+  let accepted = 0;
+  let cancelled = 0;
+  let expired = 0;
+  for (const r of (data ?? []) as Array<{ status: string }>) {
+    if (r.status === "accepted") accepted += 1;
+    else if (r.status === "cancelled") cancelled += 1;
+    else if (r.status === "expired") expired += 1;
+  }
+  return {
+    accepted,
+    cancelled,
+    expired,
+    windowHours: ONDEMAND_SUMMARY_WINDOW_HOURS,
+  };
+}
+
+async function loadCustomersForRequests(
+  rows: OnDemandPendingRow[]
+): Promise<Map<string, string>> {
+  if (rows.length === 0) return new Map();
+  const ids = Array.from(new Set(rows.map((r) => r.customer_id)));
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("customers")
+    .select("id, name")
+    .in("id", ids);
+  if (error) {
+    log.error("loadCustomersForRequests", { err: error });
+    return new Map();
+  }
+  const m = new Map<string, string>();
+  for (const c of (data ?? []) as Array<{ id: string; name: string | null }>) {
+    m.set(c.id, c.name ?? "");
+  }
+  return m;
+}
+
 export default async function PlantaoAdminPage() {
   const now = new Date();
-  const [doctors, presenceRows, onCallBlocks] = await Promise.all([
+  const [
+    doctors,
+    presenceRows,
+    onCallBlocks,
+    onDemandPending,
+    onDemandSummary,
+  ] = await Promise.all([
     loadDoctors(),
     loadPresence(),
     loadAllOnCallBlocks(),
+    loadOnDemandPending(now),
+    loadOnDemandSummary(now),
   ]);
+  const onDemandCustomers = await loadCustomersForRequests(onDemandPending);
 
   const doctorById = new Map(doctors.map((d) => [d.id, d] as const));
   const presenceByDoctor = new Map(
@@ -417,26 +523,107 @@ export default async function PlantaoAdminPage() {
         )}
       </section>
 
-      {/* ── Card 4: Fila on-demand (placeholder PR-079) ──────────── */}
+      {/* ── Card 4: Fila on-demand (PR-080 · D-092) ──────────────── */}
       <section className="mb-8">
-        <div className="mb-3">
-          <h2 className="font-serif text-[1.3rem] text-ink-800 leading-tight">
-            Fila on-demand
-          </h2>
-          <p className="text-sm text-ink-500 mt-0.5 max-w-2xl">
-            Pacientes solicitando atendimento agora.
-          </p>
+        <div className="mb-3 flex items-baseline justify-between flex-wrap gap-2">
+          <div>
+            <h2 className="font-serif text-[1.3rem] text-ink-800 leading-tight">
+              Fila on-demand{" "}
+              {onDemandPending.length > 0 && (
+                <span className="text-ink-400 text-sm font-sans">
+                  ({onDemandPending.length})
+                </span>
+              )}
+            </h2>
+            <p className="text-sm text-ink-500 mt-0.5 max-w-2xl">
+              Pacientes solicitando atendimento agora. Snapshot — sem
+              auto-refresh; recarregue pra atualizar. Métricas detalhadas
+              vêm em PR-082.
+            </p>
+          </div>
+          <div className="text-xs text-ink-500">
+            Últimas {onDemandSummary.windowHours}h:{" "}
+            <span className="text-sage-700 font-medium">
+              {onDemandSummary.accepted} aceito
+              {onDemandSummary.accepted === 1 ? "" : "s"}
+            </span>
+            {" · "}
+            <span className="text-amber-700 font-medium">
+              {onDemandSummary.expired} expirado
+              {onDemandSummary.expired === 1 ? "" : "s"}
+            </span>
+            {" · "}
+            <span className="text-ink-500">
+              {onDemandSummary.cancelled} cancelado
+              {onDemandSummary.cancelled === 1 ? "" : "s"}
+            </span>
+          </div>
         </div>
-        <div className="rounded-xl border border-dashed border-ink-200 bg-cream-50 px-5 py-6 text-sm text-ink-600">
-          <p className="font-medium text-ink-700">
-            Aguardando PR-079 (backend on-demand).
-          </p>
-          <p className="mt-1 text-ink-500">
-            A infra de requests, RPC <code>accept_on_demand_request</code> +
-            cron de expiração ainda não foi implementada. Quando estiver, esta
-            seção mostra fila viva, TTM e taxa de match (PR-082).
-          </p>
-        </div>
+        {onDemandPending.length === 0 ? (
+          <div className="rounded-xl border border-ink-100 bg-white px-5 py-6 text-sm text-ink-500">
+            Nenhum paciente aguardando atendimento agora.
+          </div>
+        ) : (
+          <ul className="space-y-2">
+            {onDemandPending.map((r) => {
+              const ttl = computeSecondsUntilExpiry({
+                expiresAt: r.expires_at,
+                now,
+              });
+              const ageMin = Math.max(
+                0,
+                Math.floor(
+                  (now.getTime() - new Date(r.created_at).getTime()) / 60_000
+                )
+              );
+              const ageSec = Math.max(
+                0,
+                Math.floor(
+                  (now.getTime() - new Date(r.created_at).getTime()) / 1000
+                )
+              );
+              const ageStr =
+                ageMin >= 1
+                  ? `${ageMin} min`
+                  : `${ageSec}s`;
+              const ttlMin = Math.floor(ttl / 60);
+              const ttlSec = ttl % 60;
+              const ttlStr = `${String(ttlMin).padStart(2, "0")}:${String(
+                Math.max(0, ttlSec)
+              ).padStart(2, "0")}`;
+              const fullName = onDemandCustomers.get(r.customer_id) ?? "";
+              const fName = firstName(fullName || "Paciente");
+              return (
+                <li
+                  key={r.id}
+                  className="rounded-xl border border-ink-100 bg-white px-4 py-3 flex items-start gap-3"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-[0.95rem] font-medium text-ink-800">
+                        {fName}
+                      </p>
+                      <span className="text-xs text-ink-400">
+                        há {ageStr}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-sm text-ink-700 leading-snug break-words">
+                      {truncateChiefComplaintForWa(r.chief_complaint)}
+                    </p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <p className="text-[0.7rem] uppercase tracking-wider text-ink-400">
+                      TTL
+                    </p>
+                    <p className="font-mono text-sm text-ink-700 tabular-nums">
+                      {ttlStr}
+                    </p>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </section>
     </div>
   );

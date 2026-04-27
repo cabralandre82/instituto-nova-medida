@@ -6,6 +6,162 @@
 
 ---
 
+## 2026-04-27 · Onda A · #7 · UI on-demand: paciente + médica + admin (PR-080 · D-092) · IA
+
+**Por quê:** PR-079/D-091 entregou backend de on-demand sem UI —
+trilho desligado da estrada. PR-080 conecta UI ↔ backend e ativa o
+produto: paciente cria request, médica aceita atomicamente, sala da
+consulta abre. Caso de uso "atendimento agora" — confirmado pelo
+operador como o mais frequente do produto pós-launch — passa de
+inacessível pra produto vivo.
+
+**Entregáveis (4 frentes):**
+
+1. **Rotas API paciente** (3 novas):
+   - `POST /api/agendar/agora`: lê lead cookie, valida payload (nome,
+     CPF, email, phone, chiefComplaint 4-500 chars, consent), upsert
+     customer com guard de takeover (PR-054), chama
+     `createOnDemandRequest` (idempotente — clique-duplo devolve mesmo
+     id), executa `fanOutToOnlineDoctors` síncrono, marca lead
+     `status='solicitou_agora'`, retorna `{requestId, expiresAt,
+     candidatesEligible, dispatched, noDoctorsOnline}`.
+   - `GET /api/agendar/agora/status?id=...`: polling endpoint com
+     bind por lead cookie (request precisa pertencer a customer
+     ligado ao lead). Retorna status + secondsUntilExpiry; se
+     `accepted`, devolve `appointmentId + consultaUrl` com
+     `signPatientToken` TTL 7d.
+   - `POST /api/agendar/agora/cancel`: cancel idempotente (já
+     cancelled = ok), 409 em terminais não-cancelled.
+
+2. **Rotas API médica** (2 novas):
+   - `POST /api/medico/on-demand/[requestId]/accept`: requireDoctor,
+     chama `acceptOnDemandRequest` (RPC atomic), em sucesso enfileira
+     `enqueueImmediate('confirmacao')` + `scheduleRemindersForAppointment`
+     pro paciente, marca presença `busy` (best-effort), retorna
+     `{appointmentId, salaUrl: "/medico/consultas/<id>"}`. Mapeia 4
+     races (already_accepted/cancelled/expired/not_found) → 409/404
+     com erro tipado.
+   - `GET /api/medico/on-demand/list`: lista pending FIFO ≤20,
+     hidrata firstName via `wa-templates::firstName`, marca
+     `dispatchedToMe` boolean (médica recebeu WA do fan-out),
+     retorna chiefComplaintShort truncado a 120 chars.
+
+3. **UI paciente** (`/agendar/agora`):
+   - **Server component dual**: sem cookie → redirect quiz; com
+     pending atual (resolve via `lead → customers → on_demand_requests
+     status=pending`) → renderiza `OnDemandWaitingClient`; sem pending
+     → renderiza `OnDemandForm`.
+   - **`OnDemandForm`**: espelha `FreeBookingForm` com 1 campo extra
+     (textarea chief_complaint, 4-500 chars, placeholder com
+     exemplos). Usa mesmo `sanitizeShortText` pattern personName,
+     mesma validação CPF, mesmas máscaras. Submit → `router.refresh()`,
+     server detecta pending, renderiza waiting.
+   - **`OnDemandWaitingClient`**: 2 timers (countdown local 1s +
+     polling server 3s), 4 estados terminais (accepted →
+     `window.location` pra consultaUrl com 1.5s pra mostrar "Aceito!";
+     cancelled → refresh; expired → estado vazio com 2 CTAs ["Tentar
+     novamente", "Agendar para depois"]; pending → countdown grande
+     + cancel button). Cores semânticas: terracotta pra esperando,
+     sage pra aceito, âmbar pra expired.
+
+4. **UI médica** (`/medico/plantao` + `/medico/plantao/[requestId]`):
+   - **`/medico/plantao`** (server): carrega presence atual + blocos
+     `on_call`. Calcula `activeNow` (bloco em curso) e `nextBlock`
+     (próximas 4h via `nextOnCallStartUtc`).
+   - **`PresencePanel`** (client): toggle "Entrar/Sair do plantão"
+     com heartbeat 30s automático enquanto online/busy. POST em
+     `/api/medico/presence/heartbeat` e `.../status` (PR-075-B).
+     Indicador colorido + copy explicativa por estado.
+   - **`PendingRequestsClient`** (client): polling 3s em
+     `/api/medico/on-demand/list`. Cada item mostra firstName, badge
+     "Te avisei" (se dispatchedToMe), idade, chief_complaint, TTL
+     countdown local, botão "Aceitar". Race-handling: 409 →
+     toast âmbar + remove item local (próximo poll confirma).
+     Sucesso → `router.push(salaUrl)`.
+   - **`ScheduleCard`**: contexto operacional (bloco ativo agora,
+     próximo bloco em 4h, link pra `/medico/horarios`).
+   - **`/medico/plantao/[requestId]`** (deep-link): página dedicada
+     alvo do template WA `medica_on_demand_request` (PR-079). Mostra
+     chief_complaint completo (não truncado) + `_AcceptClient`. 4
+     estados terminais com banner sem botão.
+   - **`_AcceptClient`** (client): countdown grande + botão Aceitar
+     + 4 reasons mapeados pra UI. Sucesso → push salaUrl.
+   - **DoctorNav**: novo item "Plantão" entre "Visão geral" e
+     "Agenda".
+
+5. **Admin `/admin/plantao`** (modificado):
+   - Card 4 (placeholder PR-079) substituído por **fila on-demand
+     real**: SELECT pending top 50 + summary das últimas 24h
+     (accepted / expired / cancelled). Snapshot read-only — sem
+     auto-refresh (operador recarrega). Cada pending mostra
+     firstName, chief_complaint truncado, idade, TTL.
+
+6. **Cross-promotion**:
+   - Success modal pós-quiz (`src/components/Success.tsx`) ganha CTA
+     secundário "Quero atendimento agora →" abaixo do principal
+     "Escolher horário".
+   - `/agendar` ganha card terracotta "Precisa agora? → Atendimento
+     agora →" antes do slot picker.
+
+**Trade-offs aceitos:**
+
+- Polling 3s (não SSE/WebSocket) — simplicidade operacional,
+  latência aceitável, custo Edge baixo no MVP. Reavaliar em PR-082
+  se houver gargalo.
+- Templates Meta ainda em dry-run — médica precisa ter
+  `/medico/plantao` aberto pra ver requests no MVP. Documentado.
+  Quando PR-079-B aprovar `medica_on_demand_request`, o WA chega
+  automaticamente sem código novo.
+- Sem persistência de aba — paciente fecha aba mas request fica
+  pending; médica pode aceitar mesmo sem paciente online; vira
+  no_show_patient se paciente não voltar. Aceitável MVP.
+- Sem ranking de TTM por médica — fila FIFO simples. PR-082 traz
+  métricas se necessário com 5+ médicas.
+- Botões duplicados (lista + deep-link) — race protegida pelo RPC
+  atomic D-091; UI mostra 409 amigável.
+- Cross-promo Success modal com 2 CTAs — pode dispersar conversão
+  agendar → on-demand, mas oferta de "agora" é mais importante
+  que maximizar 1 conversão.
+
+**Riscos residuais:**
+
+- *Spam de cliques* no botão Aceitar: protegido por
+  `if (accepting) return` no client + atomic guard no RPC.
+- *Heartbeat travado*: se aba congela, presença vai pra offline em
+  ≤120s via cron stale-presence (PR-075-B). Dentro do esperado.
+- *Latência fan-out > 30s*: `Promise.allSettled` com
+  `MAX_FANOUT_DOCTORS=10` + timeout WA 8s = pior caso ~8s. OK.
+- *Polling em background*: visibilitychange não é tratado — abas
+  ocultas continuam polled (overhead). Aceitável MVP.
+
+**Verificação:**
+
+- TSC clean. ESLint clean (em todo o tree). Vitest: **1544/1544**
+  (sem testes novos — PR-079 cobre helpers; UI é majoritariamente
+  IO/glue cobertos pelo build). `next build` clean — todas 6 rotas
+  novas registradas (`/agendar/agora`, `/api/agendar/agora`,
+  `.../cancel`, `.../status`, `/api/medico/on-demand/list`,
+  `/api/medico/on-demand/[requestId]/accept`, `/medico/plantao`,
+  `/medico/plantao/[requestId]`).
+
+**Impacto operacional pós-deploy:**
+
+- Médica acessa `/medico/plantao` → clica "Entrar no plantão" → fica
+  visível pra fan-out.
+- Paciente faz quiz → vê CTA "Quero atendimento agora" no Success
+  modal → preenche form em `/agendar/agora` → vê countdown.
+- Sem WA aprovado, médica precisa ter `/medico/plantao` aberto pra
+  ver request via polling 3s.
+- Admin acompanha em `/admin/plantao` (Card 4 fila on-demand).
+
+**Próximo:** PR-081 — *plantão programado*: cron monitora blocos
+`on_call` ativos sem médica presence=online → registra
+`doctor_reliability_event` (`reliability=on_call_no_show`); gera
+`doctor_earnings` com `earning_kind='on_call_hour'` pra médicas que
+cumpriram plantão.
+
+---
+
 ## 2026-04-27 · Onda A · #6 · Backend on-demand: requests + fan-out + accept (PR-079 · D-091) · IA
 
 **Por quê:** Pós-D-088 (médica edita plantão) e D-089 (notifs WA pra
