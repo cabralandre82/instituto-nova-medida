@@ -18,6 +18,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { sendBoasVindas } from "@/lib/whatsapp";
 import { isBodyTooLarge, validateLead } from "@/lib/lead-validate";
+import { buildLeadCookieHeader } from "@/lib/lead-cookie";
 import { logger } from "@/lib/logger";
 
 const log = logger.with({ route: "/api/lead" });
@@ -205,7 +206,17 @@ export async function POST(req: Request) {
         .eq("id", data?.id);
     }
 
-    return NextResponse.json({ ok: true, id: data?.id });
+    // PR-075-A · D-086: cookie httpOnly carrega o lead_id pra
+    // /agendar (consulta gratuita) sem depender de localStorage.
+    // Servidor e cliente acabam tendo views complementares: o
+    // localStorage permanece (compat com formulários legados de
+    // checkout que esperam `inm_lead_id`); o cookie é a fonte de
+    // verdade pra o fluxo D-044.
+    const headers = data?.id
+      ? { "Set-Cookie": buildLeadCookieHeader(data.id as string) }
+      : undefined;
+
+    return NextResponse.json({ ok: true, id: data?.id }, { headers });
   } catch (err) {
     log.error("internal error", { err });
     return NextResponse.json(

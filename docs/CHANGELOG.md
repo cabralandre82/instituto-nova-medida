@@ -6,6 +6,91 @@
 
 ---
 
+## 2026-04-27 · Onda A · #1 · Agendamento da consulta gratuita (PR-075-A · D-086) · IA
+
+**Por quê:** o operador pediu, em 2026-04-27, que o assistente
+explicasse o fluxo da agenda dos médicos. Durante o estudo,
+descobriu-se um buraco crítico: D-044 (PR-020) estabeleceu que a
+consulta inicial é gratuita e que o paciente se autoatende, mas
+**nunca houve rota pública alinhada com isso**. `/agendar/[plano]`
+e `/checkout/[plano]` exigem `LEGACY_PURCHASE_ENABLED=true` (em
+prod ficam bloqueados como reflexo do D-044), e nenhuma rota nova
+foi criada pra substituí-los. Resultado: paciente terminava o
+quiz, via "te chamamos no WhatsApp", e ficava preso esperando
+contato manual do operador. Quebra explícita da promessa do
+produto. Fechado nesse PR como o item #1 da Onda A do plano
+revisado de 9 PRs aprovado pelo operador.
+
+**Entregáveis:**
+
+- **`supabase/migrations/20260520000000_book_free_appointment_slot.sql`** —
+  RPC `book_free_appointment_slot` (security definer) que insere
+  appointment direto em `status='scheduled'`, sem TTL e sem
+  payment_id, reusando o índice unique parcial
+  `ux_app_doctor_slot_alive` pra anti-double-book. Coluna
+  `leads.appointment_id uuid` + índice parcial pra trilha
+  lead→consulta.
+
+- **`src/lib/lead-cookie.ts`** + tests (`lead-cookie.test.ts`,
+  16 cases) — cookie httpOnly `inm_lead_id` (Max-Age 30d, Lax,
+  Secure em prod), validação UUID estrita em todos os pontos.
+
+- **`POST /api/lead`** — agora emite `Set-Cookie: inm_lead_id=<uuid>`
+  na resposta. localStorage permanece pra compat com checkout legado.
+
+- **`POST /api/agendar/free`** — rota canônica nova:
+  - Lê lead do cookie httpOnly (sem trust em body).
+  - Valida lead existe + não anonimizado + `created_at >= now() -
+    14d` (`LEAD_MAX_AGE_DAYS`).
+  - Sanitização canônica (PR-037 · D-056) de nome.
+  - Validação CPF dígitos + email + phone.
+  - Resolve médica primária (D-036), `isSlotAvailable`.
+  - PII Takeover Guard (PR-054 · D-065) pra customer upsert; passa
+    `address` atual do customer (ou strings vazias) — guard só
+    deixa `name/email/phone` mudarem sob gate.
+  - `book_free_appointment_slot()` atomic.
+  - `enqueueImmediate('confirmacao')` +
+    `scheduleRemindersForAppointment()` (T-24h/T-1h/T-15min/T+10min).
+  - `leads.appointment_id = id; status = 'agendado'` (best-effort).
+  - Retorna `{ ok, appointmentId, patientToken, consultaUrl }`.
+
+- **`/agendar` (server component)** — gating:
+  - Sem cookie → `redirect('/?aviso=quiz_primeiro')`.
+  - Cookie com lead expirado/deletado → `?aviso=lead_expirado`.
+  - Sem `?slot=` → `<SlotsGrid>` (extraído de `SlotPicker` e
+    generalizado em `src/components/SlotsGrid.tsx`).
+  - Com `?slot=<iso>` válido → `<FreeBookingForm>` (nome, CPF,
+    email, telefone, recording_consent, consent LGPD). Sem
+    endereço aqui.
+
+- **`/agendar/sucesso?id=<uuid>`** — confirmação com sanity check
+  `customer.lead_id == cookie.inm_lead_id`, mostra horário e
+  médica + CTA pra `/paciente/login`.
+
+- **`Success` modal pós-quiz** — CTA principal mudou pra "Escolher
+  horário" → `/agendar`. Texto secundário mantém promessa de
+  contato WA pra quem não quiser autoatendimento agora.
+
+- **`NoticeBanner`** — novos códigos `quiz_primeiro` e
+  `lead_expirado` (banner laranja, sticky).
+
+**Trade-offs aceitos:** address vazio passado pro PII guard
+(documentado em D-086 — refactor cosmético em PR futuro),
+`leads.status='agendado'` é informativo (não state machine), sem
+captcha (cookie httpOnly + rate-limit em `/api/lead` é fricção
+suficiente nessa etapa), sem dedupe por CPF (operador identifica
+via admin/PR-078).
+
+**Risco residual:** baixo-médio. Cobertura: 1449 testes verdes
+em 75 arquivos (9 novos em `lead-cookie.test.ts`), TSC 0 erros,
+ESLint 0 erros, build prod OK.
+
+**Próximos passos (Onda A continua):** PR-075-B
+(`doctor_presence`), PR-076 (UI médica edita agenda), PR-077
+(notificações WA pra médica).
+
+---
+
 ## 2026-04-20 · Quick-wins técnicos: Next 15 + UI magic-links + sweep de créditos (D-083/D-084/D-085) · IA
 
 **Por quê:** após o runbook operacional (PR-074/D-082) estabilizar o dia

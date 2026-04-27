@@ -5,6 +5,209 @@
 
 ---
 
+## D-086 · Rota canônica de agendamento da consulta gratuita (PR-075-A · fecha buraco D-044) · 2026-04-27
+
+**Contexto.** D-044 (audit [1.1], PR-020) estabeleceu que a consulta
+inicial é **gratuita** — paciente passa pelo quiz, agenda com a
+médica, é avaliado, e só paga se aceitar o plano de tratamento depois.
+A enforcement disso foi feita por `LEGACY_PURCHASE_ENABLED=false`
+em produção, que bloqueia `/agendar/[plano]` e `/checkout/[plano]`.
+
+O efeito colateral, descoberto durante o estudo do fluxo da agenda
+dos médicos solicitado pelo operador em 2026-04-27: **não existe rota
+pública de agendamento alinhada com D-044**. O paciente termina o
+quiz, vê "te chamamos no WhatsApp", e fica preso esperando contato
+manual. Isso quebra a promessa do produto e é incompatível com a
+ambição de ter operador solo + atendimento on-demand (PR-079+).
+
+Mais grave: o operador, durante anos, já trabalhava na suposição de
+que o paciente "se autoatendia" depois do lead, mas nunca houve UI
+canônica pra isso. Cada agendamento era manual via WhatsApp.
+
+**Decisão.** Implementar a rota pública `/agendar` (sem `[plano]`)
+que cria o `appointment` em `status='scheduled'` direto, sem
+cobrança, sem TTL, sem ligação com Asaas. Cobrança continua
+acontecendo apenas em `/api/paciente/fulfillments/.../accept`,
+após a consulta, quando há prescrição aceita pelo paciente
+— exatamente como D-044 desenhou.
+
+### Peças entregues
+
+1. **Migration `20260520000000_book_free_appointment_slot.sql`**
+   - RPC `book_free_appointment_slot(p_doctor_id, p_customer_id,
+     p_scheduled_at, p_duration_minutes, p_kind, p_recording_consent)`.
+     `security definer`, mesma assinatura conceitual de
+     `book_pending_appointment_slot` mas insere com `status='scheduled'`,
+     `pending_payment_expires_at=NULL`. Reusa o índice unique parcial
+     `ux_app_doctor_slot_alive` — invariante anti-double-book mantida
+     sem mudança de schema.
+   - Coluna `leads.appointment_id uuid references appointments(id)
+     on delete set null` + índice parcial — analytics de conversão
+     lead→consulta e ancora trilha LGPD ("qual consulta nasceu desse
+     lead").
+
+2. **`src/lib/lead-cookie.ts`** (puro, 0 deps)
+   - Cookie httpOnly `inm_lead_id` com `Max-Age=30d`,
+     `SameSite=Lax`, `Secure` em produção.
+   - Helpers `buildLeadCookieHeader`, `buildLeadCookieClearHeader`,
+     `readLeadIdFromCookieHeader`. Validação de UUID em todos os
+     pontos (rejeita cookie tamperado).
+   - Coexiste com `localStorage.inm_lead_id` legado: o servidor lê
+     o cookie como fonte de verdade; localStorage permanece só pra
+     compat com `CheckoutForm` legado (que ainda passa `leadId` no
+     body via JSON).
+
+3. **`POST /api/lead`** — emite o cookie no `Set-Cookie` da resposta.
+
+4. **`POST /api/agendar/free`** — rota canônica:
+   - Lê `inm_lead_id` do cookie (401 `lead_required` se ausente).
+   - Valida lead existe, não foi anonimizado, `created_at >=
+     now() - 14 dias` (`LEAD_MAX_AGE_DAYS`). Janela cobre férias
+     curtas, hospitalização, indecisão saudável; >14d → exige refazer
+     o quiz.
+   - Sanitização canônica de `name` (PR-037 · D-056), validação de
+     CPF dígitos, email, phone.
+   - Resolve médica primária ativa não-pausada (D-036).
+   - `isSlotAvailable` (anti-tampering — slot tem que estar
+     exatamente entre os ofertados por `listAvailableSlots`).
+   - Upsert customer com **PII Takeover Guard (PR-054 · D-065)**.
+     Não coletamos endereço aqui, mas o guard exige `address` no
+     payload — passamos os campos atuais do customer (ou strings
+     vazias pra novos), o que produz `changedFields` sem nenhum
+     endereço. Apenas `name/email/phone` podem mudar e só sob
+     gate (`update_full` × `update_blocked`).
+   - `book_free_appointment_slot()` atomic.
+   - `enqueueImmediate(appt, 'confirmacao')` +
+     `scheduleRemindersForAppointment(appt)` (T-24h, T-1h, T-15min,
+     T+10min) — mesmas notificações do fluxo legado pago.
+   - `leads.appointment_id = id; leads.status = 'agendado'` (best-effort).
+   - Retorna `{ ok, appointmentId, patientToken, consultaUrl }`.
+
+5. **`/agendar`** (server component) — gating + slot picker + form:
+   - Sem cookie → `redirect("/?aviso=quiz_primeiro")`.
+   - Cookie expirado/lead deletado → `?aviso=lead_expirado`.
+   - Sem `?slot=` → `<SlotsGrid>` com slots reais da médica.
+   - Com `?slot=<iso>` válido → `<FreeBookingForm>` (nome, CPF,
+     email, telefone, recording_consent, consent LGPD).
+   - **Sem campos de endereço.** Endereço é pedido somente quando o
+     paciente aceita o fulfillment em `/paciente/oferta/[id]`.
+
+6. **`/agendar/sucesso?id=<uuid>`** — confirmação:
+   - Re-valida `customer.lead_id == cookie.inm_lead_id` (sanity).
+   - Mostra horário, médica, próximos passos, lembrete WA.
+   - CTA "Acessar minha área" → `/paciente/login` (magic-link).
+
+7. **`src/components/SlotsGrid.tsx`** — grid genérico extraído do
+   `SlotPicker` legado (que continua exclusivo de `/agendar/[plano]`).
+   Aceita callback `onPick(iso)` em vez de hardcodar plano.
+
+8. **Pós-quiz (`Success` modal)** — CTA principal mudou:
+   - Antes: "Te chamamos no WhatsApp em até 1 hora útil."
+   - Depois: "Agende sua consulta gratuita." → `/agendar`.
+   - Texto "Caso não agende agora, entraremos em contato pelo
+     WhatsApp" mantém o caminho assistido pra quem quer aguardar.
+
+9. **`NoticeBanner`** — novos códigos `quiz_primeiro` e
+   `lead_expirado` (banner laranja sticky com mensagem).
+
+### Por que cookie httpOnly e não só localStorage
+
+Modelo de ameaça:
+- localStorage é lido por qualquer script da página. Extensão
+  maliciosa, XSS hipotético, scripts terceiros = lead_id vazado.
+- Cookie httpOnly é invisível pro JS. Mesmo que vaze por outra via
+  (CSRF? não — `SameSite=Lax`), não é facilmente enumerável.
+
+Trade-off: o `CheckoutForm` legado lê `localStorage.inm_lead_id` e
+manda no JSON. **Mantivemos os dois.** Cliente continua salvando em
+localStorage (compat) e servidor continua emitindo o cookie (verdade
+canônica). Para `/api/agendar/free` específicamente o cookie é a
+única fonte aceita — o body **não** carrega `leadId`.
+
+### Por que não tornar o cookie SameSite=Strict
+
+`Strict` quebra navegação cross-site (clique de email, share via
+WhatsApp). O fluxo de aceitação de plano mais tarde virá de email
+WhatsApp em link clicável; o paciente não pode perder o lead nesse
+caminho. `Lax` é o equilíbrio canônico.
+
+### Por que `LEAD_MAX_AGE_DAYS = 14`
+
+- 1 dia: muito curto, paciente que vê quiz noite e agenda no fim
+  de semana perde estado.
+- 30+ dias: lead se torna "fantasma", risco de abuso (atacante
+  resgata cookie de máquina compartilhada).
+- 14 dias: cobre férias curtas, ressaca pós-quiz, retomada de
+  decisão. Prática comum em SaaS pós-trial.
+
+A janela é configurável de via env-var no futuro, mas começa
+literal pra reduzir surface de bug.
+
+### Trade-offs aceitos
+
+- **Sem captcha.** O agendamento depende de cookie de lead, que
+  depende de `/api/lead` ter sido chamado, que depende de passar
+  pelo quiz com rate-limit (10/IP/15min, MSG 1 WA outbound). É um
+  funil de fricção decente. PR-079 adiciona cooldown e
+  rate-limit explícito por CPF.
+
+- **Sem deduplicação por CPF.** Se o paciente passar pelo quiz e
+  agendar duas vezes consultas pra duas datas diferentes, o
+  sistema aceita (índice unique é por slot, não por CPF).
+  Operador identifica via admin (PR-078 — Onda B). Justificativa:
+  falsos positivos (paciente mudou de ideia, esposa passou pelo
+  laptop do marido) > falsos negativos.
+
+- **Sem 2FA via WhatsApp antes do agendamento.** O lead já validou
+  que aquele número é alcançável (recebeu MSG 1). Camada extra
+  (OTP) seria fricção desproporcional pra etapa gratuita.
+
+- **`leads.status='agendado'` é informativo.** Não é estado de
+  máquina: cancelamento de consulta não volta o lead. Quem precisa
+  da verdade canônica usa `appointments.status` via
+  `leads.appointment_id`.
+
+- **Address vazio no PII guard.** `decideCustomerUpsert` exige
+  `address` na assinatura. Passamos os campos atuais do customer
+  (ou strings vazias pra customer novo). Trade-off: se o paciente
+  tinha endereço cadastrado antes, ele permanece intacto;
+  `changedFields` sai sem campos de endereço. Funcionalmente
+  correto, mas a assinatura do guard merece um modo
+  `omit-address` em PR futuro pra reduzir feio cosmético.
+
+### Risco residual
+
+- **Médio**: paciente conclui agendamento, depois CSRFs / fecha
+  aba antes da médica receber notificação. Mitigação: notificação
+  imediata no SQL via `enqueueImmediate('confirmacao')` é
+  síncrona com o INSERT do appointment, falha visível em
+  `appointment_notifications`.
+- **Baixo**: paciente agenda em horário invadido por médica que
+  acabou de cancelar slot. `isSlotAvailable` re-consulta antes do
+  INSERT, e o índice unique é a última linha de defesa.
+- **Baixo**: cookie vaza em log de proxy. Mitigação: cookie é
+  httpOnly + Secure em prod; valor é UUID interno sem PII; mesmo
+  vazado, não permite ações sem o stack inteiro do servidor (re-
+  valida lead por DB).
+
+### Fechamento de findings
+
+- **`[1.1] Buraco D-044`** (audit Sprint 1, anos): finalmente
+  fechado. Existe rota pública alinhada com a promessa do produto.
+- **Buraco operacional**: paciente deixa de depender de toque
+  manual do operador pra agendar. Operador solo escala.
+
+### Próximos passos (PRs subsequentes)
+
+- **PR-075-B** (`doctor_presence` + heartbeat) — base pra plantão real.
+- **PR-076** (UI da médica edita própria agenda).
+- **PR-077** (notificações WA pra médica — paid + t-15min + resumo).
+- **PR-078** (`/admin/appointments` — visão consolidada).
+- **PR-079** (on-demand — `/agendar/agora` sem cobrança, com
+  cooldown por CPF).
+
+---
+
 ## D-085 · Migração Next.js 14.2.35 → 15.5.15 + React 18 → 19 (PR-041-B · fecha findings 11.x DoS residuais) · 2026-04-20
 
 **Contexto.** PR-041 (D-060) subiu Next de 14.2.18 pra 14.2.35 pra fechar

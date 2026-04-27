@@ -377,6 +377,53 @@ export async function bookPendingSlot(input: {
 }
 
 /**
+ * Chama a SQL function `book_free_appointment_slot` (D-086).
+ *
+ * Cria um appointment com `status='scheduled'` direto, sem
+ * payment_id e sem TTL de pending_payment. Usado pela rota
+ * canônica `/api/agendar/free` (consulta inicial gratuita do
+ * fluxo D-044). Compartilha com `bookPendingSlot` o mesmo índice
+ * unique parcial `ux_app_doctor_slot_alive` — garantia
+ * anti-double-book sem alteração de schema.
+ */
+export async function bookFreeSlot(input: {
+  doctorId: string;
+  customerId: string;
+  scheduledAt: string; // ISO
+  durationMinutes: number;
+  kind?: "scheduled" | "on_demand";
+  recordingConsent?: boolean;
+}): Promise<
+  | { ok: true; appointmentId: string }
+  | { ok: false; error: "slot_taken" | "validation_failed" | "internal"; message?: string }
+> {
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase.rpc("book_free_appointment_slot", {
+    p_doctor_id: input.doctorId,
+    p_customer_id: input.customerId,
+    p_scheduled_at: input.scheduledAt,
+    p_duration_minutes: input.durationMinutes,
+    p_kind: input.kind ?? "scheduled",
+    p_recording_consent: input.recordingConsent ?? false,
+  });
+  if (error) {
+    const msg = error.message || "";
+    if (msg.includes("slot_taken")) {
+      return { ok: false, error: "slot_taken", message: "Slot já reservado." };
+    }
+    if (error.code === "22023") {
+      return { ok: false, error: "validation_failed", message: msg };
+    }
+    log.error("bookFreeSlot", { err: error });
+    return { ok: false, error: "internal", message: msg };
+  }
+  if (!data || typeof data !== "string") {
+    return { ok: false, error: "internal", message: "RPC retornou vazio" };
+  }
+  return { ok: true, appointmentId: data };
+}
+
+/**
  * Chama `activate_appointment_after_payment`. Idempotente.
  */
 export async function activateAppointmentAfterPayment(

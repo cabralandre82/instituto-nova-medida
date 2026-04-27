@@ -21,6 +21,18 @@ const MESSAGES: Record<string, { title: string; body: string }> = {
     body:
       "O tratamento só é oferecido após avaliação médica individual, que é gratuita e sem compromisso. Começa com o quiz aqui do lado.",
   },
+  // PR-075-A · D-086: paciente tentou /agendar sem ter passado pelo
+  // quiz/lead. Reforça o caminho canônico sem soar punitivo.
+  quiz_primeiro: {
+    title: "Antes de agendar, responda nossa avaliação",
+    body:
+      "Pra que a médica chegue preparada, precisamos de um questionário curto. Toca em “Responder agora” aqui na página.",
+  },
+  lead_expirado: {
+    title: "Sua avaliação anterior expirou",
+    body:
+      "Por segurança, pedimos que responda o questionário de novo antes de agendar a consulta. Leva uns 2 minutos.",
+  },
 };
 
 export function NoticeBanner() {

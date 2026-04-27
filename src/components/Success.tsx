@@ -7,6 +7,11 @@ const SHARE_TEXT =
   "Vi isso aqui e achei a sua cara — parece que finalmente esse tipo de tratamento ficou mais viável.";
 const SHARE_URL = "https://institutonovamedida.com.br";
 
+// PR-075-A · D-086: depois do lead, oferta principal é o agendamento
+// gratuito imediato — não mais "espere o WhatsApp". O share continua
+// como ação secundária pra quem quer indicar antes de marcar.
+const SCHEDULE_HREF = "/agendar";
+
 export function Success({
   open,
   onClose,
@@ -87,16 +92,44 @@ export function Success({
             </svg>
           </motion.div>
           <h2 className="relative font-serif-display text-[1.7rem] sm:text-[2rem] mt-5 leading-[1.1]">
-            Recebemos sua avaliação{firstName ? `, ${firstName}` : ""}.
+            Pronto{firstName ? `, ${firstName}` : ""}.
           </h2>
           <p className="relative mt-3 text-cream-100/85 text-[0.98rem] leading-relaxed">
-            Em instantes, sua médica entra em contato pelo WhatsApp para iniciar
-            a análise individual. Fique de olho nas suas notificações.
+            Sua avaliação foi recebida. Agora é só escolher o melhor horário
+            pra conversar com nossa médica — sem cobrança nesta etapa.
           </p>
         </div>
 
         <div className="px-7 sm:px-9 py-8">
-          <div className="flex items-start gap-3 rounded-2xl bg-cream-100 border border-ink-100 p-4">
+          <div className="rounded-2xl border border-sage-200 bg-sage-50/60 p-5">
+            <p className="text-[0.82rem] uppercase tracking-wider text-sage-700 font-medium">
+              Próximo passo
+            </p>
+            <p className="mt-2 font-serif-display text-[1.2rem] text-ink-800 leading-tight">
+              Agende sua consulta gratuita.
+            </p>
+            <p className="mt-2 text-[0.9rem] text-ink-600 leading-relaxed">
+              30 minutos online por vídeo. Você só paga se decidir aceitar um
+              plano de tratamento depois da consulta.
+            </p>
+            <a
+              href={SCHEDULE_HREF}
+              className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-full bg-sage-700 hover:bg-sage-800 text-cream-50 text-[0.95rem] font-medium px-6 py-3 transition-colors"
+            >
+              Escolher horário
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <path
+                  d="M5 3l4 4-4 4"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </a>
+          </div>
+
+          <div className="mt-5 flex items-start gap-3 rounded-2xl bg-cream-100 border border-ink-100 p-4">
             <div className="h-9 w-9 rounded-full bg-cream-50 border border-ink-100 flex items-center justify-center shrink-0">
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                 <path
@@ -107,25 +140,10 @@ export function Success({
                 />
               </svg>
             </div>
-            <div className="text-[0.92rem] text-ink-600 leading-relaxed">
-              <span className="text-ink-800 font-medium">Próximo passo:</span>{" "}
-              você vai receber uma mensagem nossa pelo WhatsApp em até 1 hora
-              útil. Caso esteja fora do horário, no início do próximo turno.
+            <div className="text-[0.88rem] text-ink-600 leading-relaxed">
+              Se preferir, também pode aguardar — se você não agendar agora,
+              entraremos em contato pelo WhatsApp para apoiar o agendamento.
             </div>
-          </div>
-
-          <div className="mt-5 rounded-2xl border border-sage-200 bg-sage-50/60 p-5">
-            <p className="text-[0.82rem] uppercase tracking-wider text-sage-700 font-medium">
-              O que vem agora
-            </p>
-            <p className="mt-2 font-serif-display text-[1.15rem] text-ink-800 leading-tight">
-              Avaliação médica primeiro. Sem cobrança antes.
-            </p>
-            <p className="mt-2 text-[0.88rem] text-ink-500 leading-relaxed">
-              Você só paga se, depois da conversa com a médica, houver
-              indicação clínica e você decidir seguir com o tratamento.
-              O valor é apresentado junto com a prescrição.
-            </p>
           </div>
 
           <div className="mt-5 rounded-2xl border border-cream-300 bg-cream-100/40 p-5">

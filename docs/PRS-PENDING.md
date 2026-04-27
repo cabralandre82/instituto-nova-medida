@@ -2,7 +2,7 @@
 
 Lista consolidada de PRs identificados na auditoria (`docs/AUDIT-FINDINGS.md`) que **não podem ser abertos só pelo engenheiro**: dependem de dados reais, decisões do operador ou acesso externo.
 
-Atualizado em: **2026-04-20** (pós-PR-041-B / D-085 — migração Next 14.2.35 → 15.5.15 + React 18 → 19, fechando os 4 advisories DoS da linha Next 14 listados como follow-up do finding [11.1] [Image Optimizer SSRF, RSC deserialization, rewrite header smuggling, next/image cache poisoning]; codemod `next-async-request-api` + refactor manual de `supabase-server.ts` pra `async` factories sem `UnsafeUnwrappedCookies`; `<a href>` que virou `<Link>` em `NewDoctorForm` pra fechar regra ESLint 15 estrita. Build produção OK, 1440 testes verdes, 0 TSC errors, 0 vulnerabilities. Revisão anterior: PR-070-B / D-084 — UI `/admin/magic-links`).
+Atualizado em: **2026-04-27** (pós-PR-075-A / D-086 — agendamento da consulta gratuita: rota canônica `/agendar` + RPC `book_free_appointment_slot` + cookie httpOnly `inm_lead_id` + UI `SlotsGrid`/`FreeBookingForm`/`/agendar/sucesso`. Fecha o buraco operacional onde D-044 prometia self-service mas nenhuma rota pública existia: paciente terminava o quiz e ficava preso esperando contato manual. Item #1 da Onda A do plano de 9 PRs aprovado pelo operador em 2026-04-27. 1450 testes verdes. Revisão anterior: PR-041-B / D-085 — migração Next 14.2.35 → 15.5.15 + React 18 → 19).
 
 ---
 
