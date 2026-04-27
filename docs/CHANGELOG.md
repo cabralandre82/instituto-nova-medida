@@ -6,6 +6,156 @@
 
 ---
 
+## 2026-04-27 · Onda A · #8 · Plantão programado: monitor + earnings + reliability (PR-081 · D-093) · IA
+
+**Por quê:** D-088 (PR-076) deu à médica UI pra programar plantão.
+D-091 (PR-079) usou esses blocos como filtro de elegibilidade
+on-demand. Mas até aqui, plantão era apenas uma promessa: ninguém
+verificava cumprimento, ninguém pagava por ficar disponível, ninguém
+sinalizava no-show pra reliability. PR-081 fecha o ciclo: monitora
+presença minuto-a-minuto durante o bloco, paga earning proporcional
+ao cumprimento e registra reliability event quando médica abandona
+plantão programado.
+
+**Entregáveis (5 frentes):**
+
+1. **Migration** (`20260524000000_on_call_settlements.sql`):
+   - `doctor_presence_samples`: snapshot temporal (1 linha por
+     médica × bloco × bucket de 5min). PK `bigserial`, FK pra doctors
+     e doctor_availability, status check (`online|busy`),
+     `last_heartbeat_at` snapshot. Unique
+     `(doctor_id, availability_id, sample_bucket)` garante
+     idempotência: 2 runs do cron no mesmo intervalo de 5min
+     produzem INSERT no-op.
+   - `on_call_block_settlements`: liquidação de cada ocorrência
+     única do bloco (1 linha por `(availability_id, block_start_utc)`).
+     Métricas computadas (`samples_count`, `coverage_minutes`,
+     `coverage_ratio` numeric(5,4)), `outcome` check (`paid|no_show`),
+     FKs pra `doctor_earnings` e `doctor_reliability_events`,
+     snapshots de `compensation_rule_id`, `hourly_cents_snapshot`,
+     `amount_cents_snapshot`. Check coerência outcome ↔ FK.
+     Vínculo `cron_run_id` pra forensics.
+   - Estende `doctor_reliability_events.kind` check pra incluir
+     `on_call_no_show` (drop + add constraint).
+   - RLS: deny-by-default + policy `select` pra médica ver próprios
+     samples/settlements.
+
+2. **Library** (`src/lib/on-call-monitor.ts` + 39 testes em
+   `on-call-monitor.test.ts`):
+   - **Helpers puros (testáveis sem Supabase):**
+     - `bucketFor(now)`: trunca data UTC pro bucket de 5min,
+       formato `YYYY-MM-DDTHH:MM`.
+     - `computeBlockOccurrence({weekday, startTime, endTime, now})`:
+       calcula ocorrência atual em SP (UTC-3 fixo). Retorna
+       `{startUtc, endUtc, blockMinutes, isActive,
+       isFinishedRecently}` ou null. Considera weekOffset 0 E -1
+       pra capturar blocos cross-midnight UTC.
+     - `isPresenceFreshAndOnline({status, lastHeartbeatAt, now})`:
+       valida online/busy + heartbeat ≤ STALE threshold (reusa 120s
+       de doctor-presence).
+     - `computeCoverage({samplesCount, blockMinutes})`: retorna
+       `{coverageMinutes, coverageRatio}` clampado [0, 1] e
+       arredondado em 4 casas (precisão da coluna).
+     - `computeEarningCents({coverageMinutes, hourlyCents,
+       coverageRatio})`: zero se < threshold; senão proporcional.
+     - `decideOutcome(coverageRatio)`: `paid|no_show`.
+     - `formatEarningDescription(...)`: humano "Plantão 27/04
+       14:00-18:00 (3h12 cumpridos · 80%)".
+   - **Constantes**: `SAMPLE_INTERVAL_MINUTES=5`,
+     `SETTLEMENT_GRACE_MINUTES=30`, `MIN_COVERAGE_FOR_PAYMENT=0.5`,
+     `MAX_BLOCKS_PER_RUN=200`.
+   - **Orquestrador `runMonitorOnCallCycle({now?, supabase?,
+     cronRunId?})`**: 1 ciclo completo. Carrega blocos relevantes,
+     mapeia presença, itera: SAMPLE se ativo + presence fresh,
+     SETTLE se finished recently + ainda não liquidado. Retorna
+     `MonitorReport` agregado pra `cron_runs.payload`.
+   - **`settleBlock(...)`** (com IO): conta samples, carrega regra
+     de compensação, decide outcome, INSERT earning OU reliability
+     event, INSERT settlement com FK. Race-safe: unique violation
+     no settlement INSERT loga `orphan_earning_id` mas não duplica.
+
+3. **Cron route** (`/api/internal/cron/monitor-on-call`):
+   - GET com `assertCronRequest`, `startCronRun(monitor_on_call)`,
+     chama `runMonitorOnCallCycle`, `finishCronRun` com payload
+     completo (blocks_considered, samples_inserted/skipped,
+     settlements_created/skipped, paid_count, no_show_count,
+     error_count). Status `error` se algum bloco falhou.
+   - `vercel.json`: schedule `*/5 * * * *`, maxDuration 60s.
+   - `cron-runs.ts`: adiciona `monitor_on_call` ao type CronJob.
+   - `/admin/crons`: registra job com label "Plantão programado:
+     sample + settle" e cadência "a cada 5 min".
+
+4. **UI surfaces:**
+   - **`/admin/plantao`**: novo card "Liquidações de plantão
+     (últimos 7d)" com lista das últimas 30, header com
+     paid/no-show count + total pago em R$. Reusa
+     `formatDateTimeShortBR` e `formatMinutesHuman` existentes.
+   - **`/medico/plantao`**: novo card "Plantões liquidados (últimos
+     30d)" no aside, com últimos 5 settlements (lista visual
+     border-l por outcome), total pago no período, link pra
+     `/medico/ganhos`. Mostra fallback empty state pedagógico.
+
+5. **Docs:**
+   - `docs/DECISIONS.md`: D-093 completo (~150 linhas) cobrindo
+     escolha de sample temporal vs. snapshot pós-bloco, pagamento
+     proporcional vs. all-or-nothing, cron unificado vs. dois
+     separados, earning direto `available` (sem janela de risco —
+     plantão não tem payment), snapshot de regra, separação
+     conceitual `on_call_no_show` vs `no_show_doctor`, idempotência
+     multi-camadas, 6 trade-offs aceitos, 5 riscos residuais com
+     mitigações.
+
+**Trade-offs aceitos (registrados em D-093):**
+
+- **Sem earning histórico** (plantões cumpridos antes não viram
+  earning retroativo; admin pode INSERT manual se quiser).
+- **Sem notificação WA "você cumpriu plantão"** (`doctor_daily_summary`
+  PR-077 já compila métricas do dia; evita notif-spam).
+- **Sem dispensa via UI** (operador usa SQL editor; baixíssima
+  frequência prevista).
+- **`after_hours_multiplier` ignorado** (campo da regra existe mas
+  não aplicado; futuro PR sem quebrar settlements antigos).
+- **Cron unificado sample+settle** (se latência crescer, refactor
+  trivial pra 2 crons).
+- **Sem retry automático de earning insert** (race com órfão é
+  logada com `orphan_earning_id` pro operador limpar).
+
+**Riscos residuais (mitigações em D-093):**
+
+- Cron parar > 30min e perder settle → operador detecta via
+  `/admin/crons`; re-run manual reprocessa.
+- Bloco cross-midnight UTC → `computeBlockOccurrence` testa
+  weekOffset 0 E -1 (coberto por testes).
+- Médica edita `doctor_availability` no meio do bloco → samples
+  preservam `block_start_utc` original; coverage saturada em 1.0
+  se reduzir duração.
+- Bug de heartbeat força offline mid-block → cobertura cai mas
+  permanece proporcional, falsos no-shows são apuráveis.
+- 2 crons concurrent settle mesmo bloco → unique violation captura,
+  earning fica órfão (logado).
+
+**Verificação:**
+
+- TSC clean.
+- ESLint clean.
+- Vitest: **1583/1583 testes passando** (39 novos em
+  `on-call-monitor.test.ts`).
+- `next build` clean: nova rota
+  `/api/internal/cron/monitor-on-call` registrada (332 B).
+- Migration validada via review (sem `psql` no ambiente — operador
+  roda no Supabase).
+
+**Próximas dependências desbloqueadas:**
+
+- **PR-082** (observabilidade admin): consume
+  `on_call_block_settlements` pra histograma de cobertura, taxa
+  de cumprimento por dia da semana, alertas de no-show
+  reincidente.
+- **PR-046** (multi-médica): zero código novo. Cron itera todos
+  doctors com `on_call` ativo automaticamente.
+
+---
+
 ## 2026-04-27 · Onda A · #7 · UI on-demand: paciente + médica + admin (PR-080 · D-092) · IA
 
 **Por quê:** PR-079/D-091 entregou backend de on-demand sem UI —

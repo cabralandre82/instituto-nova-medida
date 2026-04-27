@@ -20,8 +20,23 @@ import { requireDoctor } from "@/lib/auth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getCurrentPresence } from "@/lib/doctor-presence";
 import { isOnCallNow, nextOnCallStartUtc } from "@/lib/admin-appointments";
+import { formatDateTimeShortBR } from "@/lib/datetime-br";
 import { PresencePanel } from "./_PresencePanel";
 import { PendingRequestsClient } from "./_PendingRequestsClient";
+
+const RECENT_SETTLEMENTS_LIMIT = 5;
+const RECENT_SETTLEMENTS_WINDOW_DAYS = 30;
+
+type SettlementRow = {
+  id: string;
+  block_start_utc: string;
+  block_end_utc: string;
+  block_minutes: number;
+  coverage_minutes: number;
+  coverage_ratio: number;
+  outcome: "paid" | "no_show";
+  amount_cents_snapshot: number | null;
+};
 
 export const metadata: Metadata = {
   title: "Plantão · Instituto Nova Medida",
@@ -78,6 +93,24 @@ export default async function PlantaoMedicoPage() {
       now,
     })
   );
+
+  // Histórico recente de plantões liquidados (PR-081 · D-093).
+  const sinceIso = new Date(
+    now.getTime() - RECENT_SETTLEMENTS_WINDOW_DAYS * 24 * 60 * 60 * 1000
+  ).toISOString();
+  const { data: settlementData } = await supabase
+    .from("on_call_block_settlements")
+    .select(
+      "id, block_start_utc, block_end_utc, block_minutes, coverage_minutes, coverage_ratio, outcome, amount_cents_snapshot"
+    )
+    .eq("doctor_id", doctorId)
+    .gte("settled_at", sinceIso)
+    .order("settled_at", { ascending: false })
+    .limit(RECENT_SETTLEMENTS_LIMIT);
+  const recentSettlements = (settlementData ?? []) as SettlementRow[];
+  const totalPaidCents = recentSettlements
+    .filter((s) => s.outcome === "paid")
+    .reduce((sum, s) => sum + (s.amount_cents_snapshot ?? 0), 0);
 
   // Próximo bloco nas próximas 4h?
   let nextBlock: { row: AvailabilityRow; startsAt: Date } | null = null;
@@ -151,10 +184,88 @@ export default async function PlantaoMedicoPage() {
             }
             blocksCount={onCallBlocks.length}
           />
+
+          <RecentSettlementsCard
+            settlements={recentSettlements}
+            totalPaidCents={totalPaidCents}
+          />
         </aside>
       </div>
     </div>
   );
+}
+
+function RecentSettlementsCard({
+  settlements,
+  totalPaidCents,
+}: {
+  settlements: SettlementRow[];
+  totalPaidCents: number;
+}) {
+  return (
+    <div className="rounded-2xl border border-ink-100 bg-white p-5">
+      <p className="text-[0.78rem] uppercase tracking-wider text-ink-500 font-medium">
+        Plantões liquidados
+      </p>
+      <p className="text-[0.72rem] text-ink-400 mt-0.5">
+        Últimos {RECENT_SETTLEMENTS_WINDOW_DAYS} dias
+      </p>
+
+      {settlements.length === 0 ? (
+        <p className="mt-3 text-sm text-ink-500 leading-relaxed">
+          Nenhum plantão liquidado ainda. Plantões cumpridos viram earnings
+          automaticamente após o fim do bloco (cron a cada 5min).
+        </p>
+      ) : (
+        <>
+          {totalPaidCents > 0 && (
+            <p className="mt-3 text-sm text-ink-700">
+              Total pago:{" "}
+              <span className="font-medium text-sage-700">
+                {formatCentsBR(totalPaidCents)}
+              </span>
+            </p>
+          )}
+          <ul className="mt-3 space-y-2.5">
+            {settlements.map((s) => {
+              const start = new Date(s.block_start_utc);
+              const end = new Date(s.block_end_utc);
+              const pct = Math.round(s.coverage_ratio * 100);
+              return (
+                <li
+                  key={s.id}
+                  className="text-xs border-l-2 pl-2.5 py-0.5"
+                  style={{
+                    borderColor:
+                      s.outcome === "paid" ? "var(--sage-500, #4f7a4a)" : "var(--terracotta-400, #d68b6e)",
+                  }}
+                >
+                  <p className="text-ink-700">
+                    {formatDateTimeShortBR(start)} → {formatDateTimeShortBR(end)}
+                  </p>
+                  <p className="text-ink-500 mt-0.5">
+                    {s.outcome === "paid"
+                      ? `Pago · ${pct}% · ${formatCentsBR(s.amount_cents_snapshot ?? 0)}`
+                      : `No-show · ${pct}% cobertura`}
+                  </p>
+                </li>
+              );
+            })}
+          </ul>
+          <Link
+            href="/medico/ganhos"
+            className="mt-3 inline-flex items-center gap-1 text-sm text-ink-500 hover:text-ink-800"
+          >
+            Ver todos os ganhos →
+          </Link>
+        </>
+      )}
+    </div>
+  );
+}
+
+function formatCentsBR(cents: number): string {
+  return `R$ ${(cents / 100).toFixed(2).replace(".", ",")}`;
 }
 
 function ScheduleCard({

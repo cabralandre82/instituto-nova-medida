@@ -58,6 +58,9 @@
     },
     "src/app/api/internal/cron/expire-on-demand-requests/route.ts": {
       "maxDuration": 15
+    },
+    "src/app/api/internal/cron/monitor-on-call/route.ts": {
+      "maxDuration": 60
     }
   },
   "crons": [
@@ -124,6 +127,10 @@
     {
       "path": "/api/internal/cron/expire-on-demand-requests",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/internal/cron/monitor-on-call",
+      "schedule": "*/5 * * * *"
     }
   ],
   "headers": [

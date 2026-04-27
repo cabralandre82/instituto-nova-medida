@@ -159,6 +159,65 @@ type OnDemandSummary = {
 
 const ONDEMAND_SUMMARY_WINDOW_HOURS = 24;
 
+// PR-081 · D-093: liquidações de plantão (últimos 7d).
+type SettlementRow = {
+  id: string;
+  doctor_id: string;
+  block_start_utc: string;
+  block_end_utc: string;
+  block_minutes: number;
+  coverage_minutes: number;
+  coverage_ratio: number;
+  outcome: "paid" | "no_show";
+  amount_cents_snapshot: number | null;
+  settled_at: string;
+};
+
+type SettlementSummary = {
+  paid: number;
+  noShow: number;
+  totalCents: number;
+  windowDays: number;
+};
+
+const SETTLEMENT_WINDOW_DAYS = 7;
+const SETTLEMENT_LIST_LIMIT = 30;
+
+async function loadRecentSettlements(now: Date): Promise<SettlementRow[]> {
+  const supabase = getSupabaseAdmin();
+  const since = new Date(
+    now.getTime() - SETTLEMENT_WINDOW_DAYS * 24 * 60 * 60 * 1000
+  ).toISOString();
+  const { data, error } = await supabase
+    .from("on_call_block_settlements")
+    .select(
+      "id, doctor_id, block_start_utc, block_end_utc, block_minutes, coverage_minutes, coverage_ratio, outcome, amount_cents_snapshot, settled_at"
+    )
+    .gte("settled_at", since)
+    .order("settled_at", { ascending: false })
+    .limit(SETTLEMENT_LIST_LIMIT);
+  if (error) {
+    log.error("loadRecentSettlements", { err: error });
+    return [];
+  }
+  return (data ?? []) as SettlementRow[];
+}
+
+function summarizeSettlements(rows: SettlementRow[]): SettlementSummary {
+  let paid = 0;
+  let noShow = 0;
+  let totalCents = 0;
+  for (const r of rows) {
+    if (r.outcome === "paid") {
+      paid += 1;
+      totalCents += r.amount_cents_snapshot ?? 0;
+    } else {
+      noShow += 1;
+    }
+  }
+  return { paid, noShow, totalCents, windowDays: SETTLEMENT_WINDOW_DAYS };
+}
+
 async function loadOnDemandPending(now: Date): Promise<OnDemandPendingRow[]> {
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
@@ -239,14 +298,17 @@ export default async function PlantaoAdminPage() {
     onCallBlocks,
     onDemandPending,
     onDemandSummary,
+    settlements,
   ] = await Promise.all([
     loadDoctors(),
     loadPresence(),
     loadAllOnCallBlocks(),
     loadOnDemandPending(now),
     loadOnDemandSummary(now),
+    loadRecentSettlements(now),
   ]);
   const onDemandCustomers = await loadCustomersForRequests(onDemandPending);
+  const settlementSummary = summarizeSettlements(settlements);
 
   const doctorById = new Map(doctors.map((d) => [d.id, d] as const));
   const presenceByDoctor = new Map(
@@ -625,6 +687,106 @@ export default async function PlantaoAdminPage() {
           </ul>
         )}
       </section>
+
+      {/* ── Card 5: Liquidações de plantão (PR-081 · D-093) ──────── */}
+      <section className="mb-8">
+        <div className="mb-3 flex items-baseline justify-between flex-wrap gap-2">
+          <div>
+            <h2 className="font-serif text-[1.3rem] text-ink-800 leading-tight">
+              Liquidações de plantão{" "}
+              {settlements.length > 0 && (
+                <span className="text-ink-400 text-sm font-sans">
+                  ({settlements.length})
+                </span>
+              )}
+            </h2>
+            <p className="text-sm text-ink-500 mt-0.5 max-w-2xl">
+              Blocos <code className="text-ink-700">on_call</code> liquidados
+              pelo cron <code className="text-ink-700">monitor_on_call</code>{" "}
+              nos últimos {SETTLEMENT_WINDOW_DAYS} dias. Plantão cumprido
+              (≥ 50%) gera earning <code className="text-ink-700">plantao_hour</code>;
+              abaixo gera reliability event <code className="text-ink-700">on_call_no_show</code>.
+            </p>
+          </div>
+          <div className="text-xs text-ink-500">
+            Últimos {settlementSummary.windowDays}d:{" "}
+            <span className="text-sage-700 font-medium">
+              {settlementSummary.paid} pago{settlementSummary.paid === 1 ? "" : "s"}
+            </span>
+            {" · "}
+            <span className="text-terracotta-700 font-medium">
+              {settlementSummary.noShow} no-show
+              {settlementSummary.noShow === 1 ? "" : "s"}
+            </span>
+            {settlementSummary.totalCents > 0 && (
+              <>
+                {" · "}
+                <span className="text-ink-700 font-medium">
+                  {formatCentsBR(settlementSummary.totalCents)}
+                </span>{" "}
+                total
+              </>
+            )}
+          </div>
+        </div>
+        {settlements.length === 0 ? (
+          <div className="rounded-xl border border-ink-100 bg-white px-5 py-6 text-sm text-ink-500">
+            Nenhum bloco liquidado nos últimos {SETTLEMENT_WINDOW_DAYS} dias.
+          </div>
+        ) : (
+          <ul className="divide-y divide-ink-100 rounded-xl border border-ink-100 bg-white overflow-hidden">
+            {settlements.map((s) => {
+              const d = doctorById.get(s.doctor_id);
+              const startUtc = new Date(s.block_start_utc);
+              const endUtc = new Date(s.block_end_utc);
+              const pct = Math.round(s.coverage_ratio * 100);
+              const cov = formatMinutesHuman(s.coverage_minutes);
+              return (
+                <li key={s.id} className="px-5 py-4">
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-serif text-[1.05rem] text-ink-800">
+                        {d?.display_name || d?.full_name || s.doctor_id}
+                      </p>
+                      <p className="text-sm text-ink-600 mt-0.5">
+                        {formatDateTimeShortBR(startUtc)} →{" "}
+                        {formatDateTimeShortBR(endUtc)}
+                      </p>
+                      <p className="text-xs text-ink-500 mt-1">
+                        Cobertura: {cov} de {formatMinutesHuman(s.block_minutes)}{" "}
+                        ({pct}%)
+                      </p>
+                    </div>
+                    <div className="text-right text-sm">
+                      {s.outcome === "paid" ? (
+                        <>
+                          <span className="inline-block rounded-full text-xs px-2.5 py-1 font-medium bg-sage-700 text-white">
+                            Pago
+                          </span>
+                          {s.amount_cents_snapshot != null && (
+                            <p className="mt-1 text-sm text-sage-700 font-medium">
+                              {formatCentsBR(s.amount_cents_snapshot)}
+                            </p>
+                          )}
+                        </>
+                      ) : (
+                        <span className="inline-block rounded-full text-xs px-2.5 py-1 font-medium bg-terracotta-100 text-terracotta-800 border border-terracotta-200">
+                          No-show
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
     </div>
   );
+}
+
+function formatCentsBR(cents: number): string {
+  const reais = cents / 100;
+  return `R$ ${reais.toFixed(2).replace(".", ",")}`;
 }

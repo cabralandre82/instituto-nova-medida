@@ -5,6 +5,189 @@
 
 ---
 
+## D-093 · Plantão programado: monitoramento, reliability e earnings (PR-081) · 2026-04-27
+
+**Contexto.** D-088 (PR-076) deu à médica a UI pra programar blocos
+`on_call` recorrentes. D-091 (PR-079) usa esses blocos como filtro
+de elegibilidade pra fan-out on-demand (`isOnCallNow`). Mas até aqui,
+o bloco era **apenas uma promessa**: a médica diz "vou ficar de
+plantão segunda 14h-18h" e a plataforma confiava sem verificar.
+
+Faltava:
+
+1. **Verificação de cumprimento.** Se a médica não ficou online
+   durante o bloco, a plataforma não sabia. Sem sinal, no-show
+   reincidente passa despercebido — má sinalização operacional e
+   fricção pro paciente que entra em fila vazia.
+
+2. **Pagamento por plantão.** `doctor_compensation_rules` já tinha
+   `plantao_hour_cents` (default R$ 30/h) desde D-024, mas nenhum
+   processo gerava `doctor_earnings` de tipo `plantao_hour`. A médica
+   só era paga por consultas atendidas — sem incentivo financeiro
+   pra ficar plantonista mesmo em horário "morto".
+
+3. **Reliability acionável.** D-036 (PR-015) introduziu
+   `doctor_reliability_events` com 3 kinds (no_show_doctor,
+   expired_no_one_joined, manual). O kind on_call_no_show não existia,
+   então auto-pause (3+ eventos em 30d) não enxergava plantão
+   abandonado.
+
+**Decisão.** Construímos infraestrutura pra **monitorar, sample,
+liquidar e remunerar plantão programado** num único cron unificado
+(`monitor_on_call`, a cada 5min):
+
+- **Sample temporal** em `doctor_presence_samples`: 1 INSERT por
+  bloco × médica × bucket de 5min, capturando `doctor_presence`
+  online/busy + heartbeat fresh. Idempotente via unique
+  `(doctor_id, availability_id, sample_bucket)`.
+
+- **Settlement** em `on_call_block_settlements`: pra cada bloco
+  recém-encerrado (≤ 30min de grace), conta samples, computa
+  `coverage_ratio = samples * 5min / block_minutes`, decide:
+    - `coverage ≥ 0.5` → `outcome='paid'`, INSERT `doctor_earnings`
+      (type=`plantao_hour`, valor proporcional aos minutos cobertos).
+    - `coverage < 0.5` → `outcome='no_show'`, INSERT
+      `doctor_reliability_events` (kind=`on_call_no_show`).
+  Idempotente via unique `(availability_id, block_start_utc)`.
+
+- **Visibilidade**:
+    - `/admin/plantao` ganha card "Liquidações de plantão (últimos 7d)"
+      com lista por médica + somatório pago.
+    - `/medico/plantao` ganha card "Plantões liquidados (últimos 30d)"
+      no aside, com somatório do que a médica recebeu de plantão e
+      link pra `/medico/ganhos` ver detalhe.
+
+**Por que sample temporal granular (vs. snapshot único pós-bloco).**
+Snapshot pós-bloco usaria `doctor_presence.online_since` como proxy:
+"se online_since ≤ block_start E status≠offline E
+last_heartbeat > block_end, pagou bloco inteiro". É frágil:
+
+- Médica que sai e volta no meio do bloco: `online_since` reset, e
+  ela perde o crédito do trecho inicial.
+- Médica que ficou online o bloco todo mas a UI fechou aba 30s antes
+  do fim: cron stale-presence force offline, `online_since` vai pra
+  null, perdemos sinal.
+- Não permite pagamento PROPORCIONAL ao tempo cumprido.
+
+Sample granular (1 ping/5min) custa ~50 rows/bloco/médica (trivial)
+e dá métrica real. Permite:
+
+- Pagamento proporcional ("80% do bloco → 80% do valor").
+- Auditoria forense ("ela saiu às 16:35 do bloco 14-18").
+- Threshold ajustável por código sem migration.
+
+**Por que pagamento proporcional acima de 50% (vs. all-or-nothing).**
+
+- All-or-nothing pune médica que cumpre 80% (saiu meia hora antes)
+  com 0 — desproporcional.
+- All-or-nothing premia médica que cumpre 51% com 100% — perverso.
+- Proporcional + threshold combina o melhor: abaixo de 50% trata
+  como no-show (sinal de reliability claro), acima paga proporcional
+  ao tempo real.
+
+**Por que cron unificado (sample + settle no mesmo) vs. 2 crons
+separados.**
+
+- Sample roda a cada 5min (precisa ser frequente).
+- Settle podia rodar mais raro (a cada 15min), mas:
+    - Coordenar 2 crons aumenta complexidade operacional (2 jobs no
+      dashboard, 2 cron_runs separados).
+    - Mesmo blocos relevantes (ativo OU recém-encerrado) — 1 query.
+    - Cobertura pra blocos cross-midnight UTC requer consultar
+      ocorrência da semana passada também — mesma lib resolve.
+- Trade-off aceito: cada execução faz um pouco mais de trabalho,
+  mas o orquestrador continua < 60s na prática.
+
+**Por que earning entra direto como `available` (sem janela de
+risco).** Earnings de consulta passam por `pending → available`
+porque dependem de `payment.paid_at` + janela de chargeback.
+Plantão NÃO tem payment associado: o pagamento vem do contrato PJ
+da clínica com a médica, sem risco de estorno. Marcar `available`
+direto + `available_at = now()` permite que entre no próximo
+payout sem precisar do cron `recalc_earnings_availability`.
+
+**Snapshot da regra (`amount_cents_snapshot`, `hourly_cents_snapshot`,
+`compensation_rule_id`).** Settlement registra o valor pago naquele
+momento. Mesmo que a regra mude depois, ou que `doctor_earnings`
+seja cancelado (raro pra plantão, mas possível por adjustment),
+o histórico do settlement permanece auditável.
+
+**Por que `on_call_no_show` é separado de `no_show_doctor`.**
+
+- `no_show_doctor` = médica não apareceu numa consulta agendada
+  específica (paciente esperando). Vinculado a `appointment_id`.
+- `on_call_no_show` = médica não cumpriu plantão programado em
+  agregado (ninguém esperando especificamente, mas o "inventário
+  prometido" sumiu). Sem `appointment_id`.
+- Ambos contam pra threshold de auto-pause D-036, mas distinguir
+  permite diagnóstico melhor: "Dra X teve 3 eventos: 1 no-show de
+  agendada + 2 plantões abandonados" diz mais que só "3 eventos".
+
+**Idempotência multi-camadas.**
+
+| Tabela | Unique | Garantia |
+|--------|--------|----------|
+| `doctor_presence_samples` | `(doctor_id, availability_id, sample_bucket)` | 2 runs do cron no mesmo intervalo de 5min não duplicam sample |
+| `on_call_block_settlements` | `(availability_id, block_start_utc)` | Bloco só liquidado uma vez. Reprocessamento exige DELETE explícito. |
+| `doctor_earnings` | (sem unique novo) | Settlement é o gatekeeper; race-condition deixa earning órfão (loga warning) |
+| `doctor_reliability_events` | (sem unique novo pra `on_call_no_show`) | Idem — settlement gatekeeper |
+
+Race-window estimada: 2 runs do cron começarem no mesmo segundo é
+improvável (Vercel cron não dispara concorrente pro mesmo job),
+mas mantemos defesa em profundidade.
+
+**Trade-offs aceitos.**
+
+1. **Sem earning histórico.** Plantões cumpridos antes desta PR não
+   geram earning retroativo. Operador pode fazê-lo manualmente via
+   `INSERT INTO doctor_earnings` se quiser.
+2. **Sem notificação WA pra médica de "você cumpriu plantão".**
+   `doctor_daily_summary` (PR-077) já compila as métricas do dia,
+   incluindo earnings recentes. Não vamos disparar WA por settlement.
+3. **Sem dispensa via UI.** Operador não tem botão "perdoar este
+   no-show". Se necessário, dispensa via SQL editor:
+   `UPDATE doctor_reliability_events SET dismissed_at=now() WHERE id=...`.
+   Frequência prevista: muito baixa.
+4. **Sem ranking/multiplier de hora cheia.** `after_hours_multiplier`
+   da regra existe mas não é aplicado aqui. Adicionar futuramente
+   sem quebrar settlements antigos.
+5. **Cron de 5min reusado pra sample E settle.** Se latência crescer
+   além de 60s consistentemente, separar em 2 crons (sample @ 5min,
+   settle @ 15min) é refactor trivial — settlement só lê samples.
+6. **Sem retry automático de earning insert.** Se o INSERT em
+   `doctor_earnings` falha (constraint, etc.), o settlement é
+   abortado e o bloco pode ser re-tentado no próximo run (ainda não
+   está em `on_call_block_settlements`). Earning órfão acontece só
+   se settlement INSERT falhar APÓS earning INSERT (race) — logado
+   com `orphan_earning_id` pro operador limpar manualmente.
+
+**Riscos residuais e mitigações.**
+
+| Risco | Probabilidade | Mitigação |
+|-------|--------------|-----------|
+| Cron parar por > 30min e perder janela de settle | Baixa | Vercel cron tem high availability; operador detecta via `/admin/crons`. Re-run manual via `curl` reprocessa. |
+| Bloco com horário cross-midnight em SP cair em 2 dias UTC distintos | Média | `computeBlockOccurrence` testa weekOffset 0 E -1, capturando ocorrência da semana passada. Coberto por testes. |
+| Médica edita `doctor_availability.start_time` no meio do bloco | Baixa | Sample já gravado preserva `block_start_utc` original. Settlement usa o `weekday + start_time + end_time` da hora da liquidação. Edge case: se ela reduz duração depois, próximo settle calcula com novo `block_minutes` mas samples antigos contam → coverage > 1 (saturada em 1.0). Aceito. |
+| Cron stale-presence força offline meio bloco mesmo com médica ativa (bug de heartbeat) | Baixa | Próximo sample (5min depois) detecta presence offline → não conta sample. Coverage cai mas continua proporcional. Falsos no-shows são apuráveis no `/admin/plantao`. |
+| Two crons concurrent settle the same block | Muito baixa | Unique violation captura, log warning + earning fica órfão. Ledger de earnings tem ferramenta admin pra cancelar. |
+
+**Observabilidade.** Settlement é cobertor pelo dashboard genérico
+`/admin/crons` (success rate, p50/p95, last error). `/admin/plantao`
+mostra liquidações dos últimos 7d. PR-082 (próximo) vai expandir
+métricas operacionais: p50 cobertura, % no-show por médica, etc.
+
+**Impacto em PRs futuros.**
+
+- **PR-082** (observabilidade admin): vai consumir
+  `on_call_block_settlements` pra histograma de cobertura, taxa
+  de cumprimento por dia da semana, etc.
+- **PR-046** (multi-médica): zero código novo. Cron itera sobre
+  todos doctors com `on_call` ativo automaticamente.
+- **PR futuro: dispensa via UI**: alvo claro
+  (`UPDATE on_call_block_settlements SET dismissed_at=...`).
+
+---
+
 ## D-092 · UI de atendimento on-demand (paciente + médica) (PR-080) · 2026-04-27
 
 **Contexto.** PR-079/D-091 entregou todo o backend de on-demand
