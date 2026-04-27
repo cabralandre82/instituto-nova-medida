@@ -5,6 +5,118 @@
 
 ---
 
+## D-090 · Painéis admin de Consultas e Plantão (PR-078) · 2026-04-27
+
+**Contexto.** Antes do PR-078 o admin tinha 14 áreas no painel
+(visão geral, pacientes, fulfillments, médicas, confiabilidade,
+repasses, estornos, créditos, LGPD, notificações, financeiro,
+saúde, crons, erros, magic-links) — mas **nenhuma** olhava direto
+pro objeto-núcleo do produto: a consulta. Pra investigar uma
+reclamação ("João disse que a Dra. X não apareceu hoje") o
+operador solo precisava abrir a página do paciente, scrollar
+até a aba de consultas, achar o item, conferir status. E pra
+saber "tem alguém de plantão agora?" precisava abrir SQL no
+Studio e dar `select * from doctor_presence where status='online'`.
+Inaceitável pra produto solo de operação leve.
+
+PR-078 fecha esse gap criando duas páginas dedicadas:
+
+- `/admin/appointments` — listagem operacional unificada de todas
+  as consultas, com modo agrupado (default, scan rápido) e modo
+  filtrado (investigação ad-hoc por nome/status/médica/data).
+- `/admin/plantao` — visão real-time de presença das médicas +
+  plantões nas próximas horas + agenda recorrente da semana +
+  placeholder pra fila on-demand (PR-079).
+
+**Decisão.** Espelhar o padrão arquitetural já validado em
+`/admin/fulfillments` (PR-058 · D-069):
+
+1. **Server Component puro**, zero client component.
+2. **Modo dual** sem-filtro × com-filtro. Sem-filtro mostra
+   buckets temporais (live, next_24h, next_7d, recent_finished).
+   Com-filtro vira listagem única ordenada cronologicamente.
+3. **Lib pura `src/lib/admin-appointments.ts`** com labels,
+   tones e função `bucketForAppointment(...)` determinística.
+   Testes unitários reaproveitam padrão de
+   `cron-correlation.test.ts` (anchorAt + windowMinutes).
+4. **Sem detalhe-página dedicado.** Click numa linha leva
+   pra `/admin/pacientes/[id]` (que já tem a aba de consultas).
+   Reduz superfície e mantém PII centralizada.
+5. **Search por nome do paciente** usa subquery em `customers`
+   (mesmo padrão de `patient-search.ts` e adopted em
+   `/admin/fulfillments/payouts/refunds`). Evita PostgREST
+   `.or()` em coluna relacionada.
+6. **Plantão é só leitura.** Admin não força médica online ou
+   offline daqui — respeita autonomia + evita ambiguidade legal
+   ("estava em plantão" forçado pelo admin é diferente de
+   "voluntariamente em plantão").
+
+**Alternativas consideradas:**
+
+A. **Reutilizar `/admin/pacientes` adicionando filtros por status
+   de consulta.** Rejeitada: pacientes e consultas são objetos
+   diferentes; sobrecarregar uma página com filtros do outro
+   torna ambos confusos. Operador raramente quer "lista de
+   pacientes com consulta hoje" — quer "lista de consultas
+   hoje". A pergunta operacional muda.
+B. **Página única `/admin/operacao` com tabs Consultas / Plantão /
+   Fila.** Rejeitada: tabs em server component exigem URL canônica
+   por tab (?tab=consultas) ou client component pra alternar.
+   Aumenta complexidade sem ganho pro operador solo, que abre
+   uma URL por vez. Páginas separadas mantêm bookmarks e
+   navegação por nav.
+C. **Detalhe `/admin/appointments/[id]` com timeline (notifs,
+   transitions, finalize).** Rejeitada pra MVP: a tela do
+   paciente já consolida isso, e duplicar significa drift de
+   PII. Pode ser PR-078-B no futuro se hot path justificar.
+D. **Forçar offline de médica via UI admin.** Rejeitada (item 6
+   da decisão acima).
+E. **Mostrar `appointment_notifications` e `doctor_notifications`
+   inline na linha.** Rejeitada por densidade visual — admin
+   raramente precisa ver o estado das notifs naquela passagem;
+   `/admin/notifications` cobre o use case.
+
+**Trade-offs aceitos:**
+
+1. **Sem detalhe-página dedicado.** Se um caso exigir muita
+   atenção, admin abre /admin/pacientes/[id]; se isso virar
+   pain point recorrente, PR-078-B cria detalhe.
+2. **Cache da lista de médicas em cada GET.** /admin/appointments
+   busca todas as médicas em cada page load (pra popular o
+   filter). Em escala 1-2 médicas (MVP) é gratuito; quando
+   PR-046 chegar (multi-médica), trocar pra ISR ou cache
+   in-memory.
+3. **Janela default de [-7d, +14d] em /admin/appointments
+   sem filtro.** Cobre os 4 buckets com folga; admin ainda vê
+   "older" via filtro. Trade-off entre carga (até 500 linhas)
+   e relevância — afinal, "encerrada há 30 dias" não é
+   operacional.
+4. **`isOnCallNow` e `nextOnCallStartUtc` assumem SP fixo
+   UTC-3.** Se Brasil voltar a ter DST ou produto for pra
+   outro estado, refatorar. Decreto 2019 aboliu DST sem
+   previsão.
+5. **Plantão sem auto-refresh.** Admin precisa apertar F5 pra
+   atualizar presence. Trade-off vs implementar polling
+   client-side; aceito porque admin geralmente abre o painel
+   pra checar e fechar — não fica olhando minuto a minuto.
+   PR-082 vai trazer dashboard live se necessário.
+
+**Implicações pra outros PRs:**
+
+- **PR-079** (on-demand backend) — vai popular o card 4
+  ("Fila on-demand") em `/admin/plantao`. Hoje é placeholder.
+- **PR-080** (on-demand UI paciente + médica) — pode reusar
+  `nextOnCallStartUtc` da lib pura pra computar
+  "próxima janela de plantão" no `/medico/plantao`.
+- **PR-081** (plantão programado, monitor de no-show) —
+  vai usar `isOnCallNow` + `doctor_presence` pra detectar
+  "deveria estar online E não está".
+- **PR-082** (observabilidade admin) — fila viva, TTM, taxa
+  de match vão como cards dentro de `/admin/plantao` ou
+  como seção nova `/admin/plantao/queue`.
+
+---
+
 ## D-089 · Notificações WhatsApp pra médica (PR-077 · paid + T-15min + resumo amanhã + plantão T-15min) · 2026-04-27
 
 **Contexto.** Toda a infra de notificações WhatsApp (D-031, migration

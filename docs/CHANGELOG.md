@@ -6,6 +6,125 @@
 
 ---
 
+## 2026-04-27 · Onda A · #5 · Painéis admin de Consultas e Plantão (PR-078 · D-090) · IA
+
+**Por quê:** O admin tinha 14 áreas no painel mas nenhuma olhava
+direto pro objeto-núcleo do produto: a consulta. Pra investigar
+"Dra. X não apareceu hoje" o operador precisava abrir a página
+do paciente, scrollar até a aba de consultas, achar o item.
+Pra saber "tem alguém de plantão agora?" precisava abrir SQL
+no Studio. PR-078 fecha o gap criando duas páginas dedicadas
+seguindo o padrão validado em `/admin/fulfillments` (PR-058 ·
+D-069).
+
+**Entregáveis:**
+
+- **`src/lib/admin-appointments.ts`**: lib pura com
+  `ALL_APPOINTMENT_STATUSES` (10 valores espelhando o enum SQL
+  + `pending_payment` legado), `adminLabelForAppointmentStatus`
+  (forense, diferencia origens de cancelamento e tipos de
+  no-show — operador precisa saber pra agir),
+  `adminToneForAppointmentStatus` (5 tones: active/ok/warn/
+  muted/neutral, exhaustivos via `never`),
+  `bucketForAppointment` (4 buckets temporais: live, next_24h,
+  next_7d, recent_finished, + older default),
+  `nextOnCallStartUtc` (próxima ocorrência futura de bloco
+  recorrente em SP, com `withinHours` clamp),
+  `isOnCallNow` (cobertura [start, end) inclusivo-exclusivo).
+  Funções determinísticas, dependentes só de `now: Date` —
+  testáveis sem mock de tempo.
+- **`src/lib/admin-appointments.test.ts`**: 30 testes cobrindo
+  labels, tones, exhaustividade, todos os 4 buckets em casos
+  felizes + edge cases (terminal no futuro, in_progress
+  legado), `nextOnCallStartUtc` com offset de semana
+  (encontra próxima ocorrência mesmo quando weekday=hoje
+  e horário já passou), `isOnCallNow` com fronteiras
+  inclusivas/exclusivas. Bug de offset de semana caçado
+  via teste falhando (algoritmo inicial usava `(weekday -
+  nowWeekday + offset + 7) % 7` que não garantia weekday
+  alvo; refatorado pra `daysUntil = ((weekday - nowWeekday
+  + 7) % 7) + weekOffset * 7` com weekOffset ∈ {0, 1}).
+- **`src/app/admin/(shell)/appointments/page.tsx`**: página
+  server component com modo dual sem-filtro × com-filtro.
+  Sem-filtro mostra 4 buckets em ordem (live cronológico
+  ASC pra "próximo a começar primeiro", next_24h ASC,
+  next_7d natural, recent_finished DESC). Com-filtro
+  ordena scheduled_at DESC, limit 200. Filtros: search por
+  nome do paciente (subquery em `customers` por
+  `escapeIlike`, mesmo padrão de fulfillments/payouts/
+  refunds), status (10 valores), kind (scheduled / on_demand),
+  médica (select populado de `doctors`), date range
+  (BRT→UTC via `parseDateRange`). Janela default
+  [-7d, +14d] cobre os 4 buckets com folga (limit 500). Click
+  numa linha leva pra `/admin/pacientes/[id]` (sem detalhe
+  dedicado — reusa tela existente). PII na listagem mínima:
+  nome do paciente + nome da médica (display||full).
+- **`src/app/admin/(shell)/plantao/page.tsx`**: página
+  server component com 4 cards:
+  - **Online agora**: presença `online`|`busy` E heartbeat
+    fresco (≤ STALE_PRESENCE_THRESHOLD_SECONDS, importado
+    de doctor-presence.ts), com tempo desde `online_since`
+    formatado humano (Nh, NhMM, N min).
+  - **Plantões nas próximas 4 horas**: blocos `on_call`
+    ativos cuja `nextOnCallStartUtc(.., withinHours: 4)`
+    devolve não-null, OU `isOnCallNow` é true (live).
+    Sinaliza médica online/offline em cada bloco.
+  - **Agenda recorrente da semana**: read-only, agrupado
+    por weekday 0..6, mostra start/end + nome da médica.
+    Pointer pra `/medico/horarios` (D-088) onde a médica
+    edita.
+  - **Fila on-demand**: placeholder explícito (PR-079
+    pendente) com texto operacional ("a infra de requests,
+    RPC `accept_on_demand_request` + cron de expiração
+    ainda não foi implementada"). Evita mensagem fantasma.
+  Sem auto-refresh — admin aperta F5 (trade-off aceito).
+  Sem ações destrutivas — admin não força online/offline da
+  médica daqui (D-090: respeita autonomia + ambiguidade
+  legal).
+- **`src/app/admin/(shell)/_components/AdminNav.tsx`**: itens
+  novos "Consultas" (`/admin/appointments`) e "Plantão"
+  (`/admin/plantao`) inseridos logo após "Visão geral",
+  refletindo prioridade operacional.
+
+**Trade-offs aceitos (D-090):**
+
+1. **Sem detalhe-página dedicado.** Click leva pra
+   `/admin/pacientes/[id]`. PR-078-B cria detalhe se hot path
+   exigir.
+2. **Cache da lista de médicas em cada GET de
+   /admin/appointments.** Em MVP solo (1-2 médicas) é
+   gratuito; PR-046 traz cache.
+3. **Janela default [-7d, +14d] sem filtro.** Cobre os 4
+   buckets; admin ainda vê older via filtro.
+4. **`isOnCallNow` e `nextOnCallStartUtc` assumem SP fixo
+   UTC-3.** DST aboliddo em 2019; refatorar se mudar.
+5. **Plantão sem auto-refresh.** Admin geralmente checa e
+   fecha; PR-082 traz dashboard live se necessário.
+
+**Riscos residuais:**
+
+- Se `customers.name` tiver acentos ou caracteres unicode raros,
+  o `ilike` pode não bater. Mesmo limite das outras listagens
+  (aceito). PR futuro pode normalizar accents.
+- `loadDefaultWindow` usa `limit(500)`; se um período tiver
+  picos > 500 consultas em 21 dias (improvável em MVP), bucket
+  agrupamento pode ficar incompleto. Banner é não-trivial sem
+  COUNT() adicional; trade-off aceito.
+- Admin não vê SE a notificação WA chegou na médica — só vê o
+  status da consulta. PR-082 pode integrar
+  `doctor_notifications` no detalhe.
+
+**Testes:** 1523 unit/component (30 novos em
+`admin-appointments.test.ts`), 79 arquivos. Lint clean. Tsc
+clean. `next build` OK (`/admin/appointments` 207 B,
+`/admin/plantao` 317 B).
+
+**Próximo:** PR-079 — backend on-demand
+(`on_demand_requests` + RPC `accept_on_demand_request` +
+fan-out + cron expire).
+
+---
+
 ## 2026-04-27 · Onda A · #4 · Notificações WhatsApp pra médica (PR-077-A · D-089) · IA
 
 **Por quê:** A médica nunca recebia nada — descobria sobre
