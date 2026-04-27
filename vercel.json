@@ -55,6 +55,9 @@
     },
     "src/app/api/internal/cron/doctor-on-call-reminder/route.ts": {
       "maxDuration": 30
+    },
+    "src/app/api/internal/cron/expire-on-demand-requests/route.ts": {
+      "maxDuration": 15
     }
   },
   "crons": [
@@ -116,6 +119,10 @@
     },
     {
       "path": "/api/internal/cron/doctor-on-call-reminder",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/internal/cron/expire-on-demand-requests",
       "schedule": "* * * * *"
     }
   ],

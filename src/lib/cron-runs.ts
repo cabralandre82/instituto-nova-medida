@@ -62,7 +62,8 @@ export type CronJob =
   | "expire_appointment_credits"
   | "stale_presence"
   | "doctor_daily_summary"
-  | "doctor_on_call_reminder";
+  | "doctor_on_call_reminder"
+  | "expire_on_demand_requests";
 
 export async function startCronRun(
   supabase: SupabaseClient,

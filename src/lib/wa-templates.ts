@@ -418,6 +418,35 @@ export async function sendMedicaPlantaoIniciando(_opts: {
   };
 }
 
+// ─── 16. medica_on_demand_request (PR-079 · D-091) ───────────────────────
+// Fan-out: avisa a médica online de que um paciente solicitou consulta
+// AGORA. A primeira que clicar no link (e fizer POST /api/medico/
+// on-demand/[id]/accept) ganha. As demais recebem 409 quando tentam.
+//
+// chiefComplaintShort: ≤ 120 chars, primeiro pedaço do que o paciente
+// digitou. Caller é responsável por sanitizar antes (text-sanitize.ts).
+//
+// acceptUrl: link absoluto pra página da médica que faz POST de aceite,
+// incluindo token signed pra impedir terceiros de aceitarem em nome dela.
+
+export async function sendMedicaOnDemandRequest(_opts: {
+  to: string;
+  doctorNome: string;
+  pacienteFirstName: string;
+  chiefComplaintShort: string;
+  acceptUrl: string;
+  ttlMinutes: number;
+}): Promise<WhatsAppSendResult> {
+  // TODO(PR-079-B): submeter template `medica_on_demand_request` na Meta.
+  return {
+    ok: false,
+    code: null,
+    message: "templates_not_approved",
+    details:
+      "Template medica_on_demand_request aguardando aprovação Meta (PR-079-B).",
+  };
+}
+
 // ─── Kind ↔ Template dispatcher ──────────────────────────────────────────
 // Usado pelo worker em notifications.ts pra despachar uma linha
 // de appointment_notifications pro helper correto.

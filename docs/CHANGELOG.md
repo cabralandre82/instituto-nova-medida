@@ -6,6 +6,146 @@
 
 ---
 
+## 2026-04-27 · Onda A · #6 · Backend on-demand: requests + fan-out + accept (PR-079 · D-091) · IA
+
+**Por quê:** Pós-D-088 (médica edita plantão) e D-089 (notifs WA pra
+médica) o produto tinha todos os trilhos exceto o mais importante:
+**a fila de "atendimento agora"**. O caso de uso confirmado pelo
+operador como mais frequente NÃO TINHA backend. Paciente que termina
+o quiz e quer ser atendido AGORA só conseguia agendar pro futuro
+(PR-075-A). PR-079 fecha esse gap entregando o backend completo
+(tabelas + RPCs + lib + cron + helper WA em dry-run). UI fica pra
+PR-080.
+
+**Entregáveis:**
+
+- **`supabase/migrations/20260523000000_on_demand_requests.sql`**:
+  - Tabela `on_demand_requests` (id, customer_id, status,
+    expires_at, chief_complaint 4-500 chars, accepted_*,
+    cancelled_*) com RLS deny-by-default.
+  - 2 CHECK constraints de coerência: campos de aceite só existem
+    se status=accepted; campos de cancelamento só se cancelled.
+  - 2 triggers: `tg_odr_touch_updated_at` (auto-update) e
+    `tg_odr_terminal_immutable` (estados terminais não mudam).
+  - Unique parcial `ux_odr_one_pending_per_customer`
+    `WHERE status='pending'` impede paciente criar 2 requests
+    simultâneos.
+  - Tabela `on_demand_request_dispatches` (request_id, doctor_id,
+    channel, dispatch_status, wa_message_id, doctor_was_online,
+    doctor_was_on_call) com unique `(request_id, doctor_id)`
+    pra idempotência de fan-out.
+  - 4 RPCs:
+    - `create_on_demand_request(customer, complaint, ttl)` →
+      idempotente; se já tem pending, devolve o id existente
+      (`is_new=false`). TTL clampado entre 60s e 1800s.
+    - `accept_on_demand_request(request_id, doctor_id, duration,
+      consent)` → atomic em 1 transação: lock pending, valida
+      expires_at, INSERT em appointments (kind=on_demand,
+      status=scheduled, sem payment_id), UPDATE marcando
+      accepted_*. Race-safe.
+    - `cancel_on_demand_request(request_id, actor_kind, reason)`
+      → idempotente; segunda chamada retorna already_cancelled.
+    - `expire_stale_on_demand_requests(limit)` → sweep do cron
+      com `FOR UPDATE SKIP LOCKED` pra concorrência segura;
+      limit clampado em [1, 5000].
+
+- **`src/lib/on-demand.ts`** (novo, server-only):
+  - Tipos públicos: `OnDemandStatus`, `OnDemandRequestRow`,
+    `CreateRequestResult`, `AcceptResult`, `CancelResult`,
+    `FanOutReport`.
+  - Constantes: `ON_DEMAND_DEFAULT_TTL_SECONDS=300`,
+    `MAX_FANOUT_DOCTORS=10`.
+  - Helpers puros (testáveis): `computeSecondsUntilExpiry` (countdown
+    pra UI), `isPresenceEligible` (coerência com PR-075-B),
+    `truncateChiefComplaintForWa` (≤120 chars com ellipsis).
+  - `createOnDemandRequest`: sanitiza chief_complaint via
+    `text-sanitize.ts`, chama RPC, devolve `{ requestId, isNew }`.
+  - `getRequestById` / `listPendingForCustomer`: leitura simples.
+  - `fanOutToOnlineDoctors({requestId, baseUrl, requireOnCall?})`:
+    busca doctor_presence fresh + status=online (busy
+    = "em consulta", não chama), opcionalmente filtra por bloco
+    on_call ativo agora (`isOnCallNow` reusado de
+    `admin-appointments.ts`), MAX 10 médicas, manda WA em paralelo
+    via `Promise.allSettled`, registra dispatches via upsert
+    idempotente (`onConflict: request_id,doctor_id`).
+  - `acceptOnDemandRequest` / `cancelOnDemandRequest` / `expireStaleRequests`:
+    wrappers tipados das RPCs.
+
+- **`src/lib/wa-templates.ts`** (modificado): novo helper #16
+  `sendMedicaOnDemandRequest({to, doctorNome, pacienteFirstName,
+  chiefComplaintShort, acceptUrl, ttlMinutes})` em dry-run
+  (`templates_not_approved`), igual aos 4 do PR-077-A. Backlog
+  flui automaticamente quando Meta aprovar template
+  `medica_on_demand_request` (PR-079-B).
+
+- **`src/app/api/internal/cron/expire-on-demand-requests/route.ts`**:
+  cron rodando a cada 1 min, registrado em `cron_runs` (job
+  `expire_on_demand_requests`). Marca expired qualquer pending
+  com `expires_at <= now()`. Idempotente.
+
+- **`vercel.json`**: registrado `expire-on-demand-requests`
+  (`* * * * *`, maxDuration 15s).
+
+- **`src/lib/cron-runs.ts`**: novo `CronJob` `expire_on_demand_requests`.
+
+- **`src/app/admin/(shell)/crons/page.tsx`**: registrado em
+  `EXPECTED_JOBS`, `JOB_LABELS`, `JOB_CADENCE` pro dashboard
+  refletir o novo cron.
+
+- **`src/lib/on-demand.test.ts`**: 21 testes cobrindo helpers
+  puros — limites de TTL, edge cases de presença stale,
+  truncamento Unicode-safe.
+
+- Documentação:
+  - `docs/DECISIONS.md` ganha **D-091** (rationale completo —
+    por que tabela separada, por que dispatches separadas, por
+    que sync, por que TTL).
+  - `docs/CHANGELOG.md` (este).
+  - `docs/PRS-PENDING.md` marca PR-079 como completed.
+
+**Trade-offs aceitos:**
+
+- Sem UI ainda — paciente não consegue criar request sem rota
+  pública `/agendar/agora`, e médica não consegue aceitar sem
+  página `/medico/plantao/[requestId]`. PR-080 entrega tudo
+  isso.
+- Templates Meta ainda em dry-run. `medica_on_demand_request`
+  retorna `templates_not_approved` no helper. Quando aprovado
+  (PR-079-B), troca o stub por `sendTemplate` real.
+- Fan-out síncrono não tem retry no WA. Se Meta WA cair pra
+  uma médica, perdemos o disparo. Mitigação: outras médicas
+  cobrem; paciente pode cancelar e re-solicitar.
+- Sem ranking de médicas. Quem clicar primeiro ganha. Aceitável
+  pra MVP com 1-2 médicas.
+
+**Riscos residuais:**
+
+- Sem UI, esse PR não muda nada operacionalmente — é trilho
+  novo desligado da estrada. Risco é zero até PR-080.
+- TTL de 5 min é palpite. Se virar curto demais (paciente ainda
+  estava lendo), aumentar default em produção. Se longo demais
+  (médica acha que ninguém respondeu mas fila já estourou pra
+  sempre), encurtar. Trivial via param `p_ttl_seconds`.
+
+**Verificação:**
+
+- TSC clean. ESLint clean. Vitest: **1544/1544** (21 novos +
+  1523 prévios). `next build` clean — rota
+  `/api/internal/cron/expire-on-demand-requests` confirmada
+  no output.
+
+**Impacto operacional:**
+
+- Pós-deploy + migration, **nada muda** sob a perspectiva do
+  usuário (sem UI). Cron `expire_on_demand_requests` começa a
+  rodar a cada 1 min, mas como nenhum request será criado até
+  PR-080, ele só vai logar "expired_count: 0" silenciosamente.
+- Próximo passo (PR-080): UI paciente `/agendar/agora` + UI
+  médica `/medico/plantao/[requestId]` (clicar = aceitar). E
+  rota API que recebe o accept.
+
+---
+
 ## 2026-04-27 · Onda A · #5 · Painéis admin de Consultas e Plantão (PR-078 · D-090) · IA
 
 **Por quê:** O admin tinha 14 áreas no painel mas nenhuma olhava

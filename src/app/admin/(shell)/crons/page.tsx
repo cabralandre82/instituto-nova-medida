@@ -46,6 +46,7 @@ const EXPECTED_JOBS = [
   "stale_presence",
   "doctor_daily_summary",
   "doctor_on_call_reminder",
+  "expire_on_demand_requests",
 ] as const;
 
 const JOB_LABELS: Record<string, string> = {
@@ -61,6 +62,7 @@ const JOB_LABELS: Record<string, string> = {
   stale_presence: "Forçar offline (presença stale da médica)",
   doctor_daily_summary: "Resumo diário pra médica (~20h BRT)",
   doctor_on_call_reminder: "Aviso T-15min antes de plantão",
+  expire_on_demand_requests: "Expirar requests on-demand sem resposta",
 };
 
 /**
@@ -81,6 +83,7 @@ const JOB_CADENCE: Record<string, string> = {
   stale_presence: "a cada 1 min",
   doctor_daily_summary: "diário (23:00 UTC ≈ 20:00 BRT)",
   doctor_on_call_reminder: "a cada 1 min",
+  expire_on_demand_requests: "a cada 1 min",
 };
 
 const WINDOW_DAYS = 30;

@@ -5,6 +5,120 @@
 
 ---
 
+## D-091 · Backend de atendimento on-demand (PR-079) · 2026-04-27
+
+**Contexto.** Pós-D-088 (médica edita plantão) e D-089 (notifs WA pra
+médica) o produto tem todos os trilhos pra "atendimento agora" —
+exceto o trilho mais importante: **a fila**. Hoje o paciente que termina
+o quiz e quer ser atendido AGORA não tem rota: só consegue agendar
+horário no futuro (PR-075-A). O operador-solo confirmou que esse será
+o caso de uso mais frequente. Esse PR introduz o backend que faltava.
+
+**Decisão.** Modelar on-demand como fila de **requests** efêmeras,
+não como appointments diretos. Decisões-chave:
+
+1. **Tabela `on_demand_requests`** separada de `appointments`. Razões:
+   - Lifecycle distinto: pending → accepted/cancelled/expired. Quando
+     accepted, *aí* nasce o appointment (kind=`on_demand`). Misturar
+     com appointments forçaria a inventar um novo status (`waiting`?
+     `unassigned`?) e poluiria queries existentes.
+   - Idempotência simples: unique parcial em `(customer_id) WHERE
+     status='pending'` impede que paciente clique 2× no botão e crie
+     2 requests.
+   - Forense pós-mortem: requests cancelled/expired ficam no histórico
+     com chief_complaint, motivo, timestamps. Útil pra disputa
+     ("paciente alega que ninguém atendeu") e pra reliability tracking
+     (PR-068).
+
+2. **Tabela `on_demand_request_dispatches`** separada de
+   `doctor_notifications` (PR-077). Razões:
+   - Anchor incompatível: `doctor_notifications` exige
+     `appointment_id | availability_id | summary_date`, mas
+     on-demand fan-out acontece ANTES de qualquer appointment existir.
+     Forçar `availability_id` quebraria pra médicas que estão online
+     mas sem bloco `on_call` ativo (caso legítimo).
+   - Semântica diferente: doctor_notifications é fila assíncrona
+     (cron de 1 min processa). Fan-out on-demand é síncrono (latência
+     ≤ 30s mandatória — paciente está esperando AGORA).
+   - Idempotência diferente: aqui é `(request_id, doctor_id)`; lá é
+     por kind+anchor. Cada uma tem sua semântica natural.
+
+3. **Fan-out síncrono em paralelo** via `Promise.allSettled`. Cron
+   de 1 min seria fatal pro produto (paciente cansa em 60s). MAX
+   FAN-OUT = 10 médicas (em produção MVP é 1-2; cap protege contra
+   regression).
+
+4. **RPC atomic `accept_on_demand_request(request_id, doctor_id, ...)`.**
+   Race-safe via `UPDATE ... WHERE status='pending' RETURNING` numa
+   transação que também faz INSERT em appointments e UPDATE preenchendo
+   `accepted_*` no request. A primeira médica que clicar vence; as
+   demais recebem `{accepted:false, reason:'already_accepted'}`.
+
+5. **TTL default 5 min.** Caller pode override entre 1 min e 30 min.
+   Cron `expire-on-demand-requests` (rodando a cada 1 min) varre
+   pending vencidos e marca expired. Sem ele, a unique parcial
+   bloquearia paciente de criar novo request indefinidamente.
+
+6. **Trigger imutabilidade pra estados terminais.** Uma vez
+   accepted/cancelled/expired, status não muda. Operação solo dispensa
+   "auditoria de mudanças de estado" — preferimos travar.
+
+**Alternativas consideradas.**
+
+- **Reusar `appointments` com status novo `unassigned`.** Rejeitado:
+  injetaria semântica de fila num modelo que hoje pressupõe doctor_id
+  obrigatório, e quebraria queries existentes (state machine D-070,
+  earnings, etc.). Custo de refactor > benefício.
+- **Fila ranqueada por prioridade (round-robin entre médicas, queue
+  position).** Rejeitado por agora: produto MVP tem 1-2 médicas, e
+  fan-out paralelo é mais simples e mais responsivo. Reavaliar quando
+  chegar a 5+.
+- **Fan-out via fila assíncrona (`doctor_notifications`).** Rejeitado:
+  latência inaceitável pro caso de uso "atendimento agora".
+- **Sem TTL (request fica pending pra sempre).** Rejeitado: viraria
+  fonte permanente de leaks no produto + bloquearia paciente de
+  re-solicitar.
+
+**Trade-offs aceitos.**
+
+- *Sem retry automático no WA.* Se Meta WA falhar pra uma médica
+  durante fan-out, perdemos esse disparo. Mitigação: outras médicas
+  no fan-out cobrem. Re-solicitação manual (cancelar + criar novo) é
+  sempre possível. PR-080 pode adicionar retry-best-effort se virar
+  problema operacional.
+- *Sem prioridade de médicas.* Quem clicar primeiro ganha. Em produção
+  com 1-2 médicas, isso é não-issue. Reavaliar com 5+ médicas.
+- *Templates Meta ainda em dry-run.* `medica_on_demand_request` retorna
+  `templates_not_approved` igual aos 4 do PR-077-A. Backlog flui pelo
+  database; quando templates aprovarem (PR-079-B), basta trocar
+  o dry-run por `sendTemplate`.
+- *Ainda sem UI.* Esta PR é só backend (rotas API + lib + cron). UI
+  do paciente (`/agendar/agora`) e da médica (integração em
+  `/medico/plantao`) ficam pra PR-080.
+
+**Implicações.**
+
+- A `appointments.kind='on_demand'` ganha primeiro consumidor real
+  (criada em D-086 em preparação). Earnings/payouts já reconhecem
+  esse kind via `earning_kind='on_demand_bonus'` (introduzido em
+  D-087/PR-075-B), então quando paciente aderir a plano pós-on-demand,
+  bonus é gerado automaticamente.
+- Reliability tracking (PR-068) ganha 2 candidatos a evento:
+  request abandonado pelo paciente (cancelled em <30s) e médica que
+  não responde a fan-out repetidas vezes. Não cobrimos agora — pra
+  PR-082 (observabilidade) ou PR-068-B.
+- Admin painel `/admin/plantao` (PR-078) tem placeholder "Fila
+  on-demand" que será preenchido em PR-080.
+- Próximo PR (PR-080) traz UI:
+  - Paciente: `/agendar/agora` (formulário + countdown).
+  - Médica: integração em `/medico/plantao` (modal "novo paciente"
+    quando WA chegar) + página `/medico/plantao/[requestId]` que
+    chama RPC accept.
+- Próximo PR (PR-082) traz observabilidade: TTM (time-to-match),
+  taxa de aceite, requests expirados por dia, fila viva no admin.
+
+---
+
 ## D-090 · Painéis admin de Consultas e Plantão (PR-078) · 2026-04-27
 
 **Contexto.** Antes do PR-078 o admin tinha 14 áreas no painel
