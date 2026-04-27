@@ -2,7 +2,7 @@
 
 Lista consolidada de PRs identificados na auditoria (`docs/AUDIT-FINDINGS.md`) que **não podem ser abertos só pelo engenheiro**: dependem de dados reais, decisões do operador ou acesso externo.
 
-Atualizado em: **2026-04-27** (pós-PR-075-B / D-087 — `doctor_presence` real-time: tabela soft-realtime com 1 linha/médica, RPCs `presence_heartbeat` + `set_presence_status` security definer, lib `doctor-presence.ts` com `recordHeartbeat`/`setPresenceStatus`/`listOnlineDoctors`/`sweepStalePresence`, 3 rotas novas — `POST /api/medico/presence/heartbeat`, `POST /api/medico/presence/status`, `GET /api/internal/cron/stale-presence` — e cron `* * * * *` que força offline qualquer médica sem heartbeat há ≥120s. Base pra plantão programado (PR-077/PR-081), on-demand (PR-079) e observabilidade admin (PR-082). 1462 testes verdes. Revisão anterior: PR-075-A / D-086 — agendamento da consulta gratuita).
+Atualizado em: **2026-04-27** (pós-PR-076 / D-088 — UI médica edita própria agenda + toggle de plantão: lib `doctor-availability.ts` com validação canônica + overlap-check app-side + soft-delete CFM-friendly, rotas `GET/POST /api/medico/availability` + `DELETE/PATCH /api/medico/availability/[id]`, página `/medico/horarios` unindo plano semanal recorrente e estado online agora numa só tela, link novo em `DoctorNav`. Aliases legacy `agendada`/`plantao` aceitos em leitura, normalizados em escrita pra `scheduled`/`on_call`. 1485 testes verdes (23 novos). Revisão anterior: PR-075-B / D-087 — `doctor_presence` real-time + heartbeat + cron stale-presence).
 
 ---
 

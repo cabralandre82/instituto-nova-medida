@@ -5,6 +5,130 @@
 
 ---
 
+## D-088 · UI médica edita própria agenda + toggle de plantão (PR-076 · fecha gap operacional) · 2026-04-27
+
+**Contexto.** D-086 (PR-075-A) abriu o agendamento gratuito pelo
+paciente. D-087 (PR-075-B) adicionou presença real-time da médica
+com heartbeat + cron de stale. Mas a médica ainda **não tinha
+ferramenta pra editar a própria agenda recorrente** sem mexer em
+SQL. Toda mudança de horário (férias, novo dia, ajuste pós-
+feedback de paciente) exigia o admin abrir o Supabase Studio,
+emitir UPDATE/INSERT em `doctor_availability`, e torcer pra não
+cometer erro de digitação. Inviável pra operação solo de longo
+prazo, e atrito desnecessário pra fluxo cotidiano.
+
+Era também o momento certo de unir, numa mesma tela, os DOIS
+eixos temporais de disponibilidade da médica:
+
+1. **Plano semanal recorrente** (`doctor_availability`):
+   &ldquo;Toda quarta das 14h às 18h sou plantão&rdquo;.
+   Governa criação de slots gerados automaticamente pelo
+   sistema.
+2. **Estado agora** (`doctor_presence`): &ldquo;Estou online,
+   pronta pra atender on-demand AGORA&rdquo;. Governa fan-out
+   on-demand e badge na home.
+
+Ambos respondem cognitivamente à mesma pergunta — &ldquo;quando
+estou disponível?&rdquo; — só em escalas de tempo diferentes.
+Separá-los em telas distintas obrigaria a médica a aprender um
+modelo mental dual. Unir num só `/medico/horarios` mantém
+consistência.
+
+**Decisão.** Criar lib `src/lib/doctor-availability.ts` com CRUD
+seguro (validação canônica + overlap-check app-side + soft-delete
+preservando histórico CFM); rotas `GET/POST /api/medico/availability`
+e `DELETE/PATCH /api/medico/availability/[id]` autenticadas via
+`requireDoctor()` (doctor_id sempre da sessão); página
+`/medico/horarios` com 2 cards — toggle de presença online/busy/
+offline integrado com PR-075-B + heartbeat automático cada 30s
+enquanto não-offline, e gestor de blocos recorrentes agrupados
+por dia da semana com adicionar/desativar/reativar inline. PATCH
+deliberadamente NÃO suporta edição completa de bloco (só
+reativar): pra mudar horário, médica desativa + recria. Decisão
+semântica pra evitar ambiguidade sobre o que acontece com
+appointments já reservados em horário que vai mudar.
+
+**Alternativas consideradas:**
+
+A. **Edição completa via PATCH** (UPDATE de weekday/start/end/type).
+   Rejeitada: risco semântico — se a médica muda quarta 14-18h
+   pra quarta 15-19h e há appointment reservado pra quarta 14h,
+   o appointment continua válido (regra recorrente só governa
+   geração de slots novos), mas isso não é óbvio pra ela. Force
+   delete + recreate torna explícito: &ldquo;esse bloco com
+   esse horário deixa de existir; se você cria um novo, é
+   independente&rdquo;. Custo cognitivo: 2 cliques a mais.
+   Benefício: zero ambiguidade.
+
+B. **Unique index parcial pra impedir overlap no banco**
+   (GIST + tstzrange por doctor_id). Rejeitada nesta fase:
+   custo de migration alto (precisa converter 2 colunas time
+   pra range, precisa habilitar `btree_gist`), benefício baixo
+   em operação solo (1 médica, baixa concorrência). Overlap-
+   check app-side (SELECT atual + decide; INSERT) é suficiente.
+   Quando vier 2ª médica e elas começarem a editar agenda
+   simultaneamente, **PR-046** sobe a barra: ou GIST index ou
+   advisory lock por doctor_id.
+
+C. **Hard delete em vez de soft delete.** Rejeitada: CFM exige
+   trilha de quando médica disponibilizou e desabilitou cada
+   bloco (relevante em auditoria e em disputa de earnings de
+   plantão). Soft delete (`active=false`) preserva tudo.
+
+D. **Tela separada pra `doctor_presence`.** Rejeitada por
+   coerência cognitiva: ver argumento no contexto. Médica fica
+   confusa indo e voltando entre &ldquo;ajustar quartas&rdquo; e
+   &ldquo;ligar online&rdquo;.
+
+E. **Calendário com datas concretas** (renderizar próximas 4
+   quartas em vez da regra semanal). Rejeitada nesta fase:
+   regra é mais densa em informação útil; calendário concreto
+   vira ruído visual e ainda obriga a médica a ajustar
+   manualmente quando há feriado. Decisão postergada pra
+   eventual PR de calendar view + override de feriado.
+
+**Trade-offs aceitos:**
+
+1. Probabilidade marginal de overlap se 2 abas tentarem criar
+   bloco no mesmo horário em ms (race entre check e insert).
+   Mitigação: form bloqueia botão; refetch reflete duplicação;
+   blocos duplicados são tolerados (médica desativa um).
+2. Heartbeat só roda enquanto `/medico/horarios` está aberta.
+   Quem fica online &ldquo;de fundo&rdquo; vai precisar ter
+   `/medico/plantao` aberta (PR-080).
+3. Soft-delete NÃO cancela appointments futuros já reservados
+   no bloco desativado. Trata-se de fluxo deliberadamente
+   separado: cancelar consulta é em `/medico/agenda`,
+   desativar agenda recorrente é aqui.
+
+**Implicações pra outros PRs:**
+
+- **PR-077** (notificações WA pra médica): vai usar
+  `doctor_availability` pra montar &ldquo;resumo de amanhã&rdquo;
+  (que blocos a médica tem amanhã + que appointments reais
+  caem em quais blocos).
+- **PR-079** (on-demand backend): fan-out usa `doctor_presence`
+  (status=online && heartbeat fresco) pra escolher destino;
+  quem ativou plantão recorrente em `doctor_availability` mas
+  não está online no momento NÃO recebe fan-out.
+- **PR-081** (plantão programado): cron monitor compara
+  `doctor_availability` (regra prometida) com
+  `doctor_presence` (estado real) — se a médica prometeu
+  segunda 14-18h mas nunca apareceu online, registra evento
+  de reliability + impacta earnings.
+- **PR-082** (observabilidade admin): dashboard mostra blocos
+  ativos por médica + presença real, lado a lado. UI já tem
+  os dados estruturados.
+
+**Cleanup.** Aliases `agendada`/`plantao` ainda aceitos em
+leitura pra compatibilidade com dados antigos; escrita
+canonicaliza pra `scheduled`/`on_call`. Quando 100% das
+linhas estiverem com valores canônicos (espera-se em ≤ 60
+dias após PR-076), migration `2026-XX-XX` força CHECK
+constraint apenas em `('scheduled', 'on_call')`.
+
+---
+
 ## D-087 · `doctor_presence` + heartbeat + cron stale-presence (PR-075-B · base pra plantão e on-demand) · 2026-04-27
 
 **Contexto.** D-086 (PR-075-A) instalou a rota canônica de

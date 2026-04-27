@@ -7,6 +7,7 @@ import { clsx } from "clsx";
 const NAV = [
   { href: "/medico", label: "Visão geral", exact: true },
   { href: "/medico/agenda", label: "Agenda" },
+  { href: "/medico/horarios", label: "Horários" },
   { href: "/medico/ganhos", label: "Ganhos" },
   { href: "/medico/repasses", label: "Repasses" },
   { href: "/medico/perfil", label: "Perfil" },

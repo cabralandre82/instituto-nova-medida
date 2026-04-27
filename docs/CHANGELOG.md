@@ -6,6 +6,126 @@
 
 ---
 
+## 2026-04-27 · Onda A · #3 · UI médica edita própria agenda + toggle de plantão (PR-076 · D-088) · IA
+
+**Por quê:** PR-075-A (D-086) abriu o agendamento gratuito pelo
+paciente; PR-075-B (D-087) trouxe presença real-time da médica.
+Faltava a peça mais óbvia: a médica conseguir **editar a própria
+agenda recorrente sem mexer em SQL**. Sem isso, qualquer mudança
+de horário (férias, novo dia de plantão, ajuste pós-feedback)
+exigia o admin abrir o Supabase Studio. Inviável pra operação
+solo.
+
+Também era o momento certo de unir a edição de `doctor_availability`
+(plano semanal) com o toggle on/off de `doctor_presence` (estado
+agora) numa única tela — porque a decisão é cognitivamente a
+mesma (&ldquo;quando estou disponível&rdquo;) só que em escalas
+de tempo diferentes.
+
+**Entregáveis:**
+
+- **`src/lib/doctor-availability.ts`**: lib nova com CRUD
+  seguro de `public.doctor_availability`. Tipos canônicos
+  `scheduled` | `on_call` (aliases legacy `agendada`/`plantao`
+  aceitos em leitura, normalizados em escrita). Validação pura
+  (`validateAvailabilityInput`) com erros tipados:
+  `weekday_invalid`, `start_time_invalid`, `end_time_invalid`,
+  `end_before_start`, `type_invalid`. Detector de overlap
+  (`hasOverlap`) com semântica de boundary aberto
+  (`12:00-14:00` não conflita com `14:00-16:00`). CRUD
+  (`listAvailabilityForDoctor`, `createAvailability`,
+  `deactivateAvailability`, `reactivateAvailability`) — soft
+  delete via `active=false` pra preservar histórico (CFM).
+  Constantes `WEEKDAY_LABELS_PT`, `TYPE_LABELS_PT` pra UI.
+- **`src/lib/doctor-availability.test.ts`**: 23 casos de teste
+  cobrindo validação canônica, normalização de aliases legacy,
+  edge cases de overlap (subset, superset, boundary, weekday
+  diferente, exclude `id` em update virtual, blocos inativos
+  ignorados).
+- **`src/app/api/medico/availability/route.ts`**: GET (lista
+  todos blocos da médica logada incl. inativos) + POST (cria
+  bloco novo). Auth via `requireDoctor` — `doctor_id` vem da
+  sessão, nunca do body. POST faz overlap-check ANTES do INSERT
+  contra blocos ativos da própria médica; conflito retorna 409
+  `overlap`.
+- **`src/app/api/medico/availability/[id]/route.ts`**: DELETE
+  (soft-delete via `active=false`) e PATCH (só aceita
+  `{ active: true }` pra reativar bloco). Edição completa de
+  bloco (mudar weekday/horário) é deliberadamente NÃO suportada:
+  médica deleta + recria. Decisão semântica pra evitar mexer em
+  bloco que já tem appointments dependentes. PATCH refaz overlap-
+  check antes de reativar — se outro bloco foi criado nesse meio-
+  tempo no mesmo horário, retorna 409.
+- **`src/app/medico/(shell)/horarios/page.tsx`**: server
+  component carrega blocos atuais + estado de presença, hands
+  off pro client.
+- **`src/app/medico/(shell)/horarios/HorariosClient.tsx`**:
+  client component com 2 cards: (a) **Plantão online agora** —
+  3 botões (Online / Em atendimento / Offline) integrados com
+  `/api/medico/presence/status`; enquanto status ≠ offline
+  dispara heartbeat automático cada 30s pra
+  `/api/medico/presence/heartbeat`. (b) **Agenda recorrente
+  semanal** — formulário pra adicionar bloco (dia + início +
+  fim + tipo) e listagem agrupada por dia da semana com
+  desativar/reativar inline.
+- **`src/app/medico/(shell)/_components/DoctorNav.tsx`**: novo
+  link &ldquo;Horários&rdquo; entre &ldquo;Agenda&rdquo; e
+  &ldquo;Ganhos&rdquo;.
+
+**Trade-offs aceitos:**
+
+1. **Sem unique index pra anti-overlap no banco.** Overlap-check
+   é app-side (SELECT atual + decide; INSERT sem advisory lock).
+   Justificativa: operação solo (1 médica, baixa concorrência),
+   probabilidade de race time entre check e insert é desprezível,
+   e não vale o custo de migration + GIST index com tstzrange
+   nesta fase. Se vier 2ª médica e elas começarem a editar agenda
+   simultaneamente, **PR-046** sobe a barra e adiciona advisory
+   lock por `doctor_id`.
+2. **PATCH só reativa, nunca edita.** Médica que quer mudar de
+   `quarta 14-18h` pra `quarta 15-19h` precisa desativar o bloco
+   antigo e criar o novo. Custo cognitivo: 2 cliques a mais.
+   Benefício: zero ambiguidade sobre o que acontece com
+   appointments já reservados em `quarta 14h` se o bloco virar
+   `15h+` (resposta: nada — appointments sobrevivem mesmo se
+   `doctor_availability` deixar de cobrir o horário, porque a
+   regra recorrente só governa criação de slot novo).
+3. **Heartbeat só roda enquanto a aba `/medico/horarios` está
+   aberta.** Se a médica fechar a aba, cron `stale_presence`
+   marca offline em ≤ 2 min (PR-075-B). Trade-off: não dá pra
+   ficar online &ldquo;de fundo&rdquo; — precisa ter aba ativa.
+   Fix futuro (PR-080): o painel de plantão `/medico/plantao`
+   também faz heartbeat e é a tela onde a médica fica enquanto
+   espera on-demand.
+4. **Sem &ldquo;próximas datas reais&rdquo; renderizadas.** A
+   tela mostra a regra semanal (&ldquo;quartas 14-18h&rdquo;)
+   e não as próximas 4 quartas concretas. Justificativa: regra
+   é mais densa em informação útil; calendário com datas
+   concretas vira ruído visual e confusão se um feriado
+   cancelou (decisão postergada pra eventual PR de calendar
+   view).
+
+**Riscos residuais:**
+
+- Médica pode criar blocos duplicados em sequência (race
+  client-side ↔ server-side). Mitigação: form bloqueia botão
+  durante request (`submitting`) e refetch refresca lista.
+  Se duplicar mesmo assim: blocos coincidentes são tolerados
+  (não são unique-violation), médica desativa um.
+- Soft-delete não cancela appointments futuros já reservados
+  no bloco desativado. Decisão deliberada — desativar agenda
+  recorrente NÃO é o mesmo que cancelar consultas; cancelar
+  consultas é um fluxo separado em `/medico/agenda`. Nota
+  visual no copy futuro pra deixar claro pro operador.
+
+**Testes:** 1485 unit/component (23 novos em `doctor-availability.test.ts`),
+77 arquivos. Lint clean. Tsc clean.
+
+**Próximo:** PR-077 — notificações WA pra médica (paid, T-15min,
+resumo amanhã, plantão T-15min).
+
+---
+
 ## 2026-04-27 · Onda A · #2 · Presença real-time da médica (PR-075-B · D-087) · IA
 
 **Por quê:** PR-075-A (D-086) habilitou o paciente a se agendar
