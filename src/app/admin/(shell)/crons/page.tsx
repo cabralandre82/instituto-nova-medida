@@ -43,6 +43,7 @@ const EXPECTED_JOBS = [
   "retention_anonymize",
   "asaas_events_purge",
   "expire_appointment_credits",
+  "stale_presence",
 ] as const;
 
 const JOB_LABELS: Record<string, string> = {
@@ -55,6 +56,7 @@ const JOB_LABELS: Record<string, string> = {
   retention_anonymize: "Retenção LGPD (anonimizar)",
   asaas_events_purge: "Purge LGPD (asaas_events.payload)",
   expire_appointment_credits: "Expirar créditos de reagendamento",
+  stale_presence: "Forçar offline (presença stale da médica)",
 };
 
 /**
@@ -71,6 +73,8 @@ const JOB_CADENCE: Record<string, string> = {
   admin_digest: "diário",
   retention_anonymize: "diário",
   asaas_events_purge: "semanal (dom 05:00 UTC)",
+  expire_appointment_credits: "diário (12:00 UTC)",
+  stale_presence: "a cada 1 min",
 };
 
 const WINDOW_DAYS = 30;

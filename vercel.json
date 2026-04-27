@@ -46,6 +46,9 @@
     },
     "src/app/api/internal/cron/expire-appointment-credits/route.ts": {
       "maxDuration": 30
+    },
+    "src/app/api/internal/cron/stale-presence/route.ts": {
+      "maxDuration": 15
     }
   },
   "crons": [
@@ -96,6 +99,10 @@
     {
       "path": "/api/internal/cron/expire-appointment-credits",
       "schedule": "0 12 * * *"
+    },
+    {
+      "path": "/api/internal/cron/stale-presence",
+      "schedule": "* * * * *"
     }
   ],
   "headers": [

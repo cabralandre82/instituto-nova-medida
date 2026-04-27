@@ -5,6 +5,184 @@
 
 ---
 
+## D-087 · `doctor_presence` + heartbeat + cron stale-presence (PR-075-B · base pra plantão e on-demand) · 2026-04-27
+
+**Contexto.** D-086 (PR-075-A) instalou a rota canônica de
+agendamento gratuito. Próximo passo da Onda A: dar à plataforma
+visibilidade de **quais médicas estão online em tempo real**.
+Esta visibilidade é pré-condição pra:
+
+- **Plantão programado** (`doctor_availability.type='on_call'`):
+  o operador precisa saber se a médica que se comprometeu pra
+  plantão segunda 14-18h efetivamente *apareceu*.
+- **On-demand** (PR-079+): paciente clica "quero atendimento
+  agora", o backend faz fan-out pra médicas online; sem dado de
+  presença, fan-out vai pra ninguém.
+- **Observabilidade admin** (PR-082): painel "fila viva" só faz
+  sentido se sabemos quem está online.
+
+Hoje a única dimensão de "disponibilidade" é
+`doctor_availability` (regra semanal recorrente). Diz "Joana
+atende plantão segundas 14-18h" mas não diz se a aba está aberta,
+câmera testada, pronta pra atender.
+
+**Decisão.** Modelar presença soft real-time via:
+
+1. Tabela `doctor_presence` — UMA linha por médica
+   (`doctor_id PK`).
+2. Heartbeat HTTP da UI (a cada 30s) que refresca
+   `last_heartbeat_at` sem mudar status.
+3. Toggle explícito (médica clica "estou de plantão" / "saí")
+   que muda status (`online` | `busy` | `offline`).
+4. Cron `stale-presence` (1min) que força `offline` qualquer
+   linha online/busy cujo `last_heartbeat_at` é mais velho
+   que `STALE_PRESENCE_THRESHOLD_SECONDS` (120s = 4× heartbeat).
+
+### Por que soft real-time (HTTP polling) e não WebSocket / Supabase Realtime
+
+- **Supabase Realtime** é boa pra pushar mudanças do servidor
+  pro cliente, não o contrário (que é o que precisamos: cliente
+  declarando "ainda estou aqui").
+- **WebSocket dedicado** exige infra extra (Vercel free tier
+  derruba conexão longa em 30s; precisaríamos de servidor
+  separado tipo Pusher / Ably).
+- **HTTP polling 30s** é trivial em Vercel serverless, custa
+  ~3 invocations/min/médica, e satisfaz o SLA do produto: o
+  paciente on-demand espera 2-3min até match (PR-079). Janela
+  de "fantasma" de até 2min é aceitável.
+
+Quando volume escalar (multi-médica, alta concorrência) podemos
+trocar pra Supabase Realtime sem mudar o schema (a fonte de
+verdade continua sendo a tabela; só a forma do cliente
+declarar mudaria).
+
+### Schema: `doctor_presence`
+
+```
+doctor_id           uuid pk references doctors(id) on delete cascade
+status              text check ('online'|'busy'|'offline')
+last_heartbeat_at   timestamptz default now()
+online_since        timestamptz — começo do trecho atual ≠ offline
+                                  (NULL quando offline)
+source              text check ('manual'|'auto_offline')
+client_meta         jsonb default '{}' (ua + app_version + ip_hash)
+created_at, updated_at timestamptz
+```
+
+Invariante CHECK: `(status='offline' ↔ online_since IS NULL)`.
+Pre-empte queries falsas tipo "tempo de plantão hoje da Dra X"
+caindo em valores undefined.
+
+Trigger `tg_doctor_presence_touch_updated_at` mantém
+`updated_at` sempre fresco.
+
+RLS: deny-by-default. Sem policies pra `authenticated` —
+acesso da médica vai sempre via handler server-side autenticado
+(`requireDoctor()`).
+
+### RPCs `security definer`
+
+- **`presence_heartbeat(p_doctor_id, p_client_meta)`** —
+  `INSERT ... ON CONFLICT DO UPDATE`. Cria linha `online` se
+  não existe, refresca `last_heartbeat_at` se existe. Não altera
+  status (heartbeat não promove offline → online; isso é
+  responsabilidade do toggle).
+
+- **`set_presence_status(p_doctor_id, p_status, p_source,
+  p_client_meta)`** — mudança explícita. Mantém invariante de
+  `online_since`:
+  - `→ offline`: `online_since := NULL`.
+  - `offline → online|busy`: `online_since := now()`.
+  - `online ↔ busy`: preserva `online_since`.
+
+### Cron `stale-presence`
+
+Frequência: a cada 1 minuto (cron mais frequente da plataforma —
+mesmo intervalo de `expire-reservations`). Padrão SELECT→UPDATE
+em 2 passos:
+
+1. `SELECT doctor_id, last_heartbeat_at WHERE status IN
+   ('online','busy') AND last_heartbeat_at < now() - 120s
+   LIMIT 100` (clamped, default `DEFAULT_STALE_SWEEP_LIMIT=100`).
+2. `UPDATE ... SET status='offline', online_since=NULL,
+   source='auto_offline' WHERE doctor_id IN (...) AND status IN
+   ('online','busy')` — filtro extra do `status` defende contra
+   race com toggle manual concorrente.
+
+Idempotente; `dryRun` reporta candidatos sem mutar.
+
+### Por que UPDATE inline e não chamar RPC `set_presence_status` por linha
+
+- **Performance**: 1 UPDATE em batch vs N RPCs round-trip.
+- **Testabilidade**: o sweep recebe `supabase` como argumento;
+  fazendo UPDATE inline dá pra testar com supabase mockado sem
+  mockar `getSupabaseAdmin()` interno.
+- **Coerência semântica**: o sweep faz exatamente o que
+  `set_presence_status(..., 'auto_offline')` faria — setar
+  status='offline', online_since=NULL, source='auto_offline'.
+  Nenhum cálculo derivado se perde.
+
+### Endpoints
+
+- `POST /api/medico/presence/heartbeat` — `requireDoctor()`,
+  doctor_id da sessão. Body opcional `{ client_meta:
+  { ua, app_version } }`. Sempre retorna a row atualizada pra
+  UI checar drift (médica forçada offline pelo cron com aba
+  ainda aberta).
+- `POST /api/medico/presence/status` — `requireDoctor()`. Body
+  obrigatório `{ status: 'online'|'busy'|'offline' }`. Sempre
+  marca `source='manual'`.
+- `GET /api/internal/cron/stale-presence` — `assertCronRequest`.
+  Query strings: `dryRun=1`, `limit=N`, `staleSeconds=N`.
+
+### Trade-offs aceitos
+
+- **Sem histórico de presença.** Quando médica vai offline,
+  sobrescrevemos a mesma linha. Trilha "quem atendeu paciente X"
+  fica em `appointments` + `appointment_notifications`. Histórico
+  granular de presença vira PR só se a operação pedir.
+- **`STALE_PRESENCE_THRESHOLD_SECONDS=120` é hardcoded.** Não é
+  env-var. Ajuste exige código + deploy. Justificativa: alterar
+  esse número exige re-pensar o trade-off; é decisão de produto,
+  não de infra.
+- **`client_meta.ip_hash` é truncado a 32 chars** (SHA-256 hex
+  truncado). Suficiente pra detectar "Dra X tem 2 abas em IPs
+  diferentes" sem armazenar IP reverso identificável.
+- **Nenhum push pra paciente quando médica vai online.** PR-077
+  é responsável pelo envio de "Dra X chegou pro plantão T-15min".
+- **Sem contagem de tempo de plantão (earnings).** A coluna
+  `online_since` permite calcular, mas o earning `on_call_hour`
+  só será criado em PR-081.
+
+### Risco residual
+
+- **Baixo**: cron stale-presence falha → médicas continuam
+  fantasma. Mitigação: cron em `cron_runs`, exposto em
+  `/admin/crons` (`EXPECTED_JOBS` + `JOB_CADENCE`).
+- **Baixo**: race entre cron e toggle manual. Mitigação: filtro
+  `WHERE status IN ('online','busy')` no UPDATE, testado em
+  `doctor-presence.test.ts::"UPDATE com 1 row mas a tabela
+  responde com 0"`.
+- **Baixo**: `client_meta` excede 4KB. Mitigação: CHECK constraint
+  + sanitização no app-side (`sanitizeClientMeta`).
+
+### Fechamento de findings
+
+Nenhum finding fechado direto — esta é base nova de produto, não
+remediação de auditoria. Mas habilita:
+
+- Item #2 da Onda A (PR-076 — UI médica edita agenda).
+- Item #3 da Onda A (PR-077 — notificações WA pra médica).
+- Onda B/C inteira (PR-078 a PR-082).
+
+### Próximos passos
+
+- **PR-076** consome `doctor_presence` em `/medico/plantao`
+  (toggle + heartbeat loop).
+- **PR-079** usa `listOnlineDoctors()` pra fan-out de on-demand.
+
+---
+
 ## D-086 · Rota canônica de agendamento da consulta gratuita (PR-075-A · fecha buraco D-044) · 2026-04-27
 
 **Contexto.** D-044 (audit [1.1], PR-020) estabeleceu que a consulta

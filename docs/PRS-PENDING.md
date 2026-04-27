@@ -2,7 +2,7 @@
 
 Lista consolidada de PRs identificados na auditoria (`docs/AUDIT-FINDINGS.md`) que **não podem ser abertos só pelo engenheiro**: dependem de dados reais, decisões do operador ou acesso externo.
 
-Atualizado em: **2026-04-27** (pós-PR-075-A / D-086 — agendamento da consulta gratuita: rota canônica `/agendar` + RPC `book_free_appointment_slot` + cookie httpOnly `inm_lead_id` + UI `SlotsGrid`/`FreeBookingForm`/`/agendar/sucesso`. Fecha o buraco operacional onde D-044 prometia self-service mas nenhuma rota pública existia: paciente terminava o quiz e ficava preso esperando contato manual. Item #1 da Onda A do plano de 9 PRs aprovado pelo operador em 2026-04-27. 1450 testes verdes. Revisão anterior: PR-041-B / D-085 — migração Next 14.2.35 → 15.5.15 + React 18 → 19).
+Atualizado em: **2026-04-27** (pós-PR-075-B / D-087 — `doctor_presence` real-time: tabela soft-realtime com 1 linha/médica, RPCs `presence_heartbeat` + `set_presence_status` security definer, lib `doctor-presence.ts` com `recordHeartbeat`/`setPresenceStatus`/`listOnlineDoctors`/`sweepStalePresence`, 3 rotas novas — `POST /api/medico/presence/heartbeat`, `POST /api/medico/presence/status`, `GET /api/internal/cron/stale-presence` — e cron `* * * * *` que força offline qualquer médica sem heartbeat há ≥120s. Base pra plantão programado (PR-077/PR-081), on-demand (PR-079) e observabilidade admin (PR-082). 1462 testes verdes. Revisão anterior: PR-075-A / D-086 — agendamento da consulta gratuita).
 
 ---
 

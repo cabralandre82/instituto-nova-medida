@@ -6,6 +6,109 @@
 
 ---
 
+## 2026-04-27 · Onda A · #2 · Presença real-time da médica (PR-075-B · D-087) · IA
+
+**Por quê:** PR-075-A (D-086) habilitou o paciente a se agendar
+sozinho, mas a plataforma ainda não sabia em tempo real **quais
+médicas estão online**. Pré-condição pra plantão programado
+(saber se quem prometeu apareceu), on-demand (fan-out só pra
+médicas online) e observabilidade admin (fila viva, TTM, taxa
+de match — PR-082). Hoje a única dimensão de disponibilidade
+era `doctor_availability` (regra semanal recorrente), que diz
+"Joana atende plantão segundas 14-18h" mas não "ela está com a
+aba aberta agora".
+
+**Entregáveis:**
+
+- **`supabase/migrations/20260521000000_doctor_presence.sql`**:
+  - Tabela `doctor_presence` (UMA linha por médica, PK
+    `doctor_id`). Status `online`/`busy`/`offline`,
+    `last_heartbeat_at`, `online_since`, `source`
+    (`manual`/`auto_offline`), `client_meta` (jsonb 4KB
+    cap com `ua`/`app_version`/`ip_hash`).
+  - CHECK invariante: `(status='offline' ↔ online_since IS
+    NULL)`. Pre-empta queries falsas em earnings de plantão.
+  - Trigger `tg_doctor_presence_touch_updated_at`.
+  - RPC `presence_heartbeat(p_doctor_id, p_client_meta)` —
+    INSERT ON CONFLICT DO UPDATE; refresca `last_heartbeat_at`
+    sem mudar status.
+  - RPC `set_presence_status(p_doctor_id, p_status, p_source,
+    p_client_meta)` — mudança explícita; mantém invariante
+    de `online_since` (zera quando vai pra offline; cria
+    quando volta de offline; preserva em transições
+    online↔busy).
+  - RLS deny-by-default (sem policies pra `authenticated` —
+    acesso da médica via handler server-side com `requireDoctor`).
+  - Índices `(status, last_heartbeat_at desc)` e
+    `(online_since desc) WHERE status IN ('online','busy')`.
+
+- **`src/lib/doctor-presence.ts`**:
+  - Constantes `STALE_PRESENCE_THRESHOLD_SECONDS=120`,
+    `PRESENCE_HEARTBEAT_INTERVAL_SECONDS=30` (4× pra tolerar
+    2 pings perdidos), `DEFAULT_STALE_SWEEP_LIMIT=100`,
+    `MAX_STALE_SWEEP_LIMIT=1000`.
+  - `recordHeartbeat(doctorId, meta?)` — wrapper do RPC
+    com sanitização de `client_meta` (clamp de tamanhos
+    defensivo contra CHECK).
+  - `setPresenceStatus(doctorId, status, opts)` — wrapper
+    do RPC.
+  - `getCurrentPresence(doctorId)` — leitura simples.
+  - `listOnlineDoctors({ staleThresholdSeconds })` — base
+    pro fan-out de on-demand (PR-079). Filtra por status
+    `online` E `last_heartbeat_at >= cutoff` (defesa em
+    profundidade contra cron stale ainda não rodado).
+  - `sweepStalePresence(supabase, opts)` — SELECT→UPDATE
+    em 2 passos. UPDATE inline (não via RPC) por
+    performance + testabilidade. Filtro adicional `WHERE
+    status IN ('online','busy')` no UPDATE pra defender
+    de race com toggle manual concorrente.
+  - 13 testes novos em `doctor-presence.test.ts`.
+
+- **API routes**:
+  - `POST /api/medico/presence/heartbeat` — `requireDoctor`,
+    doctor_id vem da sessão (não do body). Hash de IP via
+    SHA-256/32-char truncado.
+  - `POST /api/medico/presence/status` — `requireDoctor`.
+    Body `{ status: 'online'|'busy'|'offline' }`. Sempre
+    marca `source='manual'`.
+  - `GET /api/internal/cron/stale-presence` —
+    `assertCronRequest`. Query strings `dryRun=1`,
+    `limit=N`, `staleSeconds=N`.
+
+- **`vercel.json`** — registra cron com schedule `* * * * *`
+  e `maxDuration: 15s`.
+
+- **`/admin/crons`** — adiciona `stale_presence` no
+  `EXPECTED_JOBS` + label "Forçar offline (presença stale da
+  médica)" + cadência "a cada 1 min".
+
+- **`src/lib/cron-runs.ts`** — `CronJob` type ganha
+  `'stale_presence'`.
+
+**Trade-offs aceitos:**
+
+- HTTP polling (30s heartbeat) em vez de WebSocket / Supabase
+  Realtime: trivial em Vercel serverless, custo de ~3
+  invocations/min/médica, satisfaz SLA on-demand (paciente
+  espera 2-3min, janela "fantasma" ≤ 2min é aceitável).
+  Trocar pra Realtime mais tarde não muda schema.
+- Sem histórico de presença (sobrescreve a mesma linha).
+- `STALE_PRESENCE_THRESHOLD_SECONDS=120` hardcoded — ajuste
+  exige código + deploy (decisão de produto, não infra).
+- `ip_hash` truncado a 32 chars hex (suficiente pra detectar
+  abas duplicadas sem reversibilidade).
+
+**Risco residual:** baixo. Cobertura: 1462 testes verdes em 76
+arquivos (13 novos), TSC 0 erros, ESLint 0 erros, next build OK,
+3 rotas novas registradas (`/api/medico/presence/heartbeat`,
+`/api/medico/presence/status`, `/api/internal/cron/stale-presence`).
+
+**Próximos passos da Onda A:** PR-076 (UI médica edita agenda
++ toggle de plantão consumindo este endpoint), PR-077
+(notificações WA pra médica).
+
+---
+
 ## 2026-04-27 · Onda A · #1 · Agendamento da consulta gratuita (PR-075-A · D-086) · IA
 
 **Por quê:** o operador pediu, em 2026-04-27, que o assistente
