@@ -2,7 +2,7 @@
 
 Lista consolidada de PRs identificados na auditoria (`docs/AUDIT-FINDINGS.md`) que **não podem ser abertos só pelo engenheiro**: dependem de dados reais, decisões do operador ou acesso externo.
 
-Atualizado em: **2026-04-27** (pós-PR-082 / D-094 — Observabilidade de produto completa: `/admin/observabilidade` com janela configurável (24h/7d/30d/90d), 3 seções agregadas: (1) on-demand com taxa de match accepted/(accepted+cancelled+expired) + TTM p50/p95/p99/avg/min/max + tempo de abandono + fila pending agora; (2) fan-out com requests com fan-out + médicas únicas notificadas + dispatches médios + zero-online rate (sinaliza inventário insuficiente); (3) plantão programado com taxa de fulfillment + total pago R$ + cobertura mediana + histograma 4 buckets + breakdown por médica ordenado por valor pago. Semáforo de toneamento (sage/amber/terracotta) calibrado por threshold (match ≥70/40, fulfill ≥85/60, zero-online ≤10/30 invertido). Lib `admin-observability.ts` com 14 helpers puros (computePercentiles nearest-rank, computeMatchRate, bucketCoverage clampado, buildCoverageHistogram, computeDurationSeconds defensivo, resolveWindowRange, resolveDoctorDisplayName fallback estável, 3 aggregators puros, 4 formatters) + orquestrador `loadObservabilityReport` com 4 queries paralelas fail-soft. Item "Observabilidade" no AdminNav entre Saúde e Crons. 1635 testes verdes (52 novos para helpers + aggregators). Revisão anterior: PR-081 / D-093 — Plantão programado completo).
+Atualizado em: **2026-04-28** (pós-PR-045 / D-096 — Cost snapshots + dashboard `/admin/custos`: migration `cost_snapshots` com 1 row por (date, provider) e 5 providers cobertos (asaas/whatsapp/daily/vercel/supabase), idempotente em ON CONFLICT (snapshot_date, provider); cron diário `cost_snapshot` (06:00 UTC ≈ 03:00 BRT) computando o dia anterior completo com proxy via uso interno × rates configuráveis em env (`WA_COST_CENTS_PER_MESSAGE`, `ASAAS_FEE_FIXED_CENTS`, `ASAAS_FEE_PCT_BPS`, `DAILY_COST_CENTS_PER_MINUTE`, `VERCEL_MONTHLY_CENTS`, `SUPABASE_MONTHLY_CENTS`); lib pura `cost-snapshots.ts` com 11 helpers (centsToBRL com NBSP normalizado, utcDateStringOf/Month, dateRangeForUtcDay, daysInUtcMonth, previousMonth, monthRangeUtc, dailyShareOfMonthly, estimateAsaasCostCents/WaCostCents/DailyCostCents, detectCostAnomaly com gating absoluto minCentsTrigger=100 evitando "0→5cents=∞ ratio") + 3 orquestradores (computeDailySnapshot fail-soft por provider, upsertSnapshots, loadCostDashboard); page `/admin/custos` com 4 SummaryCards (mês corrente/anterior/delta%/picos), tabela rollup com sparkline SVG inline 30d por provider, gráfico série diária total SVG inline, card de rates em uso com nome de env var pra cada uma, disclaimer ±20% drift normal; entrada "Custos" no AdminNav (entre "Financeiro" e "Saúde"); cron registrado em vercel.json + CronJob union + EXPECTED_JOBS de /admin/crons. 44 testes novos: centsToBRL × 5, utc helpers × 7, dateRange × 2, daysInUtcMonth × 5, previousMonth × 3, monthRangeUtc × 2, dailyShareOfMonthly × 4, estimateAsaasCostCents × 5, estimateWaCostCents × 3, estimateDailyCostCents × 3, detectCostAnomaly × 8 (cobre série curta, baseline=0, ratio infinito, factor custom, gating absoluto). Suíte 1651 → 1695. TSC + ESLint + `next build` clean. **Trade-offs em D-096**: estimativas via env rates (não billing real, ROI baixo pra solo); sub-contagem possível em providers com unidade composta (Daily cobra por participante-minuto modelado como consulta-minuto); sem alerta proativo (depende de PR-043 drain externo). Audit [19.1 🟠 ALTO] resolvido. Revisão anterior: PR-046 / D-095 — Multi-médica em /agendar.
 
 ---
 
@@ -72,6 +72,27 @@ Endereço físico da sede (rua, número, bairro, cidade, UF, CEP): _____________
   - Operador prefere TOTP (Google Authenticator / Authy) ou Passkey (WebAuthn)?
   - Telefone secundário para recovery (caso perca device)?
 - Supabase já suporta TOTP nativo (já está em `config.toml` com `enroll_enabled=true`), falta só forçar o fluxo obrigatório para role=admin.
+
+### PR-045 · Cost snapshots + dashboard `/admin/custos` (PR-045 · D-096)
+
+- **Status:** ✅ Concluído em 2026-04-28. Audit [19.1 🟠 ALTO]
+  resolvido.
+- **Entregue:**
+  - Migration `cost_snapshots` (1 row por date+provider, 5 providers).
+  - Lib `cost-rates.ts` com 6 rates configuráveis em env.
+  - Lib `cost-snapshots.ts` com 11 helpers puros + 3 orquestradores.
+  - Cron diário `/api/internal/cron/cost-snapshot` (06:00 UTC).
+  - Dashboard `/admin/custos` com sparklines SVG inline + rollup por
+    provider + comparação mês-a-mês + detecção de anomalia.
+  - 44 testes unitários novos (suíte total: 1695).
+- **Follow-ups reativos (não-essenciais):**
+  - **PR-045-B** custo unitário por consulta (compor WA + Asaas +
+    Daily numa única visualização). Esperar demanda real.
+  - **PR-045-C** importar fatura mensal real (PDF/CSV → tabela
+    `cost_invoices`) pra calibrar rates automaticamente. Esperar
+    fatura real chegar.
+  - Alertas proativos quando anomalia detectada — dependem de
+    PR-043 (drain externo do logger).
 
 ### PR-046 · Multi-médica em `/agendar` (PR-046 · D-095)
 

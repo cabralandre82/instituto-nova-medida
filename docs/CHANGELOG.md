@@ -6,6 +6,122 @@
 
 ---
 
+## 2026-04-28 · Cost snapshots + dashboard `/admin/custos` (PR-045 · D-096) · IA
+
+**Por quê:** finding [19.1 🟠 ALTO] do audit cobrava observabilidade
+de despesas. Operador solo só descobria fatura no fim do mês — sem
+early-warning de drift, sem detecção de pico, sem capacidade de
+correlacionar custo ↔ feature. Quando uma campanha viral, bug em
+loop ou ataque inflasse o uso de WhatsApp/Daily, só veria 30+ dias
+depois.
+
+**Estratégia.** Em vez de bater nas APIs de billing dos providers
+(complexo, custoso de manter pra operador solo), usamos **uso interno
+× rate configurável em env** como proxy. Estimativa, não fatura —
+mas detecta variações em D+1. Operador ajusta a rate quando a fatura
+real chegar.
+
+**Entregue:**
+
+- **Migration `cost_snapshots`** (`supabase/migrations/20260525000000_cost_snapshots.sql`):
+  - 1 row por (snapshot_date, provider). 5 providers cobertos:
+    `asaas`, `whatsapp`, `daily`, `vercel`, `supabase`.
+  - Idempotente em `(snapshot_date, provider)` — re-runs no mesmo
+    dia sobrescrevem.
+  - Trigger atualiza `computed_at` em UPDATEs (forensic).
+  - RLS deny-by-default (acesso só via service_role + admin UI).
+
+- **Lib pura `src/lib/cost-rates.ts`:**
+  - 6 rates configuráveis via env vars com defaults sensatos:
+    `WA_COST_CENTS_PER_MESSAGE` (10), `ASAAS_FEE_FIXED_CENTS` (99),
+    `ASAAS_FEE_PCT_BPS` (250 = 2.5%), `DAILY_COST_CENTS_PER_MINUTE`
+    (4), `VERCEL_MONTHLY_CENTS` (10000), `SUPABASE_MONTHLY_CENTS`
+    (12500).
+  - `snapshotCostRates()` retorna estado completo das rates atuais
+    pra serializar em `metadata` e exibir na UI.
+  - Lê env a cada chamada (sem cache em module scope) — alterar
+    valor no Vercel → próxima execução do cron já reflete, sem
+    redeploy.
+
+- **Lib `src/lib/cost-snapshots.ts`:**
+  - Helpers puros: `centsToBRL`, `utcDateStringOf`,
+    `dateRangeForUtcDay`, `daysInUtcMonth`, `previousMonth`,
+    `monthRangeUtc`, `dailyShareOfMonthly`, `estimateAsaasCostCents`,
+    `estimateWaCostCents`, `estimateDailyCostCents`,
+    `detectCostAnomaly`.
+  - Orchestrator `computeDailySnapshot(supabase, { date })` produz 5
+    snapshots por dia, contando uso interno em
+    `appointment_notifications`, `doctor_notifications`,
+    `on_demand_request_dispatches`, `payments`, `appointments`. Erros
+    parciais (provider X não pôde contar) ficam em
+    `metadata.error_message` daquele provider — não derrubam os
+    outros.
+  - `upsertSnapshots` é idempotente (ON CONFLICT
+    `snapshot_date,provider`).
+  - `loadCostDashboard(supabase, { windowDays })` agrega: rollup por
+    provider, série diária, comparação mês-a-mês, detecção de
+    anomalia, freshness do snapshot mais recente.
+
+- **Cron route `/api/internal/cron/cost-snapshot`:**
+  - Diário, 06:00 UTC ≈ 03:00 BRT. Espaçado dos jobs noturnos
+    01-04h pra evitar contenção de DB.
+  - Computa snapshot do **dia anterior** completo (sem parcial).
+  - Suporta `?date=YYYY-MM-DD` (backfill) e `?dryRun=1`.
+  - Logger estruturado + `cron_runs.payload` com per-provider summary
+    (operador inspeciona em `/admin/crons` sem precisar abrir
+    `/admin/custos`).
+
+- **Dashboard `/admin/custos`** (server component):
+  - Resumo do mês: total corrente, total anterior, delta %, contagem
+    de picos detectados.
+  - Rollup por provider em tabela com sparkline 30d (SVG inline,
+    zero dependências).
+  - Série diária total agregada (gráfico SVG inline).
+  - Card de rates atuais com nome de env var pra cada uma — operador
+    troca direto no Vercel sem precisar consultar código.
+  - Disclaimer claro: estimativa, não fatura. Drift ±20% normal.
+
+- **Detecção de anomalia.** `detectCostAnomaly` compara o último
+  ponto da série com média móvel dos 7 dias anteriores. Anomalia =
+  `latest > 2× baseline AND latest > 100 centavos`. Guard absoluto
+  evita falso positivo "0 → 5 cents = ratio ∞".
+
+- **Hooks de navegação:**
+  - `AdminNav` ganha entrada "Custos" (entre "Financeiro" e "Saúde").
+  - `/admin/crons` lista o novo job `cost_snapshot` com label
+    "Snapshot diário de custos por provider" e cadência "diário
+    (06:00 UTC ≈ 03:00 BRT)".
+  - `vercel.json` registra função (`maxDuration: 60`) + cron
+    schedule `0 6 * * *`.
+  - Tipo `CronJob` em `src/lib/cron-runs.ts` extendido.
+
+**Testes (Vitest):** 44 testes novos em `src/lib/cost-snapshots.test.ts`
+cobrindo formatação BRL, helpers de data/mês, estimadores Asaas/WA/
+Daily, detector de anomalia em todos os edge cases (série vazia,
+baseline zero, ratio infinito, factor customizado, gating absoluto).
+Total da suite: **1695 passes (84 arquivos)**.
+
+**Verificação:** TSC clean, ESLint clean, Vitest 1695/1695,
+`next build` clean.
+
+**Resolve audit finding [19.1 🟠 ALTO].**
+
+**Trade-offs documentados em D-096:**
+- Não tracking de billing real (decisão consciente — ROI baixo
+  pra operador solo).
+- Sub-contagem possível em provedores que cobram em outras unidades
+  (Daily cobra por participante-minuto; modelamos por
+  consulta-minuto).
+- Sem alertas proativos (Slack/WA) — depende de PR-043 (drain
+  externo de logger).
+
+**Próximo:** PR-072-B (farmácias parceiras) ou PR-077-B (submeter os
+5 templates novos na Meta) — ambos requerem input externo (parceria
+comercial / cadastro Meta), portanto bloqueados em operator-input.
+Recomendação: aguardar feedback do operador antes de seguir.
+
+---
+
 ## 2026-04-28 · Scheduling multi-médica em `/agendar` (PR-046 · D-095) · IA
 
 **Por quê:** finding [12.1 🟠 ALTO] do audit indicava que

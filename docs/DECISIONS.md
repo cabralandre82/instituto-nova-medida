@@ -5,6 +5,105 @@
 
 ---
 
+## D-096 · Cost snapshots + dashboard `/admin/custos` (PR-045) · 2026-04-28
+
+**Contexto.** Audit [19.1 🟠 ALTO] cobrava observabilidade de despesas
+externas. Operador solo só descobria fatura no fim do mês — sem early-
+warning de drift, sem detecção de pico (campanha viral, bug em loop,
+ataque de API), sem capacidade de correlacionar custo ↔ feature.
+
+**Trade-off considerado.** Três caminhos:
+
+1. **Bater nas APIs de billing dos providers.** Asaas, Daily, Meta,
+   Vercel, Supabase — cada um com auth, schema, rate-limit, custo
+   próprios. ~5 dias de trabalho + manutenção contínua. Operador solo
+   não tem ROI.
+2. **Importar fatura mensal em PDF/CSV.** Forensic preciso, mas tardio
+   (chega 30+ dias depois). Não atende caso de uso "alertar quando
+   custo dobrar hoje".
+3. **Proxy via uso interno × rate configurável (escolhido).** Conta
+   eventos no nosso DB (mensagens enviadas, transações criadas, salas
+   usadas) e multiplica por rate fixa em env var. Estimativa, não
+   fatura — mas detecta variações em D+1. Operador ajusta rate quando
+   fatura real chegar.
+
+**Decisão.** PR-045 entrega o caminho 3:
+
+- **Migration `cost_snapshots`** — 1 row por (date, provider). 5
+  providers cobertos: `asaas`, `whatsapp`, `daily`, `vercel`,
+  `supabase`. Idempotente em `(snapshot_date, provider)`.
+- **Cron diário `cost_snapshot`** (06:00 UTC ≈ 03:00 BRT) computa o
+  snapshot do **dia anterior** completo — dia anterior é fechado, sem
+  parcial. Backfill via `?date=YYYY-MM-DD`.
+- **Lib `src/lib/cost-rates.ts`** — rates configuráveis em env com
+  defaults sensatos (PR-043 conecta drain externo para alertar quando
+  rate desviar). Cada rate é lida _no momento_ do compute (sem cache
+  em module scope), assim alterar a env não exige redeploy.
+- **Lib `src/lib/cost-snapshots.ts`** — pure helpers (estimateXxx,
+  centsToBRL, dailyShareOfMonthly, anomaly detector) + 3 orchestrators
+  (computeDailySnapshot, upsertSnapshots, loadCostDashboard). Erros
+  parciais (provider X falhou contar) viram `metadata.error_message`
+  daquele provider — não derrubam os outros.
+- **Dashboard `/admin/custos`** server component:
+  - Resumo do mês: corrente, anterior, delta %, picos detectados.
+  - Rollup por provider com sparkline 30d.
+  - Série diária total agregada (SVG inline, sem chart lib).
+  - Card de rates atuais com nome de env var pra cada uma — operador
+    troca direto no Vercel sem precisar consultar código.
+
+**Modelo de estimativa por provider.**
+
+| Provider | Proxy de uso | Rate (default) |
+|----------|--------------|----------------|
+| WhatsApp | `appointment_notifications.sent_at` + `doctor_notifications.sent_at` + `on_demand_request_dispatches.dispatched_at WHERE dispatch_status='sent'` | R$ 0,10/msg |
+| Asaas | `payments WHERE status IN ('RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH')` × (R$ 0,99 fixo + 2,5% gross) | conforme tabela |
+| Daily.co | `appointments.scheduled_at WHERE status='completed'` × `consultation_minutes` | R$ 0,04/min |
+| Vercel | rateio de `VERCEL_MONTHLY_CENTS` por dias do mês | R$ 100/mês |
+| Supabase | rateio de `SUPABASE_MONTHLY_CENTS` por dias do mês | R$ 125/mês |
+
+**Detecção de anomalia.** `detectCostAnomaly` compara o último ponto
+da série com a média móvel dos N anteriores. Anomalia = `latest > 2×
+baseline AND latest > minCentsTrigger` (default 100 centavos = R$ 1).
+O guard de valor absoluto evita falso positivo "0 → 5 cents = ratio
+∞" em providers de uso baixo. UI marca anomalias em terracota e cita
+provider no card "Picos detectados" — operador clica e investiga.
+
+**Idempotência.** UPSERT ON CONFLICT (snapshot_date, provider). Re-
+runs no mesmo dia atualizam `units`, `estimated_cents`, `metadata` —
+trigger DB atualiza `computed_at`. Permite backfill via `?date=` sem
+duplicar linhas.
+
+**O que NÃO está coberto.**
+
+- Tracking de billing real (caminho 1) — fica como melhoria opcional
+  quando operador notar drift consistente.
+- Alertas proativos (Slack/WA) — espera PR-043 (drain externo).
+- Custos compostos (ex.: 1 consulta = msg WA + transação Asaas + sala
+  Daily). UI mostra agregado por provider, não custo unitário por
+  consulta. Pode vir em PR-045-B se houver demanda.
+- Provider novos (Memed, BACEN PIX, etc.) precisam de migration
+  específica (CHECK constraint em `provider`).
+
+**Posição na grade de crons.** 06:00 UTC. Espaçado dos jobs de
+01-04h (recalc earnings, retention, payouts) pra evitar contenção
+de DB durante janelas operacionais brasileiras (03:00 BRT).
+
+**Riscos.**
+
+- Drift estimativa-vs-fatura ±20% é normal (FX, IOF, plano comercial).
+  UI tem disclaimer no rodapé. Quando fatura chegar, operador ajusta
+  env e próximo snapshot reflete.
+- Sub-contagem possível pra providers que cobram em outra unidade
+  (ex.: Daily cobra por participante-minuto; modelamos só
+  consulta-minuto). Conservador, alinhado com filosofia "estimativa
+  proxima, não fatura exata".
+- Tabela cresce devagar (5 providers × 365 dias = 1825 rows/ano). Sem
+  cron de purge — sweep manual via SQL Studio se incomodar em 5+ anos.
+
+**Resolve audit finding [19.1 🟠 ALTO].**
+
+---
+
 ## D-095 · Scheduling multi-médica em `/agendar` (PR-046) · 2026-04-28
 
 **Contexto.** Audit [12.1 🟠 ALTO] sinalizava que `getPrimaryDoctor()`

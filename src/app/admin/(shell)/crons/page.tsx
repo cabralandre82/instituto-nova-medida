@@ -48,6 +48,7 @@ const EXPECTED_JOBS = [
   "doctor_on_call_reminder",
   "expire_on_demand_requests",
   "monitor_on_call",
+  "cost_snapshot",
 ] as const;
 
 const JOB_LABELS: Record<string, string> = {
@@ -65,6 +66,7 @@ const JOB_LABELS: Record<string, string> = {
   doctor_on_call_reminder: "Aviso T-15min antes de plantão",
   expire_on_demand_requests: "Expirar requests on-demand sem resposta",
   monitor_on_call: "Plantão programado: sample + settle",
+  cost_snapshot: "Snapshot diário de custos por provider",
 };
 
 /**
@@ -87,6 +89,7 @@ const JOB_CADENCE: Record<string, string> = {
   doctor_on_call_reminder: "a cada 1 min",
   expire_on_demand_requests: "a cada 1 min",
   monitor_on_call: "a cada 5 min",
+  cost_snapshot: "diário (06:00 UTC ≈ 03:00 BRT)",
 };
 
 const WINDOW_DAYS = 30;

@@ -1812,12 +1812,13 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
 
 ## Lente 19 — Governança de custo
 
-### [19.1 🟠 ALTO] Sem dashboard de custo unificado — admin solo descobre no cartão de crédito
+### [19.1 🟠 ALTO] ~~Sem dashboard de custo unificado — admin solo descobre no cartão de crédito~~ — ✅ **RESOLVED em PR-045 · D-096 (2026-04-28)**
 
 - **Onde:** ausência.
 - **Achado:** Vercel + Supabase + Asaas + Daily + WhatsApp Meta = 5 contas separadas. Cada uma cobra por invocação/GB/mensagem. Sem tela unificada, admin solo tem surpresa mensal.
 - **Correção:** tabela `cost_snapshots (service, month, metric, value)` preenchida por cron que chama APIs de billing (onde houver) ou manual. Dashboard em `/admin/financeiro/custos`.
 - **Observador:** CFO, admin solo.
+- **Resolução (PR-045 · D-096):** Migration `cost_snapshots` (5 providers, 1 row/dia/provider, idempotente). Cron diário `cost_snapshot` (06:00 UTC) computa snapshot do dia anterior contando uso interno × rate em env (`WA_COST_CENTS_PER_MESSAGE`, `ASAAS_FEE_FIXED_CENTS`, `ASAAS_FEE_PCT_BPS`, `DAILY_COST_CENTS_PER_MINUTE`, `VERCEL_MONTHLY_CENTS`, `SUPABASE_MONTHLY_CENTS`). Dashboard `/admin/custos` com rollup por provider, sparkline 30d SVG inline, comparação mês-a-mês, detector de anomalia (latest > 2× baseline ∧ > R$ 1). Disclaimer ±20% drift normal — não substitui fatura, é early-warning. Integrações com APIs de billing reais ficam como follow-up reativo (PR-045-B/C) com ROI baixo pra solo. 44 testes unitários novos.
 
 ### [19.2 🟡 MÉDIO] Daily.co rooms possivelmente não são deletados pós-consulta
 

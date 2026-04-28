@@ -18,6 +18,7 @@ const NAV = [
   { href: "/admin/lgpd-requests", label: "LGPD" },
   { href: "/admin/notifications", label: "Notificações" },
   { href: "/admin/financeiro", label: "Financeiro" },
+  { href: "/admin/custos", label: "Custos" },
   { href: "/admin/health", label: "Saúde" },
   { href: "/admin/observabilidade", label: "Observabilidade" },
   { href: "/admin/crons", label: "Crons" },
