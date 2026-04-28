@@ -2,7 +2,7 @@
 
 Lista consolidada de PRs identificados na auditoria (`docs/AUDIT-FINDINGS.md`) que **não podem ser abertos só pelo engenheiro**: dependem de dados reais, decisões do operador ou acesso externo.
 
-Atualizado em: **2026-04-28** (pós-PR-045 / D-096 — Cost snapshots + dashboard `/admin/custos`: migration `cost_snapshots` com 1 row por (date, provider) e 5 providers cobertos (asaas/whatsapp/daily/vercel/supabase), idempotente em ON CONFLICT (snapshot_date, provider); cron diário `cost_snapshot` (06:00 UTC ≈ 03:00 BRT) computando o dia anterior completo com proxy via uso interno × rates configuráveis em env (`WA_COST_CENTS_PER_MESSAGE`, `ASAAS_FEE_FIXED_CENTS`, `ASAAS_FEE_PCT_BPS`, `DAILY_COST_CENTS_PER_MINUTE`, `VERCEL_MONTHLY_CENTS`, `SUPABASE_MONTHLY_CENTS`); lib pura `cost-snapshots.ts` com 11 helpers (centsToBRL com NBSP normalizado, utcDateStringOf/Month, dateRangeForUtcDay, daysInUtcMonth, previousMonth, monthRangeUtc, dailyShareOfMonthly, estimateAsaasCostCents/WaCostCents/DailyCostCents, detectCostAnomaly com gating absoluto minCentsTrigger=100 evitando "0→5cents=∞ ratio") + 3 orquestradores (computeDailySnapshot fail-soft por provider, upsertSnapshots, loadCostDashboard); page `/admin/custos` com 4 SummaryCards (mês corrente/anterior/delta%/picos), tabela rollup com sparkline SVG inline 30d por provider, gráfico série diária total SVG inline, card de rates em uso com nome de env var pra cada uma, disclaimer ±20% drift normal; entrada "Custos" no AdminNav (entre "Financeiro" e "Saúde"); cron registrado em vercel.json + CronJob union + EXPECTED_JOBS de /admin/crons. 44 testes novos: centsToBRL × 5, utc helpers × 7, dateRange × 2, daysInUtcMonth × 5, previousMonth × 3, monthRangeUtc × 2, dailyShareOfMonthly × 4, estimateAsaasCostCents × 5, estimateWaCostCents × 3, estimateDailyCostCents × 3, detectCostAnomaly × 8 (cobre série curta, baseline=0, ratio infinito, factor custom, gating absoluto). Suíte 1651 → 1695. TSC + ESLint + `next build` clean. **Trade-offs em D-096**: estimativas via env rates (não billing real, ROI baixo pra solo); sub-contagem possível em providers com unidade composta (Daily cobra por participante-minuto modelado como consulta-minuto); sem alerta proativo (depende de PR-043 drain externo). Audit [19.1 🟠 ALTO] resolvido. Revisão anterior: PR-046 / D-095 — Multi-médica em /agendar.
+Atualizado em: **2026-04-28** (pós-PR-048 / D-097 — Plano B (DR) por provider externo: RUNBOOK.md seção 21 com 9 sub-seções (detecção precoce + Supabase/Vercel/Asaas/Daily/Meta/Memed/multi-provider down + hábitos preventivos), mensagens-template prontas em português pra cada cenário, decisões conscientes (PIX manual bloqueado até PR-023, `INCIDENTS.md` criado no primeiro incidente real, failover automático fora de escopo, PagerDuty depende de PR-043). Audit [20.1 🟠 ALTO] resolvido. Revisão anterior: PR-045 / D-096 — Cost snapshots + dashboard `/admin/custos`: migration `cost_snapshots` com 1 row por (date, provider) e 5 providers cobertos (asaas/whatsapp/daily/vercel/supabase), idempotente em ON CONFLICT (snapshot_date, provider); cron diário `cost_snapshot` (06:00 UTC ≈ 03:00 BRT) computando o dia anterior completo com proxy via uso interno × rates configuráveis em env (`WA_COST_CENTS_PER_MESSAGE`, `ASAAS_FEE_FIXED_CENTS`, `ASAAS_FEE_PCT_BPS`, `DAILY_COST_CENTS_PER_MINUTE`, `VERCEL_MONTHLY_CENTS`, `SUPABASE_MONTHLY_CENTS`); lib pura `cost-snapshots.ts` com 11 helpers (centsToBRL com NBSP normalizado, utcDateStringOf/Month, dateRangeForUtcDay, daysInUtcMonth, previousMonth, monthRangeUtc, dailyShareOfMonthly, estimateAsaasCostCents/WaCostCents/DailyCostCents, detectCostAnomaly com gating absoluto minCentsTrigger=100 evitando "0→5cents=∞ ratio") + 3 orquestradores (computeDailySnapshot fail-soft por provider, upsertSnapshots, loadCostDashboard); page `/admin/custos` com 4 SummaryCards (mês corrente/anterior/delta%/picos), tabela rollup com sparkline SVG inline 30d por provider, gráfico série diária total SVG inline, card de rates em uso com nome de env var pra cada uma, disclaimer ±20% drift normal; entrada "Custos" no AdminNav (entre "Financeiro" e "Saúde"); cron registrado em vercel.json + CronJob union + EXPECTED_JOBS de /admin/crons. 44 testes novos: centsToBRL × 5, utc helpers × 7, dateRange × 2, daysInUtcMonth × 5, previousMonth × 3, monthRangeUtc × 2, dailyShareOfMonthly × 4, estimateAsaasCostCents × 5, estimateWaCostCents × 3, estimateDailyCostCents × 3, detectCostAnomaly × 8 (cobre série curta, baseline=0, ratio infinito, factor custom, gating absoluto). Suíte 1651 → 1695. TSC + ESLint + `next build` clean. **Trade-offs em D-096**: estimativas via env rates (não billing real, ROI baixo pra solo); sub-contagem possível em providers com unidade composta (Daily cobra por participante-minuto modelado como consulta-minuto); sem alerta proativo (depende de PR-043 drain externo). Audit [19.1 🟠 ALTO] resolvido. Revisão anterior: PR-046 / D-095 — Multi-médica em /agendar.
 
 ---
 
@@ -72,6 +72,25 @@ Endereço físico da sede (rua, número, bairro, cidade, UF, CEP): _____________
   - Operador prefere TOTP (Google Authenticator / Authy) ou Passkey (WebAuthn)?
   - Telefone secundário para recovery (caso perca device)?
 - Supabase já suporta TOTP nativo (já está em `config.toml` com `enroll_enabled=true`), falta só forçar o fluxo obrigatório para role=admin.
+
+### PR-048 · Plano B (DR) por provider externo (PR-048 · D-097)
+
+- **Status:** ✅ Concluído em 2026-04-28. Audit [20.1 🟠 ALTO]
+  resolvido.
+- **Entregue:**
+  - `docs/RUNBOOK.md` seção 21 com 9 sub-seções: detecção precoce,
+    Supabase/Vercel/Asaas/Daily/Meta/Memed/multi-provider down,
+    hábitos preventivos.
+  - Mensagens-template prontas em português natural pra cada cenário.
+  - D-097 documenta trade-offs (sem failover automático, sem
+    `INCIDENTS.md` vazio no repo).
+- **Follow-ups reativos:**
+  - **`docs/INCIDENTS.md`** — criar no primeiro incidente real
+    (formato livre, 5 linhas/entry). Não criamos vazio agora.
+  - **Releitura mensal** da seção 21 deve virar hábito — operador
+    pode delegar pra um lembrete recorrente no calendário.
+  - **PagerDuty / Opsgenie** integration espera PR-043 (drain
+    externo do logger).
 
 ### PR-045 · Cost snapshots + dashboard `/admin/custos` (PR-045 · D-096)
 

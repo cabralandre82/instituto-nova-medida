@@ -1843,12 +1843,13 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
 
 ## Lente 20 — Continuidade de negócio / DR
 
-### [20.1 🟠 ALTO] Sem runbook de DR ("Supabase indisponível" / "Vercel indisponível")
+### [20.1 🟠 ALTO] ~~Sem runbook de DR ("Supabase indisponível" / "Vercel indisponível")~~ — ✅ **RESOLVED em PR-048 · D-097 (2026-04-28)**
 
 - **Onde:** `docs/RUNBOOK.md` (criado em D-045 · 3.G, não coberto DR).
 - **Achado:** admin solo sem playbook pra incidente em SaaS externos.
 - **Correção:** adicionar seção "Plano B" no runbook: (a) Supabase down: comunicação proativa paciente/médica via WA; (b) Vercel down: Vercel status page + suporte; (c) Asaas down: pausar cobranças + informar; (d) Daily down: remarcar consultas em andamento.
 - **Observador:** SRE, admin solo.
+- **Resolução (PR-048 · D-097):** RUNBOOK.md ganhou seção 21 com 9 sub-seções: 21.0 detecção precoce (5 sinais inclusive status pages bookmarkadas), 21.1 Supabase down 🔴 BLOQUEANTE, 21.2 Vercel down 🟠 (webhook retry mitiga), 21.3 Asaas down 🟠 (PIX manual bloqueado até PR-023), 21.4 Daily down 🟡 (fallback WA video/Meet), 21.5 Meta WhatsApp down 🟡 (fallback SMS/e-mail + correlação com PR-045 cost-snapshots quota), 21.6 Memed down 🟡 (PDF ponte), 21.7 multi-provider down 🔴 (improviso prescrito), 21.8 hábitos preventivos diários/semanais/mensais com export defensivo CSV. Cada subseção tem T+0 ações (5 min), mensagem-template em português pronta para WhatsApp/e-mail, recovery e pós-incidente. Decisão consciente: NÃO criar `INCIDENTS.md` vazio agora — operador cria no primeiro incidente real.
 
 ### [20.2 🟡 MÉDIO] Backup das buckets de storage (payouts-proofs, billing-documents) sem política explícita
 

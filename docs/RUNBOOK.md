@@ -43,6 +43,7 @@
 - [18 · Circuit breaker aberto (PR-050)](#18--circuit-breaker-aberto-pr-050)
 - [19 · Soft delete de registro CFM (PR-066)](#19--soft-delete-de-registro-cfm-pr-066)
 - [20 · Appointment `pending_payment` "fantasma" (PR-071)](#20--appointment-pending_payment-fantasma-pr-071)
+- [21 · Plano B — DR por provider externo (PR-048)](#21--plano-b--dr-por-provider-externo-pr-048)
 
 ---
 
@@ -924,6 +925,372 @@ estar sendo criado. Se o watchdog dispara:
 appointments mostra "Fale com a equipe pelo WhatsApp" com mensagem
 pré-preenchida (`whatsappSupportUrl` da lib `contact.ts`). Responder
 o WA dele rapidamente destrava o fluxo humano.
+
+---
+
+## 21 · Plano B — DR por provider externo (PR-048)
+
+> **Filosofia.** Você é operador solo. Quando um provider externo cair,
+> o objetivo NÃO é "subir um sistema espelho" — é **(a) detectar
+> rápido**, **(b) comunicar proativamente** com paciente/médica antes
+> de virar reclamação, **(c) não tomar decisão financeira irreversível**
+> enquanto não puder validar, e **(d) registrar** pra reembolso /
+> auditoria depois. Cada subseção tem um T+0 (primeiros 5 min), uma
+> mensagem-template pra paciente/médica, e quando voltar a operar.
+
+### 21.0 · Como detectar antes do paciente reclamar
+
+1. **`/admin/health`** — mostra status agregado (Asaas, Daily, WhatsApp,
+   Memed). Se entrar em `error`, vai pra subseção do provider.
+2. **`/admin/crons`** — sparklines. Pico de `error` em
+   `daily-reconcile`, `wa-reminders` ou `monitor-on-call` correlacionado
+   no tempo = provider externo travado.
+3. **`/admin/errors`** janela 1h — `source=external_call` agrupado por
+   provider. 5+ falhas no mesmo provider em 5 min = incidente.
+4. **Circuit breaker** (D-061 / PR-050) abriu sozinho? Veja seção 18 —
+   crons já estão skipando, paciente já está sendo bloqueado de criar
+   coisa que dependeria do provider. Você só precisa comunicar.
+5. **Status pages dos providers** (bookmark no navegador, abrir
+   antes de qualquer ação):
+   - Vercel: <https://www.vercel-status.com/>
+   - Supabase: <https://status.supabase.com/>
+   - Asaas: <https://status.asaas.com/>
+   - Daily.co: <https://status.daily.co/>
+   - Meta WhatsApp: <https://metastatus.com/whatsapp>
+   - Memed: notificação por e-mail / contato direto.
+
+### 21.1 · Supabase down (DB + Auth + Storage)
+
+**Sintoma.** `/admin/health` 500 imediato, `/admin/errors` espelhando
+`PGRST` ou `connection refused` em massa. **Site inteiro** cai (até
+`/admin/login` quebra). Crons que tocam DB falham em 5XX.
+
+**Severidade.** 🔴 BLOQUEANTE. Não há plataforma sem Supabase.
+
+**T+0 — primeiros 5 min:**
+
+1. Confirme em <https://status.supabase.com/> antes de qualquer ação.
+   Se for incidente do provedor, NÃO tente "consertar" código.
+2. Tire screenshot do status page (forensic, vai ajudar reembolso /
+   relatório futuro).
+3. Mande mensagem manual no seu próprio WhatsApp pessoal pra
+   `+55 21 99000-9999` (ou número de suporte público) avisando que
+   pode ter atraso temporário. **Não use template Meta** — Meta vai
+   tentar enviar via Cloud API, que vai bater no nosso webhook quando
+   subir, atrapalhando reconciliação.
+4. **Não** dispare PIX manual de payout pendente nesse momento
+   (subseção 5 do runbook) — sem `/admin/payouts` confirmando, você
+   pode pagar duas vezes quando o sistema voltar.
+
+**Comunicação proativa (mensagem pronta):**
+
+```text
+Oi! Aqui é a equipe do Instituto Nova Medida.
+Tivemos uma instabilidade técnica no nosso provedor de banco de
+dados ({hh:mm} a {hh:mm} BRT). Sua consulta / pedido está
+preservado — quando o sistema voltar, tudo continua de onde parou.
+Se você tinha consulta marcada nesse intervalo, vamos remarcar
+sem custo. Obrigado pela paciência. 🙏
+```
+
+Manda esse texto via WhatsApp normal (não-template) pra cada paciente
+que tinha consulta nas 4 horas seguintes ao incidente — se a janela
+for grande, prioridade quem tinha consulta começando em até 1h.
+
+**Recovery (T+X):**
+
+1. Quando status page virar verde, abra `/admin/health?ping=1` pra
+   confirmar conectividade ponta-a-ponta.
+2. `/admin/crons` — re-rodar manualmente os crons que falharam
+   durante a janela: `daily-reconcile`, `wa-reminders`,
+   `monitor-on-call`, `expire-on-demand-requests`. Use o `?dryRun=1`
+   primeiro pra ver o backlog.
+3. `/admin/errors?source=cron&since=...` — confira se tem cron com
+   payload `error_message` desde antes do incidente que **não**
+   correlacione com Supabase. Esse seria bug nosso, não Supabase.
+
+**Pós-incidente:**
+
+1. Pedir crédito/reembolso ao Supabase via support ticket — comprovar
+   indisponibilidade com status page screenshot. Pro plan tem SLA
+   99.9% (≈ 43min/mês).
+2. Registrar incidente em `docs/INCIDENTS.md` (criar arquivo se
+   não existir, formato livre — data, duração, impacto, ação).
+
+### 21.2 · Vercel down (frontend + crons + API routes)
+
+**Sintoma.** Site público (`/`) e admin (`/admin`) retornam 5XX. Mas
+**Supabase ainda funciona** (DB intacto, Auth funcionando). Webhooks
+externos (Asaas, Daily) **falham** porque caem no Vercel — provider
+externo vai retentar conforme política dele.
+
+**Severidade.** 🟠 SÉRIO mas mitigável. Webhook retry salva a maior
+parte dos eventos.
+
+**T+0:**
+
+1. Confirme em <https://www.vercel-status.com/>. Se for incidente do
+   provedor, screenshot.
+2. Verifique no Asaas dashboard se tem webhook em "falhou" — Asaas
+   retenta por 5 dias com backoff (D-040). Não precisa intervir.
+3. **Não** dispare nenhum cron manualmente — eles vão re-rodar
+   automaticamente quando Vercel voltar (Vercel Cron faz best-effort
+   replay até cada `* * * * *` próximo).
+4. Daily.co webhook tem retry de 24h — também fica seguro.
+5. Meta WhatsApp **NÃO retenta** webhook (única exceção). Mensagens
+   recebidas durante o incidente serão perdidas — comunique no
+   próximo contato.
+
+**Comunicação proativa.** Geralmente desnecessária — Vercel costuma
+voltar em &lt;30 min. Só comunique se janela &gt; 1h E houver consulta
+on-demand pendente (tinha gente esperando médica).
+
+**Recovery:**
+
+1. `/admin/health` deve voltar a `ok`. Se não, Vercel subiu mas com
+   alguma function não-deployada — força redeploy via Vercel UI ou
+   `vercel --prod` (CLI).
+2. `/admin/errors?since=...` — confira os erros 5XX agrupados durante
+   a janela. Geralmente são auto-replays bem-sucedidos.
+3. Cron pular execução durante janela é normal — `/admin/crons`
+   mostra como `skipped` ou simplesmente sem entry.
+
+### 21.3 · Asaas down (gateway de pagamento)
+
+**Sintoma.** `/admin/errors` mostra `circuit_breaker_open` em
+`asaas`. Cobrança nova falha no checkout (`/api/asaas/...` 5XX).
+Webhook recebido fica em `asaas_events` com status `pending` mas o
+processador não consegue confirmar status no provider (D-073).
+
+**Severidade.** 🟠 SÉRIO. Receita do dia para. Mas operação clínica
+(consultas, prescrições, fulfillment já pago) continua.
+
+**T+0:**
+
+1. Confirme em <https://status.asaas.com/>. Status do circuit breaker
+   em `/admin/health` — se `OPEN` por &gt; 30 min, probably real
+   incident.
+2. Pacientes em checkout ativo: vão ver erro genérico. Não tem o que
+   fazer pelo lado deles, sistema vai retentar quando breaker fechar.
+3. **Não desligue** `LEGACY_PURCHASE_ENABLED` (já está `false`,
+   manter). Paciente em fluxo gratuito (consulta) **continua
+   passando** — sem cobrança nessa etapa.
+4. Webhooks recebidos antes do incidente que estavam `pending` ficam
+   intactos — processados quando breaker fechar (idempotência D-073).
+
+**Comunicação proativa.** Para pacientes que tinham acabado de
+aceitar plano (`/paciente/oferta/[id]/aceitar`) e estão na tela de
+pagamento:
+
+```text
+Oi! Aqui é a equipe do Instituto Nova Medida.
+Tivemos instabilidade no nosso parceiro de pagamento. Sua aceitação
+do plano está registrada — você não precisa fazer nada de novo.
+Vamos te avisar daqui a algumas horas com o link de pagamento
+funcionando. Se preferir, pode usar PIX manual pra
+{NOSSA_CHAVE_PIX} (chave: CNPJ {OPERADOR_CNPJ}); manda o
+comprovante pelo WhatsApp e a gente confirma na hora. 🙏
+```
+
+(Substitua `{NOSSA_CHAVE_PIX}` e `{OPERADOR_CNPJ}` pelos valores reais
+quando PR-023 for preenchido. Antes de PR-023 ficar pronto, **NÃO
+faça PIX manual** — risco fiscal alto sem CNPJ formal.)
+
+**Recovery:**
+
+1. Cron `daily-reconcile` (rodando 5 min) automaticamente reaplica
+   webhooks `pending` quando breaker fecha (D-073). Não toque.
+2. `/admin/financeiro` — após 30 min, conferir se `payments` em
+   `PENDING` voltaram ao estado correto.
+3. Se algum pagamento PIX manual foi recebido durante a janela:
+   abrir caso individual no `/admin/pacientes/[id]` → "Forçar
+   marcar como pago" (D-068) — tem UI de auditoria.
+
+### 21.4 · Daily.co down (vídeo)
+
+**Sintoma.** `/admin/errors` mostra falhas em `daily-room-create`.
+Sala de consulta abre mas não conecta. Webhook Daily não entrega
+`recording.ready`.
+
+**Severidade.** 🟡 MÉDIO. Consultas em andamento são impactadas, mas
+podem migrar pra outro canal de vídeo (WhatsApp video, Google Meet)
+em emergência.
+
+**T+0:**
+
+1. Confirme em <https://status.daily.co/>.
+2. Consultas que estão **acontecendo agora** (status `started`):
+   olhar em `/admin/appointments?status=started` — pegue o telefone
+   de cada paciente + médica e mande o link alternativo.
+
+**Comunicação proativa (para consulta em andamento):**
+
+```text
+Oi {nome}! O nosso sistema de vídeo teve uma instabilidade.
+Sua consulta com a {medica} continua valendo, vamos reabrir agora
+em outro canal. A médica vai te chamar em vídeo no próprio
+WhatsApp em até 5 minutos. Se preferir Google Meet, manda OK aqui.
+```
+
+3. Médica acessa `/medico/consultas/[id]` para confirmar o paciente
+   sem que isso bloqueie a consulta. Caso a sala não funcione, ela
+   liga via WhatsApp video direto pro paciente.
+
+**Recovery:**
+
+1. Quando Daily voltar, recording (gravação) das consultas perdidas
+   **não vai ter sido feita**. Documentar em
+   `appointment_state_transition_log` que consulta foi via canal
+   alternativo (consentimento do paciente continua válido pela
+   `recording_consent_at` do termo, mas a gravação física não existe).
+2. `/admin/errors?since=...&source=daily` — limpar / resolver
+   pendentes.
+3. Cron `auto-deliver-fulfillments` segue normalmente (não depende
+   de Daily).
+
+### 21.5 · WhatsApp Cloud API (Meta) down
+
+**Sintoma.** `/admin/errors` mostra falhas em `wa-send` em massa.
+`appointment_notifications.status='failed'` cresce. Cron
+`wa-reminders` falha.
+
+**Severidade.** 🟡 MÉDIO. Comunicação automatizada para — paciente
+não recebe lembrete T-1h, médica não recebe T-15min de plantão.
+Risco operacional: aumenta no-show e atraso.
+
+**T+0:**
+
+1. Confirme em <https://metastatus.com/whatsapp>.
+2. `/admin/notifications?status=failed&since=now-30min` — tem lista
+   completa do que falhou. Pra cada uma, decidir:
+   - **Lembrete T-1h ou T-15min** — vale ligar manualmente
+     (telefone no `customers.phone`).
+   - **Confirmação de aceite de plano** — registra reenvio quando
+     Meta voltar; cron retenta automaticamente.
+   - **Magic link** — paciente vai pedir reenvio (seção 16).
+3. Paciente que tem consulta em &lt; 1h e não recebeu lembrete: ligar
+   por voz ou mandar mensagem manual pelo WhatsApp **pessoal** do
+   operador (não conta limit Meta). Avisar que sistema teve
+   instabilidade e confirmar presença.
+
+**Comunicação proativa.** Não cabível por WhatsApp (justamente o canal
+que está fora). Use SMS via celular pessoal ou e-mail
+(`customers.email`) pros casos críticos:
+
+```text
+Assunto: Sua consulta às {hh:mm} continua marcada
+Oi {nome}, aqui é o Instituto Nova Medida.
+Houve uma instabilidade no WhatsApp e o lembrete da sua consulta
+de hoje pode não ter chegado. Sua consulta com a {medica} está
+marcada para {hh:mm}, link da sala: {url_da_consulta}.
+Por favor, confirme respondendo este e-mail.
+```
+
+**Recovery:**
+
+1. Cron `wa-reminders` (1/min) auto-retoma. `/admin/crons` deve ver
+   sucessos voltando.
+2. Mensagens com status `failed` há &gt; 1h — não retentar
+   automaticamente (já passou da janela útil). Marcar como
+   `superseded` ou simplesmente deixar para auditoria.
+3. Templates Meta podem ter sido reprovados durante o incidente —
+   cheque BM (`business.facebook.com`) → WhatsApp Manager → Templates.
+
+**Quota mensal.** Meta Cloud API permite 1000 conversas iniciadas
+por business por mês no tier free. Se o volume estourar (audit
+[19.3]), o cron `cost-snapshot` (PR-045) vai mostrar mensagens/dia
+acima da média; `/admin/custos` sinaliza anomalia.
+
+### 21.6 · Memed down (prescrição digital)
+
+**Sintoma.** Médica não consegue gerar prescrição digital
+(`/medico/consultas/[id]` → botão Memed retorna erro). Receita
+fica em status `not_issued`.
+
+**Severidade.** 🟡 MÉDIO. Bloqueia conclusão da consulta. Paciente
+não pode adquirir medicação via plano (sem receita não há
+fulfillment).
+
+**T+0:**
+
+1. Memed não tem status page público. Tente
+   <https://api.memed.com.br/v1/health> — se 5XX, é provider down.
+2. Médica fala com paciente: "Vou prescrever via PDF tradicional
+   por enquanto, te envio por WhatsApp; quando a Memed voltar,
+   reemito a versão digital."
+3. PDF manual: receita carimbo + assinatura + data + CRM. Médica
+   anexa ao `appointment_notes` ou faz upload em
+   `appointment_attachments` (path `/medico/consultas/[id]/anexos`).
+
+**Comunicação proativa.** Não necessária — incidente é entre médica
+e paciente que está na consulta. Médica conduz.
+
+**Recovery:**
+
+1. Médica reemite prescrição na Memed quando voltar. Cola URL no
+   `appointment.memed_prescription_url`. Versão PDF manual fica como
+   backup auditado.
+2. Fulfillment processo segue o caminho normal — paciente paga,
+   farmácia recebe a receita Memed (digital).
+
+### 21.7 · Multi-provider down (incidente regional / cloud)
+
+**Sintoma.** Vários providers caem ao mesmo tempo (ex.: AWS us-east-1
+fora → Vercel + Supabase comprometidos simultaneamente).
+
+**Severidade.** 🔴 BLOQUEANTE.
+
+**T+0:**
+
+1. Não tente debug. Foque comunicação.
+2. Mensagem padrão pra **todo** paciente com consulta nas próximas
+   24h (lista exportável de `/admin/appointments?status=scheduled` —
+   se admin estiver fora também, use export anterior do dia em
+   `/admin/exports/` — operador deve baixar diariamente como hábito):
+
+```text
+Oi {nome}! Tivemos uma instabilidade técnica de grande proporção
+({hh:mm}–{hh:mm} BRT). Estamos remarcando todas as consultas de
+hoje sem custo. Vou te avisar pessoalmente quando o sistema voltar
+pra confirmar novo horário. Obrigado pela paciência. 🙏
+```
+
+3. **Pause** dispatch de qualquer cobrança (Asaas) até confirmar
+   integridade. Operador SQL: `update payments set status='ON_HOLD'
+   where status='PENDING' and created_at >= now() - interval '6h';`
+   (executar **apenas** quando Supabase voltar). Marca operacional
+   pra revisar caso-a-caso depois.
+
+**Recovery.** Caso a caso. Cada paciente precisa ter contato humano
+antes de qualquer movimento financeiro automático.
+
+### 21.8 · Hábitos preventivos (operador solo)
+
+1. **Diariamente:**
+   - Bookmark no navegador com as 5 status pages — abre antes do
+     `/admin` da manhã. 30 segundos.
+   - `/admin/crons` (sparkline 7d) — bate o olho, anomalias entram
+     no radar mental.
+
+2. **Semanalmente:**
+   - Exportar `/admin/appointments?status=scheduled&horizon=7d` em
+     CSV — guarda local. Se Supabase cair, você ainda tem a lista.
+   - `/admin/custos` — ver tendência de cada provider.
+
+3. **Mensalmente:**
+   - Ler este §21 de novo. Se algum provider mudou de plano /
+     cobrança / SLA, atualizar rates em env (cost-snapshots PR-045).
+   - Conferir que `ADMIN_DIGEST_PHONE` ainda é o seu WhatsApp atual
+     (esquecer disso é o erro mais comum).
+   - Testar ping em `/admin/health?ping=1` — sempre que o operador
+     voltar de viagem ou trocar device.
+
+4. **Sempre que houver incidente:**
+   - Registrar em `docs/INCIDENTS.md` (criar se não existir):
+     data, duração, provider, impacto (paciente afetado / receita
+     perdida / consultas remarcadas), ação tomada, melhorias.
+     5 linhas bastam — agregado mensal vira input pra D-097
+     futuro.
 
 ---
 

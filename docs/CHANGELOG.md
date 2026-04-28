@@ -6,6 +6,84 @@
 
 ---
 
+## 2026-04-28 · Plano B (DR) operacional por provider externo (PR-048 · D-097) · IA
+
+**Por quê:** finding [20.1 🟠 ALTO] do audit indicava ausência de
+playbook prescritivo pra incidente em SaaS externo. RUNBOOK já tinha
+20 seções operacionais, mas nenhuma sobre "o que fazer quando
+Supabase/Vercel/Asaas/Daily/Meta cair". Operador solo no estresse
+não improvisa procedimento — precisa de checklist e de
+mensagens-template prontas.
+
+**Estratégia.** Em vez de tentar arquitetura espelho ativo-passivo
+(custo proibitivo pra solo) ou doc genérica não-acionável, escolhemos
+runbook prescritivo por provider, com hábitos preventivos.
+
+**Entregue:**
+
+- **`docs/RUNBOOK.md` seção 21** — "Plano B — DR por provider
+  externo", 9 sub-seções:
+  - **21.0 detecção precoce** — 5 sinais (`/admin/health`,
+    `/admin/crons`, `/admin/errors`, circuit breaker, status pages
+    bookmarkadas dos 5 providers).
+  - **21.1 Supabase down** 🔴 BLOQUEANTE — site inteiro cai.
+    Procedimento: confirma status page → screenshot forense → mensagem
+    manual via WhatsApp pessoal (não-template) → não dispara PIX
+    manual → recovery via re-rodar crons após retorno.
+  - **21.2 Vercel down** 🟠 — webhook retry de Asaas (5 dias) e Daily
+    (24h) mitigam; só Meta WhatsApp não retenta.
+  - **21.3 Asaas down** 🟠 — circuit breaker já bloqueia; receita
+    pausa mas operação clínica continua. PIX manual **bloqueado**
+    enquanto PR-023 não preenchido (risco fiscal).
+  - **21.4 Daily down** 🟡 — fallback WhatsApp video / Google Meet,
+    consentimento de gravação preservado mas gravação física não
+    existe (registrar em `appointment_state_transition_log`).
+  - **21.5 Meta WhatsApp down** 🟡 — fallback SMS/e-mail; cita
+    correlação com PR-045 cost-snapshots pra quota mensal.
+  - **21.6 Memed down** 🟡 — médica emite PDF tradicional como ponte,
+    reemite Memed quando voltar.
+  - **21.7 multi-provider down** 🔴 — improviso prescrito: não tente
+    debug, foque comunicação caso-a-caso, pause cobranças via
+    `update payments set status='ON_HOLD'`.
+  - **21.8 hábitos preventivos** — diário (status pages + crons),
+    semanal (export CSV defensivo de appointments scheduled, custos),
+    mensal (releitura desta seção, conferir `ADMIN_DIGEST_PHONE`),
+    sempre que houver incidente (registrar em `INCIDENTS.md`).
+
+- **Mensagens-template prontas** em português natural (sem copy
+  "rebrand" — paciente em estresse precisa clareza). Substituições
+  marcadas em `{nome}`, `{hh:mm}`, `{medica}`, etc. Operador adapta
+  na hora.
+
+- **Decisões conscientes documentadas em D-097:**
+  - PIX manual bloqueado até PR-023 (CNPJ).
+  - `INCIDENTS.md` criado no primeiro incidente real (sem ruído de
+    arquivo vazio no repo).
+  - Failover automático entre providers fora de escopo (custo vs
+    ROI desfavorável pra solo).
+  - PagerDuty / Opsgenie depende de PR-043 (drain externo do
+    logger).
+
+- **Sumário do RUNBOOK** atualizado com link pra seção 21.
+
+**Verificação:** doc-only PR. Sem código, sem testes. Suíte permanece
+1695/1695 (sem regressão).
+
+**Resolve audit finding [20.1 🟠 ALTO].**
+
+**Riscos do próprio runbook documentados em D-097:**
+- Operador não lê em momento de calma — mitigação via §21.8 hábito
+  mensal de releitura.
+- Mensagens-template envelhecem (marca, CNPJ) — atualizar quando
+  PR-023 preencher.
+- §21.7 (multi-provider down) é improviso prescrito — não há
+  substituto técnico pra "ligar pra cada paciente".
+
+**Próximo:** PR-049 — `monthly-payouts` cron batched (fecha
+[12.2 🟠 ALTO], último ALTO restante que IA pode fechar sozinha).
+
+---
+
 ## 2026-04-28 · Cost snapshots + dashboard `/admin/custos` (PR-045 · D-096) · IA
 
 **Por quê:** finding [19.1 🟠 ALTO] do audit cobrava observabilidade

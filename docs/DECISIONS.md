@@ -5,6 +5,90 @@
 
 ---
 
+## D-097 · Plano B (DR) operacional por provider externo (PR-048) · 2026-04-28
+
+**Contexto.** Audit [20.1 🟠 ALTO] cobrava playbook explícito pra
+incidente em SaaS externo. RUNBOOK.md já tinha 20 seções operacionais
+(rotina diária, fulfillment, LGPD, soft-delete, etc.) mas **nenhuma
+sobre o que fazer quando Supabase/Vercel/Asaas/Daily/Meta cair**.
+Operador solo, sem SRE de plantão, precisa de procedimento prescritivo
+pra não congelar quando vir 5XX em massa.
+
+**Trade-off considerado.** Três caminhos:
+
+1. **Sistema espelho ativo-passivo** (multi-cloud, replicação
+   bidirecional) — custo ≥ 5× operação atual, complexidade
+   altíssima, **não cabe em operador solo**. Risco de divergência
+   silenciosa entre sistemas piores que o downtime ocasional.
+2. **Documentação genérica** ("se cair, abrir ticket") — não
+   acionável. Operador no estresse não improvisa procedimento.
+3. **Runbook prescritivo por provider (escolhido)** — para cada
+   provider, T+0 (5 primeiros min), mensagem-template pronta
+   pra paciente, recovery, pós-incidente. Hábitos preventivos
+   diários/semanais/mensais. Cobre 80% dos cenários reais sem
+   inventar arquitetura nova.
+
+**Decisão.** PR-048 entrega o caminho 3:
+
+- **Seção 21 do RUNBOOK.md** ("Plano B — DR por provider externo")
+  com 9 sub-seções:
+  - 21.0 — como detectar antes do paciente reclamar (5 sinais).
+  - 21.1 — Supabase down (🔴 BLOQUEANTE).
+  - 21.2 — Vercel down (🟠 SÉRIO mas mitigável via webhook retry).
+  - 21.3 — Asaas down (🟠 receita para, operação clínica continua).
+  - 21.4 — Daily.co down (🟡 fallback WhatsApp video / Meet).
+  - 21.5 — WhatsApp Cloud API down (🟡 fallback SMS / e-mail).
+  - 21.6 — Memed down (🟡 PDF tradicional como ponte).
+  - 21.7 — multi-provider down (🔴 incidente regional / cloud).
+  - 21.8 — hábitos preventivos (diário/semanal/mensal).
+
+- **Mensagens-template prontas** pra cada cenário em texto português
+  natural, sem marca registrada cintilante (paciente em estresse não
+  quer copy "rebrand"). Substituições marcadas em `{nome}`,
+  `{hh:mm}`, `{medica}`, etc. Operador adapta na hora.
+
+- **Decisão sobre PIX manual.** Em §21.3 (Asaas down), explicitamente
+  **bloqueado** enquanto PR-023 (CNPJ no footer) não estiver
+  preenchido. Risco fiscal alto sem CNPJ formal e sem chave PIX
+  oficial vinculada à PJ.
+
+- **Decisão sobre exports defensivos.** §21.8 lista hábito semanal
+  de exportar `/admin/appointments?status=scheduled&horizon=7d` em
+  CSV pra disco local. Se Supabase cair, operador ainda tem lista
+  de quem precisa contatar.
+
+- **Decisão sobre `INCIDENTS.md`.** §21.8 menciona registro mensal
+  agregado em `docs/INCIDENTS.md` (criar quando primeiro incidente
+  acontecer) — formato livre, 5 linhas bastam. Não criamos arquivo
+  vazio agora porque (a) reduz ruído no repo, (b) operador escreve
+  com mais cuidado quando estiver realmente fazendo registro real.
+
+**O que NÃO está coberto.**
+
+- Failover automático entre providers — fora de escopo, complexidade
+  vs ROI desfavorável.
+- Status page interno público (status.institutonovamedia.com.br) —
+  futuro, depende de decisão de marca.
+- Integração com PagerDuty / Opsgenie — depende de PR-043 (drain
+  externo do logger). Sem isso, alerta é manual (operador olhando
+  `/admin/errors`).
+- Treinamento da equipe (médicas) sobre fallback de vídeo (§21.4) —
+  depende de comunicação operacional separada (e-mail / call de
+  onboarding com 2ª médica).
+
+**Riscos do próprio runbook.**
+
+- Operador não lê em momento de calma — único jeito de evitar é
+  releitura mensal §21.8. Listamos isso explicitamente.
+- Mensagens-template envelhecem (mudança de marca, troca de
+  CNPJ). Quando isso acontecer, atualizar §21 + revisar PR-023.
+- §21.7 (multi-provider down) é puro improviso — não há substituto
+  técnico pra "ligar pra cada paciente".
+
+**Resolve audit finding [20.1 🟠 ALTO].**
+
+---
+
 ## D-096 · Cost snapshots + dashboard `/admin/custos` (PR-045) · 2026-04-28
 
 **Contexto.** Audit [19.1 🟠 ALTO] cobrava observabilidade de despesas
