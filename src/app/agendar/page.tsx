@@ -1,5 +1,5 @@
 /**
- * /agendar — PR-075-A · D-086
+ * /agendar — PR-075-A · D-086 · PR-046 · D-095
  *
  * Rota canônica de agendamento da CONSULTA INICIAL GRATUITA (D-044).
  *
@@ -8,9 +8,14 @@
  *      abrir o quiz (`?aviso=quiz_primeiro`).
  *   2. Com cookie inválido / lead expirado → mesma redireção, mas
  *      com motivo distinto (`?aviso=lead_expirado`).
- *   3. Sem `?slot=` → mostra slot picker (server carrega slots reais
- *      da agenda da médica primária).
- *   4. Com `?slot=<iso>` válido → mostra `FreeBookingForm`.
+ *   3. Sem `?slot=` → mostra slot picker (server carrega slots de
+ *      TODAS as médicas ativas via `listAvailableSlotsForAllDoctors`,
+ *      D-095). Quando há 2+ médicas, cada botão de slot mostra também
+ *      o nome curto da médica.
+ *   4. Com `?slot=<iso>` válido → mostra `FreeBookingForm`. Como
+ *      múltiplas médicas podem ter slots no MESMO instante, o
+ *      query-param `?doctorId=` desambigua quando presente. Se o
+ *      paciente clicou num botão da grade, sempre vem com `doctorId`.
  *
  * Pra paciente já autenticado (`getOptionalPatient`), poderíamos
  * pré-preencher MAIS campos, mas — pragmaticamente — paciente
@@ -26,7 +31,10 @@ import { cookies } from "next/headers";
 import { Logo } from "@/components/Logo";
 import { Footer } from "@/components/Footer";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { getPrimaryDoctor, listAvailableSlots } from "@/lib/scheduling";
+import {
+  listAvailableSlotsForAllDoctors,
+  type AvailableSlotWithDoctor,
+} from "@/lib/scheduling";
 import { LEAD_COOKIE_NAME } from "@/lib/lead-cookie";
 import { logger } from "@/lib/logger";
 import { FreeBookingForm } from "./FreeBookingForm";
@@ -76,9 +84,13 @@ export default async function AgendarPage({ searchParams }: PageProps) {
     redirect("/?aviso=lead_expirado");
   }
 
-  // 2) Carrega doctor + slots
-  const doctor = await getPrimaryDoctor();
-  if (!doctor) {
+  // 2) Carrega doctors + slots de TODAS médicas ativas (PR-046 · D-095)
+  const { doctors, slots } = await listAvailableSlotsForAllDoctors({
+    days: 7,
+    minLeadMinutes: 60,
+    maxPerDay: 6,
+  });
+  if (doctors.length === 0) {
     return (
       <Shell title="Estamos preparando a agenda">
         <p className="text-ink-600 leading-relaxed">
@@ -96,20 +108,26 @@ export default async function AgendarPage({ searchParams }: PageProps) {
     );
   }
 
-  const slots = await listAvailableSlots(doctor.id, doctor.consultation_minutes, {
-    days: 7,
-    minLeadMinutes: 60,
-    maxPerDay: 6,
-  });
+  const isMultiDoctor = doctors.length > 1;
 
+  // Resolve `?slot=` (ISO) + `?doctorId=` (desambigua quando 2 médicas
+  // têm slots no mesmo instante). Se o paciente clicou na grade, ambos
+  // vêm da URL. Se chegou só com `?slot=` (link compartilhado), pega o
+  // PRIMEIRO match — coerente com `mergeAndSortDoctorSlots`.
   const requestedSlot = typeof sp.slot === "string" ? sp.slot : undefined;
-  const validSlot =
-    requestedSlot && slots.find((s) => s.startsAt === requestedSlot)
-      ? requestedSlot
-      : null;
+  const requestedDoctorId =
+    typeof sp.doctorId === "string" ? sp.doctorId : undefined;
+  const matchSlot = (s: AvailableSlotWithDoctor): boolean => {
+    if (s.startsAt !== requestedSlot) return false;
+    if (requestedDoctorId && s.doctorId !== requestedDoctorId) return false;
+    return true;
+  };
+  const chosenSlot: AvailableSlotWithDoctor | null = requestedSlot
+    ? slots.find(matchSlot) ?? null
+    : null;
 
   // 3) Fluxo 2 — slot escolhido → formulário
-  if (validSlot) {
+  if (chosenSlot) {
     return (
       <Shell title={null} fullWidth>
         <div className="mb-6 flex flex-wrap items-center gap-3 text-sm">
@@ -122,9 +140,10 @@ export default async function AgendarPage({ searchParams }: PageProps) {
         </div>
         <FreeBookingForm
           slot={{
-            startsAt: validSlot,
-            doctorName: doctor.display_name || doctor.full_name,
-            durationMinutes: doctor.consultation_minutes,
+            startsAt: chosenSlot.startsAt,
+            doctorId: chosenSlot.doctorId,
+            doctorName: chosenSlot.doctorDisplayName,
+            durationMinutes: chosenSlot.doctorConsultationMinutes,
           }}
           leadHints={{
             name: (lead.name as string | null) ?? "",
@@ -136,16 +155,29 @@ export default async function AgendarPage({ searchParams }: PageProps) {
   }
 
   // 4) Fluxo 1 — escolher slot
+  // Copy adapta-se ao número de médicas ativas:
+  //  - 1 médica: "Sua consulta com Dra X dura N minutos…"
+  //  - 2+ médicas: "Mostre seu horário preferido — informamos a médica
+  //    em cada opção. A consulta é 100% online…"
+  const headerCopy = isMultiDoctor ? (
+    <p className="text-ink-600 leading-relaxed mb-6">
+      Escolha o horário que funciona pra você. Em cada opção informamos
+      a médica que vai te atender. A consulta é 100% online e{" "}
+      <strong className="text-ink-800">não tem cobrança nesta etapa</strong>.
+    </p>
+  ) : (
+    <p className="text-ink-600 leading-relaxed mb-6">
+      Sua consulta com{" "}
+      <strong className="text-ink-800">
+        {doctors[0].display_name || doctors[0].full_name}
+      </strong>{" "}
+      dura {doctors[0].consultation_minutes} minutos, é 100% online e{" "}
+      <strong className="text-ink-800">não tem cobrança nesta etapa</strong>.
+    </p>
+  );
   return (
     <Shell title="Escolha o melhor horário">
-      <p className="text-ink-600 leading-relaxed mb-6">
-        Sua consulta com{" "}
-        <strong className="text-ink-800">
-          {doctor.display_name || doctor.full_name}
-        </strong>{" "}
-        dura {doctor.consultation_minutes} minutos, é 100% online e{" "}
-        <strong className="text-ink-800">não tem cobrança nesta etapa</strong>.
-      </p>
+      {headerCopy}
 
       <div className="mb-6 rounded-2xl border border-sage-200 bg-sage-50/60 p-5">
         <p className="text-[0.78rem] uppercase tracking-wider text-sage-700 font-medium">
@@ -176,7 +208,7 @@ export default async function AgendarPage({ searchParams }: PageProps) {
         </Link>
       </div>
 
-      <SlotPickerClient slots={slots} />
+      <SlotPickerClient slots={slots} showDoctorLabel={isMultiDoctor} />
 
       {slots.length === 0 && (
         <p className="mt-6 text-sm text-ink-500">

@@ -53,8 +53,8 @@ import { cookies } from "next/headers";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import {
   bookFreeSlot,
-  getPrimaryDoctor,
   isSlotAvailable,
+  listActiveDoctors,
 } from "@/lib/scheduling";
 import { signPatientToken, buildConsultationUrl } from "@/lib/patient-tokens";
 import { sanitizeShortText, TEXT_PATTERNS } from "@/lib/text-sanitize";
@@ -189,19 +189,37 @@ export async function POST(req: Request) {
     );
   }
 
-  // 2) Doctor (single MVP) ────────────────────────────────────────────
+  // 2) Doctor (PR-046 · D-095: multi-médica) ────────────────────────
+  //
+  // Regra:
+  //   - Se o body trouxer `doctorId` → valida ativa+não-pausada e usa.
+  //   - Se NÃO trouxer:
+  //       · 1 médica ativa  → fallback silencioso (back-compat com
+  //         clientes antigos / curl manual).
+  //       · 0 médicas ativas → 503.
+  //       · 2+ médicas ativas → 400 `doctor_required` (sem isso, a
+  //         escolha "primária" seria oracle implícito; D-095).
+  //
+  // Em todos os caminhos, consultation_minutes vem da médica resolvida
+  // (cada médica pode ter duração própria, D-088).
   let doctorId = input.doctorId;
   let consultationMinutes = 30;
   if (!doctorId) {
-    const primary = await getPrimaryDoctor();
-    if (!primary) {
+    const active = await listActiveDoctors();
+    if (active.length === 0) {
       return NextResponse.json(
         { ok: false, error: "no_doctor_active" },
         { status: 503 }
       );
     }
-    doctorId = primary.id;
-    consultationMinutes = primary.consultation_minutes;
+    if (active.length > 1) {
+      return NextResponse.json(
+        { ok: false, error: "doctor_required" },
+        { status: 400 }
+      );
+    }
+    doctorId = active[0].id;
+    consultationMinutes = active[0].consultation_minutes;
   } else {
     const { data: doc } = await supabase
       .from("doctors")

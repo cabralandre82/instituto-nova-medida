@@ -1625,10 +1625,11 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
 
 ## Lente 12 — Escalabilidade
 
-### [12.1 🟠 ALTO] `getPrimaryDoctor()` assume **uma médica** — agendamento não escala pra múltiplas
+### [12.1 🟠 ALTO] `getPrimaryDoctor()` assume **uma médica** — agendamento não escala pra múltiplas — ✅ RESOLVED em PR-046 · D-095 (2026-04-28)
 
 - **Onde:** `src/lib/scheduling.ts` + `src/app/agendar/[plano]/page.tsx:63`.
 - **Achado:** o sistema presume uma médica primária. Se houver 2+ médicas ativas, `getPrimaryDoctor()` retorna a primeira — as outras ficam invisíveis para o agendamento público. Agenda da médica (`/medico/agenda`) funciona por médica individualmente, mas onboarding de paciente não.
+- **Resolução (PR-046 · D-095):** novo `listActiveDoctors()` + `listAvailableSlotsForAllDoctors()` em `src/lib/scheduling.ts`; `/agendar` consome a API multi-médica com botões mostrando rótulo da médica em cada slot quando há 2+ ativas; `/api/agendar/free` exige `doctorId` (400 `doctor_required`) quando 2+ ativas; `getPrimaryDoctor` permanece como wrapper sobre `listActiveDoctors()[0]` pra back-compat com fluxos legacy gated em `LEGACY_PURCHASE_ENABLED=false`. 16 testes novos. Suíte 1635 → 1651.
 - **Risco:** impossível crescer sem refactor.
 - **Correção:** fluxo de agendamento: (a) paciente escolhe especialidade/disponibilidade; (b) `listAvailableSlots` agrega todas as médicas ativas; (c) slot inclui `doctor_id`; (d) reserve bind ao slot+doctor.
 - **Observador:** produto, crescimento.
@@ -2004,7 +2005,7 @@ Ordem recomendada de ataque (1 = primeiro):
 - ~~22.2 Quiz envia answers JSONB sem limite~~ ✅ RESOLVED na Onda 2D (PR-036 · D-054)
 
 ### Escala/Resiliência/Observabilidade (5)
-- 12.1 Agendamento não escala pra múltiplas médicas
+- ~~12.1 Agendamento não escala pra múltiplas médicas~~ ✅ RESOLVED em PR-046 · D-095 (`listActiveDoctors` + `listAvailableSlotsForAllDoctors` + UI multi-médica em `/agendar` + `doctor_required` na API).
 - 12.2 `monthly-payouts` single function não batchable
 - ~~13.1 Sem `AbortController` em fetch externos~~ ✅ RESOLVED (PR-042 · D-058): helper `src/lib/fetch-timeout.ts` com `FetchTimeoutError` classificado, composição com AbortSignal externo, timeouts por provider (Asaas 10s, Daily 8s, WhatsApp 8s, ViaCEP 2.5s). Migrado em 5 call-sites core.
 - ~~13.2 Sem circuit breaker~~ ✅ RESOLVED (PR-050 · D-061): `src/lib/circuit-breaker.ts` in-memory 3-state, integrado em Asaas/WA/Daily/ViaCEP. Cron skip via migration `cron_runs.status='skipped'` + `skipIfCircuitOpen` em 3 crons WA. Health check no `/admin/health`. 17 testes.

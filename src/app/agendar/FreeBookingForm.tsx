@@ -67,6 +67,8 @@ function isValidCpf(cpf: string): boolean {
 
 export type FreeBookingSlot = {
   startsAt: string;
+  /** PR-046 · D-095: passa pelo POST e amarra anti-tampering por médica. */
+  doctorId: string;
   doctorName: string;
   durationMinutes: number;
 };
@@ -131,6 +133,7 @@ export function FreeBookingForm({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           scheduledAt: slot.startsAt,
+          doctorId: slot.doctorId,
           name: form.name,
           cpf: form.cpf,
           email: form.email,
@@ -169,6 +172,13 @@ export function FreeBookingForm({
           setServerError(
             "Sem médica disponível agora. Tente novamente em alguns minutos.",
           );
+          return;
+        }
+        if (err === "doctor_required" || err === "doctor_not_active") {
+          setServerError(
+            "Esse horário precisa ser escolhido de novo. Vamos voltar pra grade.",
+          );
+          setTimeout(() => router.push("/agendar"), 2000);
           return;
         }
         setServerError(

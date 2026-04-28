@@ -5,6 +5,244 @@
 
 ---
 
+## D-095 · Scheduling multi-médica em `/agendar` (PR-046) · 2026-04-28
+
+**Contexto.** Audit [12.1 🟠 ALTO] sinalizava que `getPrimaryDoctor()`
+escolhia "a primeira médica ativa por `activated_at`" e isso vazava
+pra **toda** a UI pública de agendamento (`/agendar`,
+`/agendar/[plano]` legado). Quando uma 2ª médica entrasse no quadro,
+seus horários ficariam **invisíveis** na home — paciente nunca
+escolheria, médica nova não receberia consulta gratuita, payout
+zerado, frustração operacional. Outras superfícies multi-médica
+**já estavam corretas**:
+
+- Fan-out on-demand (`fanOutToOnlineDoctors` em `src/lib/on-demand.ts`,
+  D-091) já itera por médicas online.
+- `/admin/plantao` (D-090) e cron `monitor-on-call` (D-093) já
+  iteram por todas com `on_call`.
+- `/admin/appointments` (D-090) já filtra por médica.
+- `doctor_notifications` (D-089) já é fila por médica.
+
+O gap residual era exatamente o **funil de entrada** do produto
+(consulta gratuita pública), que ainda assumia 1 médica.
+
+**Decisão.** PR-046 entrega 4 mudanças cirúrgicas, sem migration e
+sem schema novo:
+
+1. **`src/lib/scheduling.ts` ganha API multi-médica:**
+   - `listActiveDoctors()` → todas ativas e não-pausadas, ordem
+     `activated_at ASC` (estável e determinística).
+   - `getPrimaryDoctor()` vira wrapper sobre `listActiveDoctors()[0]`
+     (back-compat com `/api/agendar/reserve` legado, gated em
+     `LEGACY_PURCHASE_ENABLED=false`).
+   - Novo type `AvailableSlotWithDoctor = AvailableSlot & {
+     doctorId, doctorLabel, doctorDisplayName,
+     doctorConsultationMinutes }` — cada slot agora carrega
+     identidade da médica desde a origem.
+   - Novo `listAvailableSlotsForAllDoctors(opts)` → 1 query pra
+     médicas + N `listAvailableSlots` em paralelo (uma por médica),
+     decora cada slot com info da médica, retorna `{doctors, slots}`
+     onde `slots` está mergeado e ordenado por instante (asc) com
+     tiebreaker `doctorId` lexicográfico (estável entre renders).
+   - 2 helpers puros testáveis: `shortDoctorLabel(doctor)` (usa
+     `display_name` ou trunca `full_name` em 2 palavras, fallback
+     "Médica") e `mergeAndSortDoctorSlots(perDoctor)` (sort estável
+     com tiebreaker, sem mutar entrada).
+
+2. **`/agendar` (page.tsx) consume a nova API:**
+   - Carrega `listAvailableSlotsForAllDoctors` 1 vez. Detecta
+     `isMultiDoctor = doctors.length > 1`.
+   - Copy do header adapta-se: 1 médica → "Sua consulta com Dra X
+     dura N minutos…"; 2+ médicas → "Escolha o horário — em cada
+     opção informamos a médica que vai te atender."
+   - `?slot=ISO` agora pode vir com `?doctorId=UUID` (vem do clique
+     na grade). Quando ambígua sem `doctorId` (link compartilhado
+     antigo), pega o **primeiro match** na ordem do `mergeAndSortDoctorSlots`
+     — mesma médica que estaria primeira no botão, sem
+     surpresa pro paciente.
+   - `FreeBookingForm` recebe `doctorId` no slot e o envia no POST.
+
+3. **`SlotsGrid` (componente compartilhado) ganha modo multi-médica:**
+   - `GridSlot` aceita `doctorId?` + `doctorLabel?` opcionais.
+   - Prop nova `showDoctorLabel?: boolean` (default `false`,
+     back-compat).
+   - Quando `showDoctorLabel=true`, cada botão mostra horário em
+     cima e label compacto da médica embaixo (mobile-friendly,
+     `text-[0.72rem]` e `truncate`).
+   - Grid passa de `grid-cols-3 sm:4 md:6` pra `grid-cols-2 sm:3
+     md:4` quando há label de médica, pra acomodar visualmente.
+   - Submitting state agora indexa por `keyFor(slot) =
+     "${startsAt}::${doctorId}"` quando há `doctorId` — desambigua
+     2 médicas com mesmo horário.
+   - `onPick` passa `(startsAtIso, doctorId?)` (assinatura
+     evoluída, callers existentes continuam funcionando).
+
+4. **`/api/agendar/free` (anti-tampering por médica):**
+   - Aceita `doctorId` no body (já aceitava).
+   - Sem `doctorId` E **0 médicas ativas** → 503 `no_doctor_active`.
+   - Sem `doctorId` E **1 médica ativa** → fallback silencioso
+     (back-compat com clientes antigos / curl manual).
+   - Sem `doctorId` E **2+ médicas ativas** → 400
+     `doctor_required`. Sem isso, a "primária" do back-compat
+     viraria oracle implícito (paciente reservaria com Dra A
+     achando que era Dra B). Forçar é mais seguro.
+   - Com `doctorId` → continua validando ativa+não-pausada e usa
+     `consultationMinutes` daquela médica em particular (D-088
+     permite duração distinta por médica).
+   - `isSlotAvailable(doctorId, ...)` continua sendo a
+     anti-tampering canônica — slot tem que pertencer **àquela**
+     médica.
+
+**Por que `mergeAndSortDoctorSlots` puro em vez de SQL?**
+
+- Reutiliza `listAvailableSlots` existente que já trata regra
+  semanal × `appointments` ocupando × timezone SP × max-per-day.
+  Reescrever em SQL exigiria View + CTE complexa pra computar
+  weekday em fuso, cap por dia, exclusão de pending_payment
+  expirado — duplicar invariantes.
+- Volume MVP é 1-5 médicas × 7 dias × 6 slots/dia ≈ 210 entries
+  por request. Merge in-memory custa zero.
+- Mantém testes puros via Vitest sem precisar mockar Supabase —
+  `mergeAndSortDoctorSlots` é função de array → array.
+- Quando volume justificar (20+ médicas), troca-se por uma RPC
+  SQL única sem mudar a API pública (`listAvailableSlotsForAllDoctors`
+  fica como contrato).
+
+**Por que tiebreaker por `doctorId` lexicográfico?**
+
+- Empate exato em horário entre 2 médicas é raro mas possível
+  (ambas trabalham 14:00-15:00 quarta com slot de 30min).
+- Ordem precisa ser **estável entre renders** — senão o paciente
+  vê Dra A primeiro, recarrega, vê Dra B primeiro, fica confuso.
+- `activated_at ASC` na lista de médicas resolve isso indiretamente
+  (a primeira contratada vem antes na lista de doctors), mas no
+  merge cada slot pode vir embaralhado pelo sort. Tiebreaker
+  explícito por `doctorId` garante estabilidade independente de
+  V8 sort impl.
+- `display_name` ou `full_name` poderia ser mais "amigável" como
+  tiebreaker, mas mudaria se a médica trocar nome — `doctorId` é
+  imutável.
+
+**Por que copy adaptativa em vez de uma só copy unificada?**
+
+- "Sua consulta com Dra X" só funciona com 1 médica. Com 2+, ou
+  vira "Sua consulta com a equipe Nova Medida" (despersonaliza)
+  ou tem que listar nomes na header (poluição visual + texto
+  cresce dinamicamente).
+- Copy adaptada por `isMultiDoctor` mantém intimidade com 1
+  médica e clareza com 2+.
+- Trade-off explícito: o **primeiro slot** ainda revela uma
+  médica em particular (botão diz "13h · Dra Marta"). Aceitamos —
+  se o paciente clicar nesse, a aside "Sua consulta com Dra
+  Marta…" fica coerente.
+
+**Por que `doctor_required` em vez de fallback pra primária quando
+2+ médicas?**
+
+- Vazaria mesma classe de bug pré-PR-046: paciente que não escolhe
+  conscientemente acaba alocado pra "a primeira" silenciosamente.
+- Hoje o cliente JS sempre envia `doctorId` (vem do botão da
+  grade). 400 `doctor_required` só dispara em curl manual sem
+  `doctorId`, ou em race onde a 2ª médica acabou de ser ativada
+  entre o load do `/agendar` (`isMultiDoctor=false`) e o submit
+  (já `isMultiDoctor=true`). Nesses casos, redirect pra `/agendar`
+  na UI faz a grade recarregar com a nova realidade.
+- Resposta UI tratada em `FreeBookingForm`: "Esse horário precisa
+  ser escolhido de novo. Vamos voltar pra grade."
+
+**Trade-offs aceitos (documentados aqui pra revisão futura):**
+
+- Sem **continuidade médica**: paciente que volta não vê a
+  médica anterior priorizada na grade. Aceitável pro MVP — a
+  consulta inicial é gratuita e única (D-044), retornos passam
+  pelo dashboard `/paciente` que já amarra ao histórico via
+  `appointments.doctor_id`. Continuidade automática vira PR-046-B
+  reativo (quando paciente reclamar de aleatoriedade).
+- Sem **balanceamento de carga**: nenhum round-robin, weighted,
+  ou "least-loaded" entre médicas. Slot uniqueness via índice
+  parcial `ux_app_doctor_slot_alive` (D-027) já evita
+  double-booking; quem chega primeiro pega. Quando uma médica
+  ficar consistentemente sobrecarregada vs outra, ajusta via
+  agenda (`doctor_availability`) — não via roteamento.
+- Sem **especialidade**: PR-046 não introduz `doctor_specialties`
+  schema (sugestão original do audit). Hoje todas as médicas
+  fazem o mesmo escopo (medicina interna + emagrecimento). Quando
+  houver diferenciação real (psiquiatria, endocrinologia
+  dedicada), entra como PR-046-C com filtro na UI.
+- Sem **fila/wait-list**: se nenhuma médica tem slot, paciente
+  vê "Sem horários nos próximos 7 dias. Volte em algumas horas
+  ou fale com a equipe". Wait-list automática (paciente cadastra
+  preferência → cron notifica quando vaga abre) não está em
+  escopo.
+- Cache da lista de médicas e dos slots por request: cada GET
+  `/agendar` faz N+1 queries (1 lista médicas + N por médica).
+  Aceitável pro volume MVP. Quando virar gargalo (50+
+  pacientes/min), opções: (a) Redis cache de 30s na lista
+  (`active_doctors_v1`), (b) materialized view diária pra
+  `doctor_availability`, (c) RPC SQL única.
+- Legacy `/agendar/[plano]` + `/api/agendar/reserve` continuam
+  usando `getPrimaryDoctor` (back-compat). Risco zero pro produto
+  em produção (gated em `LEGACY_PURCHASE_ENABLED=false`); quando
+  sair do código (≥180d sem exceção, conforme PR-071-B), os
+  call-sites somem.
+
+**Riscos residuais baixos:**
+
+- **Empate exato entre médicas com `activated_at` idêntico**:
+  improvável (timestamps Postgres com microssegundos), mas se
+  duas forem ativadas via mesma transação, ordem entre elas é
+  pelo PK (`id`). Estável, basta.
+- **`shortDoctorLabel` longo**: se médica usar `display_name`
+  longo ("Dra Maria Eduarda Costa Junior"), o botão pode quebrar
+  em mobile. Mitigado por `truncate` CSS — mostra com `…` e
+  hover/tap revela tooltip via `title`. Operadora orientada a
+  preferir `display_name` curto (≤14 chars) em `/medico/perfil`.
+- **Slot picker grid mais espaçado em multi-médica** (2 cols
+  mobile vs 3 antes): perde 33% da densidade. Aceito — a
+  informação adicional (nome da médica) compensa. Se ficar
+  apertado em produção real, ajusta-se com classe responsiva
+  específica.
+- **Cliente legado sem `doctorId`** (improvável, só no fluxo
+  fechado de `/api/agendar/free` via curl): 400 com mensagem
+  clara, sem inserir appointment "fantasma". Logger registra
+  como warn pra triagem.
+- **2+ médicas com mesma agenda exata** (mesmo weekday +
+  horário): mostra ambas no mesmo timestamp como botões
+  separados. Paciente escolhe explicitamente — nenhum efeito
+  colateral. Em uso real, médicas tendem a coordenar pra evitar
+  isso, mas não quebramos se acontecer.
+
+**Verificação:**
+
+- `tsc --noEmit` clean.
+- `eslint` clean nos 6 arquivos tocados.
+- `vitest run`: **1635 → 1651** (+16 testes em
+  `src/lib/scheduling.test.ts`: shortDoctorLabel × 8 cobrindo
+  display_name, fallback full_name, truncamento 2 palavras,
+  whitespace múltiplo, fallback "Médica"; mergeAndSortDoctorSlots
+  × 8 cobrindo vazio, lista única, merge cronológico, tiebreaker
+  lexicográfico, empate exato preservado, não-mutação de input,
+  decoração propagada).
+- `next build` clean — `/agendar` continua dynamic, sem regressão
+  de tamanho.
+
+**Próximas dependências desbloqueadas:**
+
+- 2ª médica pode entrar no quadro sem mudança de código.
+- Auditoria [12.1] passa de 🟠 ALTO pendente pra ✅ RESOLVED.
+- PR-046-B (continuidade médica), PR-046-C (especialidade) e
+  load-balancing ficam como follow-ups reativos quando volume
+  exigir.
+
+Artefatos: `src/lib/scheduling.ts` (multi-doctor exports),
+`src/lib/scheduling.test.ts` (NEW), `src/app/agendar/page.tsx`
+(consumo da API multi-doctor), `src/app/agendar/SlotPickerClient.tsx`
+(propaga doctorId), `src/app/agendar/FreeBookingForm.tsx` (envia
+doctorId), `src/components/SlotsGrid.tsx` (modo multi-doctor),
+`src/app/api/agendar/free/route.ts` (validação doctor_required).
+
+---
+
 ## D-094 · Observabilidade de produto on-demand + plantão (PR-082) · 2026-04-27
 
 **Contexto.** PR-079 (D-091) entregou backend on-demand. PR-080

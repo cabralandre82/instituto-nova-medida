@@ -55,7 +55,7 @@ export type AvailableSlot = {
   startsAtMs: number;
 };
 
-type DoctorMinimal = {
+export type DoctorMinimal = {
   id: string;
   consultation_minutes: number;
   display_name: string | null;
@@ -63,28 +63,41 @@ type DoctorMinimal = {
 };
 
 /**
- * Carrega a primeira médica ativa e NÃO pausada por regra de
- * confiabilidade (D-036).
+ * Carrega TODAS as médicas ativas e NÃO pausadas por regra de
+ * confiabilidade (D-036), ordenadas por `activated_at ASC` (a primeira
+ * contratada vem primeiro — ordem estável e determinística).
  *
  * Médicas com `reliability_paused_at IS NOT NULL` ficam fora do fluxo
  * de agendamento público. Appointments já agendadas com elas seguem
  * seu curso normal; só novas reservas ficam bloqueadas.
+ *
+ * Base do PR-046 (multi-médica · D-095): rotas de agendamento iteram
+ * sobre essa lista em vez de ler "a primeira" via `getPrimaryDoctor`.
  */
-export async function getPrimaryDoctor(): Promise<DoctorMinimal | null> {
+export async function listActiveDoctors(): Promise<DoctorMinimal[]> {
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
     .from("doctors")
     .select("id, consultation_minutes, display_name, full_name")
     .eq("status", "active")
     .is("reliability_paused_at", null)
-    .order("activated_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
+    .order("activated_at", { ascending: true });
   if (error) {
-    log.error("getPrimaryDoctor", { err: error });
-    return null;
+    log.error("listActiveDoctors", { err: error });
+    return [];
   }
-  return data ?? null;
+  return (data ?? []) as DoctorMinimal[];
+}
+
+/**
+ * Carrega a primeira médica ativa e NÃO pausada (back-compat com fluxo
+ * legado pré-PR-046, e fallback de UI quando há exatamente uma médica
+ * ativa). Para o agendamento canônico use `listActiveDoctors()` +
+ * `listAvailableSlotsForAllDoctors()`.
+ */
+export async function getPrimaryDoctor(): Promise<DoctorMinimal | null> {
+  const all = await listActiveDoctors();
+  return all[0] ?? null;
 }
 
 /** Carrega availability ativo (apenas tipo "agendada", para o MVP). */
@@ -309,6 +322,113 @@ export async function listAvailableSlots(
 
   slots.sort((a, b) => a.startsAtMs - b.startsAtMs);
   return slots;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Multi-médica · PR-046 · D-095
+// ─────────────────────────────────────────────────────────────────────
+
+export type AvailableSlotWithDoctor = AvailableSlot & {
+  doctorId: string;
+  /** Rótulo curto pra UI ("Dra Marta"). Já normalizado server-side. */
+  doctorLabel: string;
+  /** Nome canônico — usado em copies formais ("Sua consulta com X"). */
+  doctorDisplayName: string;
+  /** Duração da consulta dessa médica (pode variar entre médicas). */
+  doctorConsultationMinutes: number;
+};
+
+/**
+ * Helper puro pra rótulo curto da médica em UI (botão de slot, etc).
+ *
+ * Estratégia: prefere `display_name` (a própria médica define em
+ * `/medico/perfil`); fallback pro `full_name` truncado nas 2 primeiras
+ * palavras pra caber em botão estreito (mobile). Nunca devolve string
+ * vazia — última linha de defesa é "Médica".
+ */
+export function shortDoctorLabel(doctor: {
+  display_name: string | null;
+  full_name: string;
+}): string {
+  const display = (doctor.display_name ?? "").trim();
+  if (display.length > 0) return display;
+  const full = (doctor.full_name ?? "").trim();
+  if (full.length === 0) return "Médica";
+  const parts = full.split(/\s+/).filter(Boolean);
+  if (parts.length <= 2) return full;
+  return `${parts[0]} ${parts[1]}`;
+}
+
+/**
+ * Helper puro de merge — recebe slots já decorados por médica e devolve
+ * lista única ordenada por instante (asc). Em caso de empate exato no
+ * instante (duas médicas com slots exatamente sobrepostos), o tiebreak
+ * é `doctorId` lexicográfico — ordem estável entre renders.
+ *
+ * Pure: zero IO, fácil de testar.
+ */
+export function mergeAndSortDoctorSlots(
+  perDoctor: AvailableSlotWithDoctor[][]
+): AvailableSlotWithDoctor[] {
+  const merged: AvailableSlotWithDoctor[] = [];
+  for (const arr of perDoctor) {
+    for (const s of arr) merged.push(s);
+  }
+  merged.sort((a, b) => {
+    if (a.startsAtMs !== b.startsAtMs) return a.startsAtMs - b.startsAtMs;
+    return a.doctorId < b.doctorId ? -1 : a.doctorId > b.doctorId ? 1 : 0;
+  });
+  return merged;
+}
+
+/**
+ * Lista próximos slots disponíveis agregando TODAS as médicas ativas
+ * (PR-046 · D-095). Antes do PR-046, só a médica primária tinha slots
+ * mostrados na home pública — o que invisibilizava as outras quando
+ * entrasse uma 2ª contratação.
+ *
+ * Cada slot vem decorado com `doctorId` + `doctorLabel` +
+ * `doctorDisplayName` + `doctorConsultationMinutes` pra que (a) a UI
+ * possa mostrar com qual médica é cada horário e (b) a rota
+ * `/api/agendar/free` valide o slot **contra a médica certa**
+ * (anti-tampering — se há duas médicas, dois slots no mesmo horário
+ * são ofertas distintas).
+ *
+ * Performance: 1 query pra listar médicas + N queries em paralelo
+ * (uma por médica, vindas de `listAvailableSlots`). N escala linear,
+ * tipicamente ≤ 5 médicas — sem necessidade de view materializada
+ * neste estágio. Quando houver 20+ médicas, pode-se mover para uma
+ * RPC SQL única.
+ */
+export async function listAvailableSlotsForAllDoctors(
+  opts: ListSlotsOptions = {}
+): Promise<{
+  doctors: DoctorMinimal[];
+  slots: AvailableSlotWithDoctor[];
+}> {
+  const doctors = await listActiveDoctors();
+  if (doctors.length === 0) return { doctors: [], slots: [] };
+
+  const perDoctor = await Promise.all(
+    doctors.map(async (doc) => {
+      const raw = await listAvailableSlots(doc.id, doc.consultation_minutes, opts);
+      const label = shortDoctorLabel(doc);
+      const displayName = (doc.display_name ?? "").trim() || doc.full_name || "Médica";
+      const decorated: AvailableSlotWithDoctor[] = raw.map((s) => ({
+        ...s,
+        doctorId: doc.id,
+        doctorLabel: label,
+        doctorDisplayName: displayName,
+        doctorConsultationMinutes: doc.consultation_minutes,
+      }));
+      return decorated;
+    })
+  );
+
+  return {
+    doctors,
+    slots: mergeAndSortDoctorSlots(perDoctor),
+  };
 }
 
 /** Verifica se um candidato é VÁLIDO segundo a agenda (anti-tampering). */

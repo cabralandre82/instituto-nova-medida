@@ -1,17 +1,27 @@
 "use client";
 
 /**
- * src/components/SlotsGrid.tsx — PR-075-A · D-086
+ * src/components/SlotsGrid.tsx — PR-075-A · D-086 · PR-046 · D-095
  *
  * Grade de slots disponíveis agrupados por dia, em pt-BR e fuso de
  * Brasília. Genérico: o caller decide o que fazer no clique via
- * `onPick(startsAtIso)`. Sem dependência de plano (que é resíduo do
- * fluxo legado `/agendar/[plano]`).
+ * `onPick(startsAtIso, doctorId?)`. Sem dependência de plano (que é
+ * resíduo do fluxo legado `/agendar/[plano]`).
+ *
+ * Suporte multi-médica (PR-046):
+ *   - cada slot pode ter `doctorId` + `doctorLabel`;
+ *   - quando `showDoctorLabel=true`, o botão exibe o rótulo curto
+ *     da médica abaixo do horário (mobile-friendly);
+ *   - empate exato no horário entre médicas distintas é renderizado
+ *     como dois botões adjacentes (escolha do paciente vence).
  *
  * Uso típico:
  *   <SlotsGrid
  *     slots={slotsFromServer}
- *     onPick={(iso) => router.push(`/agendar?slot=${encodeURIComponent(iso)}`)}
+ *     onPick={(iso, doctorId) => router.push(
+ *       `/agendar?slot=${encodeURIComponent(iso)}` +
+ *       (doctorId ? `&doctorId=${encodeURIComponent(doctorId)}` : "")
+ *     )}
  *   />
  */
 
@@ -21,6 +31,10 @@ export type GridSlot = {
   startsAt: string;
   endsAt: string;
   startsAtMs: number;
+  /** Opcional. Presente em slots multi-médica (PR-046). */
+  doctorId?: string;
+  /** Rótulo curto pra UI ("Dra Marta"). Server-side já normaliza. */
+  doctorLabel?: string;
 };
 
 type DayGroup = {
@@ -71,13 +85,18 @@ export function SlotsGrid({
   onPick,
   emptyMessage = "Sem horários nos próximos dias.",
   footnote = "Horários no fuso de Brasília (BRT). A consulta é online por vídeo.",
+  showDoctorLabel = false,
 }: {
   slots: GridSlot[];
-  onPick: (startsAtIso: string) => void;
+  onPick: (startsAtIso: string, doctorId?: string) => void;
   emptyMessage?: string;
   footnote?: string;
+  /** PR-046: quando true, mostra o rótulo da médica abaixo do horário. */
+  showDoctorLabel?: boolean;
 }) {
-  const [submitting, setSubmitting] = useState<string | null>(null);
+  // Quando múltiplas médicas têm slots no mesmo instante, a chave do
+  // botão e do "submitting" precisa incluir o doctorId pra desambiguar.
+  const [submittingKey, setSubmittingKey] = useState<string | null>(null);
 
   const groups = useMemo(() => groupByDay(slots), [slots]);
 
@@ -89,9 +108,13 @@ export function SlotsGrid({
     );
   }
 
+  function keyFor(slot: GridSlot) {
+    return slot.doctorId ? `${slot.startsAt}::${slot.doctorId}` : slot.startsAt;
+  }
+
   function pick(slot: GridSlot) {
-    setSubmitting(slot.startsAt);
-    onPick(slot.startsAt);
+    setSubmittingKey(keyFor(slot));
+    onPick(slot.startsAt, slot.doctorId);
   }
 
   return (
@@ -104,23 +127,44 @@ export function SlotsGrid({
           <h2 className="font-serif text-[1.08rem] text-ink-800 mb-3">
             {g.label.replace(/,$/, "")}
           </h2>
-          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
+          <div
+            className={
+              "grid gap-2 " +
+              (showDoctorLabel
+                ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4"
+                : "grid-cols-3 sm:grid-cols-4 md:grid-cols-6")
+            }
+          >
             {g.slots.map((s) => {
-              const isSubmitting = submitting === s.startsAt;
+              const k = keyFor(s);
+              const isSubmitting = submittingKey === k;
               return (
                 <button
-                  key={s.startsAt}
+                  key={k}
                   type="button"
                   onClick={() => pick(s)}
-                  disabled={submitting !== null}
+                  disabled={submittingKey !== null}
                   className={
-                    "rounded-xl border px-3 py-2.5 text-sm font-medium transition " +
+                    "rounded-xl border px-3 py-2 transition text-center " +
                     (isSubmitting
                       ? "border-sage-500 bg-sage-100 text-sage-800"
                       : "border-ink-200 bg-cream-50 text-ink-800 hover:border-sage-500 hover:bg-sage-50 disabled:opacity-50")
                   }
                 >
-                  {isSubmitting ? "…" : timeFmt.format(new Date(s.startsAt))}
+                  <span className="block text-sm font-medium leading-tight">
+                    {isSubmitting ? "…" : timeFmt.format(new Date(s.startsAt))}
+                  </span>
+                  {showDoctorLabel && s.doctorLabel && (
+                    <span
+                      className={
+                        "mt-0.5 block text-[0.72rem] font-normal leading-tight truncate " +
+                        (isSubmitting ? "text-sage-700" : "text-ink-500")
+                      }
+                      title={s.doctorLabel}
+                    >
+                      {s.doctorLabel}
+                    </span>
+                  )}
                 </button>
               );
             })}

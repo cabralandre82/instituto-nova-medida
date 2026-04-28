@@ -6,6 +6,141 @@
 
 ---
 
+## 2026-04-28 · Scheduling multi-médica em `/agendar` (PR-046 · D-095) · IA
+
+**Por quê:** finding [12.1 🟠 ALTO] do audit indicava que
+`getPrimaryDoctor()` escolhia a primeira médica ativa por
+`activated_at` e isso vazava pra toda a UI pública de agendamento.
+Quando uma 2ª médica entrasse no quadro, seus horários ficariam
+invisíveis em `/agendar` — paciente nunca escolheria, médica nova
+sem consulta gratuita, payout zerado, frustração operacional.
+Outras superfícies multi-médica (fan-out on-demand D-091, admin
+plantão D-090, monitor on-call D-093) já estavam corretas; o gap
+residual era exatamente o **funil de entrada** público.
+
+**Entregáveis (4 frentes, sem migration):**
+
+1. **Lib `src/lib/scheduling.ts` ganha API multi-médica:**
+   - `listActiveDoctors()` → todas ativas e não-pausadas, ordem
+     `activated_at ASC` (estável, determinística).
+   - `getPrimaryDoctor()` vira wrapper sobre `listActiveDoctors()[0]`
+     (back-compat com `/api/agendar/reserve` legado, gated em
+     `LEGACY_PURCHASE_ENABLED=false`).
+   - Type `AvailableSlotWithDoctor = AvailableSlot & {doctorId,
+     doctorLabel, doctorDisplayName, doctorConsultationMinutes}`
+     — cada slot agora carrega identidade da médica desde a origem.
+   - `listAvailableSlotsForAllDoctors(opts)` → 1 query pra médicas
+     + N `listAvailableSlots` em paralelo (uma por médica), decora
+     cada slot, retorna `{doctors, slots}` mergeado e ordenado por
+     instante (asc) com tiebreaker `doctorId` lexicográfico.
+   - 2 helpers puros testáveis: `shortDoctorLabel(doctor)` (usa
+     `display_name` ou trunca `full_name` em 2 palavras, fallback
+     "Médica") e `mergeAndSortDoctorSlots(perDoctor)` (sort estável
+     com tiebreaker, sem mutar entrada).
+
+2. **`/agendar` (page.tsx) consume a nova API:**
+   - Carrega `listAvailableSlotsForAllDoctors` 1 vez. Detecta
+     `isMultiDoctor = doctors.length > 1`.
+   - Copy do header adapta-se: 1 médica → "Sua consulta com Dra X
+     dura N minutos…"; 2+ médicas → "Escolha o horário — em cada
+     opção informamos a médica que vai te atender."
+   - `?slot=ISO` agora aceita `?doctorId=UUID` (vem do clique na
+     grade). Sem `doctorId`, pega o primeiro match na ordem do
+     merge — comportamento previsível.
+
+3. **`SlotsGrid` + `SlotPickerClient` ganham modo multi-médica:**
+   - `GridSlot` aceita `doctorId?` + `doctorLabel?` opcionais.
+   - Prop nova `showDoctorLabel?: boolean` (default `false`,
+     back-compat). Quando `true`, cada botão mostra horário em
+     cima e label compacto da médica embaixo (mobile-friendly,
+     `text-[0.72rem]` e `truncate`).
+   - Grid passa de `grid-cols-3 sm:4 md:6` pra `grid-cols-2 sm:3
+     md:4` quando há label.
+   - Submitting state indexa por `keyFor(slot) =
+     "${startsAt}::${doctorId}"` — desambigua 2 médicas com mesmo
+     horário.
+   - `onPick(startsAtIso, doctorId?)` evolui assinatura
+     mantendo back-compat.
+
+4. **`/api/agendar/free` (anti-tampering por médica):**
+   - Sem `doctorId` E 0 médicas ativas → 503 `no_doctor_active`.
+   - Sem `doctorId` E 1 médica ativa → fallback (back-compat).
+   - Sem `doctorId` E 2+ médicas ativas → 400 `doctor_required`
+     (sem isso, a "primária" do back-compat viraria oracle
+     implícito).
+   - Com `doctorId` → valida ativa+não-pausada e usa
+     `consultationMinutes` daquela médica em particular (D-088
+     permite duração distinta por médica).
+   - `isSlotAvailable(doctorId, ...)` continua sendo a
+     anti-tampering canônica — slot tem que pertencer **àquela**
+     médica.
+
+**Trade-offs explícitos em D-095:**
+
+- Sem **continuidade médica** (paciente que volta vê grade
+  global, não médica anterior priorizada). Fica como PR-046-B
+  reativo.
+- Sem **balanceamento de carga** (sem round-robin / weighted /
+  least-loaded). Slot uniqueness via índice parcial
+  `ux_app_doctor_slot_alive` resolve double-booking; quem chega
+  primeiro pega.
+- Sem **especialidade** (`doctor_specialties` schema sugerido pelo
+  audit). Hoje todas fazem mesmo escopo. Vira PR-046-C quando
+  diferenciação for real.
+- Sem **wait-list automática** (paciente cadastra preferência →
+  cron notifica vaga). Fora de escopo.
+- N+1 queries por GET `/agendar` (1 lista médicas + N por médica).
+  Aceitável MVP; quando virar gargalo, opções: cache Redis 30s,
+  materialized view, RPC SQL única.
+- Legacy `/agendar/[plano]` + `/api/agendar/reserve` continuam
+  com `getPrimaryDoctor` (back-compat). Risco zero em produção
+  (gated em `LEGACY_PURCHASE_ENABLED=false`).
+- Tiebreaker por `doctorId` lexicográfico em vez de
+  `display_name` — imutável (ordem estável mesmo se médica trocar
+  de nome).
+
+**Riscos residuais baixos:**
+
+- `display_name` muito longo quebra layout em mobile → mitigado
+  por `truncate` CSS + tooltip. Operadora orientada a usar
+  `display_name` ≤14 chars.
+- Grid mais espaçado em multi-médica perde 33% de densidade —
+  aceito pelo ganho de informação.
+- Cliente legado curl sem `doctorId` em multi-médica → 400 claro,
+  sem appointment fantasma. Logger registra warn pra triagem.
+- 2+ médicas com mesma agenda exata → mostra ambas no mesmo
+  timestamp como botões separados; paciente escolhe
+  explicitamente.
+
+**Verificação:**
+
+- TSC `--noEmit` clean.
+- ESLint clean nos 6 arquivos tocados.
+- Vitest: **1635 → 1651** (+16 testes em
+  `src/lib/scheduling.test.ts`: `shortDoctorLabel` × 8,
+  `mergeAndSortDoctorSlots` × 8 cobrindo vazio, lista única,
+  merge cronológico, tiebreaker lexicográfico, empate exato
+  preservado, não-mutação, decoração propagada).
+- `next build` clean — `/agendar` continua dynamic, sem
+  regressão de tamanho.
+
+**Impacto no roadmap:**
+
+- Audit [12.1] passa de 🟠 ALTO pendente para ✅ RESOLVED.
+- 2ª médica pode ser ativada em produção sem mudança de código.
+- PR-046-B (continuidade médica), PR-046-C (especialidade) e
+  load-balancing ficam como follow-ups reativos.
+
+Artefatos: `src/lib/scheduling.ts`, `src/lib/scheduling.test.ts`
+(NEW), `src/app/agendar/page.tsx`,
+`src/app/agendar/SlotPickerClient.tsx`,
+`src/app/agendar/FreeBookingForm.tsx`,
+`src/components/SlotsGrid.tsx`,
+`src/app/api/agendar/free/route.ts`. ADR D-095 em
+`docs/DECISIONS.md`.
+
+---
+
 ## 2026-04-27 · Onda A · #9 · Observabilidade de produto: TTM + match rate + cobertura (PR-082 · D-094) · IA
 
 **Por quê:** PRs 079/080/081 entregaram o produto on-demand + plantão.
