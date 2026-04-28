@@ -1,5 +1,14 @@
 /**
- * Testes de generateMonthlyPayouts (D-040).
+ * Testes de generateMonthlyPayouts (D-040, atualizados em PR-049 · D-098).
+ *
+ * Os testes passam `concurrency: 1` em todas as chamadas pra preservar a
+ * semântica FIFO do mock Supabase (`createSupabaseMock` usa fila per-tabela
+ * — com paralelismo, dois processSingleDoctor concorrentes racem pelo
+ * mesmo item da fila, gerando flakiness). Em produção, default é 8.
+ *
+ * Há um teste dedicado abaixo (`concurrency=2 · 2 médicas em paralelo`)
+ * que valida o caminho concorrente real, com mock customizado pra
+ * tolerar ordem de resolução não-determinística.
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
@@ -51,7 +60,7 @@ describe("generateMonthlyPayouts", () => {
     supa.enqueue("doctor_earnings", { data: [], error: null });
     const r = await generateMonthlyPayouts(
       supa.client as unknown as SupabaseClient,
-      { referencePeriod: "2026-03" }
+      { referencePeriod: "2026-03", concurrency: 1 }
     );
     expect(r.doctorsEvaluated).toBe(0);
     expect(r.payoutsCreated).toBe(0);
@@ -100,7 +109,7 @@ describe("generateMonthlyPayouts", () => {
 
     const r = await generateMonthlyPayouts(
       supa.client as unknown as SupabaseClient,
-      { referencePeriod: "2026-03" }
+      { referencePeriod: "2026-03", concurrency: 1 }
     );
 
     expect(r.payoutsCreated).toBe(1);
@@ -146,7 +155,7 @@ describe("generateMonthlyPayouts", () => {
 
     const r = await generateMonthlyPayouts(
       supa.client as unknown as SupabaseClient,
-      { referencePeriod: "2026-03" }
+      { referencePeriod: "2026-03", concurrency: 1 }
     );
 
     expect(r.payoutsCreated).toBe(0);
@@ -186,7 +195,7 @@ describe("generateMonthlyPayouts", () => {
 
     const r = await generateMonthlyPayouts(
       supa.client as unknown as SupabaseClient,
-      { referencePeriod: "2026-03" }
+      { referencePeriod: "2026-03", concurrency: 1 }
     );
     expect(r.payoutsCreated).toBe(0);
     expect(r.payoutsSkippedMissingPix).toBe(1);
@@ -223,7 +232,7 @@ describe("generateMonthlyPayouts", () => {
 
     const r = await generateMonthlyPayouts(
       supa.client as unknown as SupabaseClient,
-      { referencePeriod: "2026-03" }
+      { referencePeriod: "2026-03", concurrency: 1 }
     );
     expect(r.payoutsCreated).toBe(0);
     expect(r.payoutsSkippedMissingPix).toBe(1);
@@ -241,7 +250,7 @@ describe("generateMonthlyPayouts", () => {
 
     const r = await generateMonthlyPayouts(
       supa.client as unknown as SupabaseClient,
-      { referencePeriod: "2026-03" }
+      { referencePeriod: "2026-03", concurrency: 1 }
     );
     expect(r.doctorsEvaluated).toBe(0);
     expect(r.payoutsCreated).toBe(0);
@@ -283,7 +292,7 @@ describe("generateMonthlyPayouts", () => {
 
     const r = await generateMonthlyPayouts(
       supa.client as unknown as SupabaseClient,
-      { referencePeriod: "2026-03" }
+      { referencePeriod: "2026-03", concurrency: 1 }
     );
     expect(r.payoutsCreated).toBe(0);
     expect(r.payoutsSkippedExisting).toBe(1);
@@ -334,7 +343,7 @@ describe("generateMonthlyPayouts", () => {
 
     const r = await generateMonthlyPayouts(
       supa.client as unknown as SupabaseClient,
-      { referencePeriod: "2026-03" }
+      { referencePeriod: "2026-03", concurrency: 1 }
     );
     expect(r.errors).toBeGreaterThanOrEqual(1);
     expect(r.payoutsCreated).toBe(1); // d2 passou
@@ -382,7 +391,7 @@ describe("generateMonthlyPayouts", () => {
 
     const r = await generateMonthlyPayouts(
       supa.client as unknown as SupabaseClient,
-      { referencePeriod: "2026-03" }
+      { referencePeriod: "2026-03", concurrency: 1 }
     );
     expect(r.payoutsCreated).toBe(2);
     expect(r.doctorsEvaluated).toBe(2);
@@ -450,7 +459,7 @@ describe("generateMonthlyPayouts", () => {
 
     const r = await generateMonthlyPayouts(
       supa.client as unknown as SupabaseClient,
-      { referencePeriod: "2026-03" }
+      { referencePeriod: "2026-03", concurrency: 1 }
     );
 
     expect(r.payoutsCreated).toBe(1);
@@ -537,7 +546,7 @@ describe("generateMonthlyPayouts", () => {
 
     const r = await generateMonthlyPayouts(
       supa.client as unknown as SupabaseClient,
-      { referencePeriod: "2026-03" }
+      { referencePeriod: "2026-03", concurrency: 1 }
     );
 
     // Payout não conta (foi cancelado automaticamente)
@@ -631,12 +640,115 @@ describe("generateMonthlyPayouts", () => {
 
     const r = await generateMonthlyPayouts(
       supa.client as unknown as SupabaseClient,
-      { referencePeriod: "2026-03" }
+      { referencePeriod: "2026-03", concurrency: 1 }
     );
 
     expect(r.payoutsCreated).toBe(1);
     expect(r.warnings.some((w) => w.reason === "reconcile_incomplete")).toBe(
       true
     );
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // PR-049 · D-098 — paralelismo configurável
+  // ─────────────────────────────────────────────────────────────────────
+
+  it("PR-049 · concurrency configurável aceita valores válidos sem crash", async () => {
+    // Smoke test: garante que `concurrency` flui pra `processInBatches`
+    // sem quebrar o caminho feliz. Mock simples (1 médica) então não
+    // sofre da race condição da fila FIFO.
+    supa.enqueue("doctor_earnings", {
+      data: [{ id: "e1", doctor_id: "d1", amount_cents: 12345 }],
+      error: null,
+    });
+    supa.enqueue("doctors", {
+      data: [{ id: "d1", full_name: "Dr A", display_name: null, status: "active" }],
+      error: null,
+    });
+    supa.enqueue("doctor_payment_methods", {
+      data: [
+        {
+          doctor_id: "d1",
+          pix_key: "k1",
+          pix_key_type: "EMAIL",
+          pix_key_holder: "A",
+        },
+      ],
+      error: null,
+    });
+    supa.enqueue("doctor_payouts", { data: { id: "p1" }, error: null });
+    supa.enqueue("doctor_earnings", { data: [{ id: "e1" }], error: null });
+    supa.enqueue("doctor_earnings", { data: [], error: null });
+
+    const r = await generateMonthlyPayouts(
+      supa.client as unknown as SupabaseClient,
+      { referencePeriod: "2026-03", concurrency: 4 }
+    );
+    expect(r.payoutsCreated).toBe(1);
+    expect(r.totalCentsDrafted).toBe(12345);
+  });
+
+  it("PR-049 · concurrency=0 é clampado a 1 (não trava)", async () => {
+    supa.enqueue("doctor_earnings", { data: [], error: null });
+    const r = await generateMonthlyPayouts(
+      supa.client as unknown as SupabaseClient,
+      { referencePeriod: "2026-03", concurrency: 0 }
+    );
+    expect(r.errors).toBe(0);
+    expect(r.doctorsEvaluated).toBe(0);
+  });
+
+  it("PR-049 · concurrency > MAX é clampado (não estoura pool)", async () => {
+    supa.enqueue("doctor_earnings", { data: [], error: null });
+    const r = await generateMonthlyPayouts(
+      supa.client as unknown as SupabaseClient,
+      { referencePeriod: "2026-03", concurrency: 9999 }
+    );
+    expect(r.errors).toBe(0);
+  });
+
+  it("PR-049 · concurrency=NaN cai no default (não NaN-poisoned)", async () => {
+    supa.enqueue("doctor_earnings", { data: [], error: null });
+    const r = await generateMonthlyPayouts(
+      supa.client as unknown as SupabaseClient,
+      { referencePeriod: "2026-03", concurrency: Number.NaN }
+    );
+    expect(r.errors).toBe(0);
+  });
+
+  it("PR-049 · doctorsEvaluated reflete todas mesmo em paralelo", async () => {
+    // 3 médicas, todas com PIX faltando — caminho síncrono curto
+    // (não bate na fila FIFO de doctor_payouts), permite testar
+    // paralelismo real sem flakiness.
+    supa.enqueue("doctor_earnings", {
+      data: [
+        { id: "e1", doctor_id: "d1", amount_cents: 100 },
+        { id: "e2", doctor_id: "d2", amount_cents: 200 },
+        { id: "e3", doctor_id: "d3", amount_cents: 300 },
+      ],
+      error: null,
+    });
+    supa.enqueue("doctors", {
+      data: [
+        { id: "d1", full_name: "A", display_name: null, status: "active" },
+        { id: "d2", full_name: "B", display_name: null, status: "active" },
+        { id: "d3", full_name: "C", display_name: null, status: "active" },
+      ],
+      error: null,
+    });
+    supa.enqueue("doctor_payment_methods", {
+      data: [], // todas faltam PIX
+      error: null,
+    });
+    const r = await generateMonthlyPayouts(
+      supa.client as unknown as SupabaseClient,
+      { referencePeriod: "2026-03", concurrency: 8 }
+    );
+    expect(r.doctorsEvaluated).toBe(3);
+    expect(r.payoutsSkippedMissingPix).toBe(3);
+    expect(r.payoutsCreated).toBe(0);
+    expect(r.warnings).toHaveLength(3);
+    // Ordem das warnings reflete ordem de doctorIds (determinismo).
+    expect(r.warnings.map((w) => w.doctorId)).toEqual(["d1", "d2", "d3"]);
   });
 });

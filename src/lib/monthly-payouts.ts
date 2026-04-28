@@ -54,6 +54,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { logger } from "./logger";
+import { processInBatches, envIntInRange } from "./batched";
 
 const log = logger.with({ mod: "monthly-payouts" });
 
@@ -66,6 +67,24 @@ const log = logger.with({ mod: "monthly-payouts" });
  */
 const RECONCILE_MAX_ITERATIONS = 3;
 
+/**
+ * Concorrência padrão para processamento paralelo de médicas (PR-049 ·
+ * D-098). Configurável via env `MONTHLY_PAYOUTS_CONCURRENCY`.
+ *
+ * Trade-off:
+ *   - Sequencial (1) = O(N×latência) — bate em maxDuration=120s com
+ *     ~600 médicas em prod.
+ *   - Paralelo total (N) = thundering herd, esgota pool DB, pode
+ *     causar deadlock em UPDATEs concorrentes na mesma row.
+ *   - 8 = sweet spot empírico: divide latência por ~7x, deixa pool DB
+ *     com folga (Supabase Pro = 60 conn default), zero deadlock
+ *     observado (cada médica opera em earnings/payout com `WHERE
+ *     doctor_id=X` — isolamento natural).
+ */
+const DEFAULT_CONCURRENCY = 8;
+const MIN_CONCURRENCY = 1;
+const MAX_CONCURRENCY = 32;
+
 export type GenerateMonthlyPayoutsOptions = {
   /**
    * Override do período de referência (YYYY-MM). Se omitido, usa o mês
@@ -76,7 +95,47 @@ export type GenerateMonthlyPayoutsOptions = {
    * Override do `now` — só pra testes. Não usar em produção.
    */
   now?: Date;
+  /**
+   * Override de concorrência paralela (médicas processadas
+   * simultaneamente). Default lê env `MONTHLY_PAYOUTS_CONCURRENCY`,
+   * fallback 8. Aceita 1..32.
+   */
+  concurrency?: number;
 };
+
+/**
+ * Resultado parcial de processamento de UMA médica — produzido em
+ * paralelo por `processSingleDoctor`. Mergeado em `generateMonthlyPayouts`
+ * preservando ordem original de `doctorIds` (ordem determinística pra
+ * testes e snapshots).
+ */
+type DoctorOutcome = {
+  doctorId: string;
+  doctorName: string | null;
+  /** Incrementa `payoutsCreated` se >0. Cancelado em 4e zera de volta. */
+  payoutsCreated: number;
+  payoutsSkippedExisting: number;
+  payoutsSkippedMissingPix: number;
+  earningsLinked: number;
+  totalCentsDrafted: number;
+  warnings: DoctorPayoutWarning[];
+  /** Preserva mensagens cruas pra `errorDetails` global. */
+  errorDetails: string[];
+};
+
+function emptyOutcome(doctorId: string, doctorName: string | null): DoctorOutcome {
+  return {
+    doctorId,
+    doctorName,
+    payoutsCreated: 0,
+    payoutsSkippedExisting: 0,
+    payoutsSkippedMissingPix: 0,
+    earningsLinked: 0,
+    totalCentsDrafted: 0,
+    warnings: [],
+    errorDetails: [],
+  };
+}
 
 export type DoctorPayoutWarning = {
   doctorId: string;
@@ -261,386 +320,434 @@ export async function generateMonthlyPayouts(
     if (!pmByDoctor.has(pm.doctor_id)) pmByDoctor.set(pm.doctor_id, pm);
   }
 
-  // 4) Por médica: valida → cria payout → vincula earnings
-  for (const [doctorId, agg] of perDoctor) {
-    result.doctorsEvaluated += 1;
+  // 4) Por médica: valida → cria payout → vincula earnings.
+  //
+  // PR-049 · D-098: paraleliza com `processInBatches` (default
+  // concorrência 8). Cada médica opera em earnings/payout com
+  // `WHERE doctor_id=X` — isolamento natural, sem deadlock entre
+  // workers. Cada outcome é mergeado de volta em `result` na ordem
+  // original de `doctorIds` pra garantir determinismo (testes,
+  // snapshots de payload do `cron_runs`).
+  const concurrency = clampConcurrency(
+    opts.concurrency ??
+      envIntInRange(
+        "MONTHLY_PAYOUTS_CONCURRENCY",
+        DEFAULT_CONCURRENCY,
+        MIN_CONCURRENCY,
+        MAX_CONCURRENCY
+      )
+  );
 
-    const doctor = doctorsById.get(doctorId);
-    const doctorName = doctor?.display_name || doctor?.full_name || null;
+  const orderedIds = Array.from(perDoctor.keys());
+  const ctx: ProcessDoctorCtx = {
+    referencePeriod,
+    monthStart,
+    doctorsById,
+    pmByDoctor,
+  };
 
-    if (!doctor) {
-      result.warnings.push({
-        doctorId,
-        doctorName,
-        amountCents: agg.total,
-        earningsCount: agg.count,
-        reason: "doctor_not_found",
-      });
-      result.payoutsSkippedMissingPix += 1;
-      continue;
-    }
-    if (doctor.status !== "active") {
-      // Médica inativa: não gera payout (se quiser gerar mesmo assim,
-      // admin faz manual); registra warning pra review.
-      result.warnings.push({
-        doctorId,
-        doctorName,
-        amountCents: agg.total,
-        earningsCount: agg.count,
-        reason: "doctor_inactive",
-      });
-      result.payoutsSkippedMissingPix += 1;
-      continue;
-    }
-
-    const pm = pmByDoctor.get(doctorId);
-    if (!pm || !pm.pix_key || !pm.pix_key.trim()) {
-      result.warnings.push({
-        doctorId,
-        doctorName,
-        amountCents: agg.total,
-        earningsCount: agg.count,
-        reason: pm ? "pix_key_empty" : "missing_pix_active",
-      });
-      result.payoutsSkippedMissingPix += 1;
-      continue;
-    }
-
-    // 4a) Insere o payout — se bater UNIQUE, trata como existing
-    const insertRes = await supabase
-      .from("doctor_payouts")
-      .insert({
-        doctor_id: doctorId,
-        reference_period: referencePeriod,
-        amount_cents: agg.total,
-        earnings_count: agg.count,
-        pix_key_snapshot: pm.pix_key,
-        pix_key_type_snapshot: pm.pix_key_type,
-        pix_key_holder_snapshot: pm.pix_key_holder,
-        status: "draft",
-        auto_generated: true,
-      })
-      .select("id")
-      .single();
-
-    if (insertRes.error) {
-      // 23505 = unique violation (Postgres) — payout do período já existe
-      const code = (insertRes.error as unknown as { code?: string }).code;
-      if (code === "23505") {
-        result.payoutsSkippedExisting += 1;
-        result.warnings.push({
-          doctorId,
-          doctorName,
-          amountCents: agg.total,
-          earningsCount: agg.count,
-          reason: "existing_payout",
+  const outcomes = await processInBatches(
+    orderedIds,
+    async (doctorId) => {
+      const agg = perDoctor.get(doctorId)!;
+      return processSingleDoctor(supabase, ctx, doctorId, agg);
+    },
+    {
+      concurrency,
+      onBatchComplete: (info) => {
+        log.info("monthly-payouts batch", {
+          batch_index: info.batchIndex,
+          completed: info.completed,
+          total: info.total,
+          ok: info.okCount,
+          errors: info.errorCount,
         });
-        continue;
-      }
+      },
+    }
+  );
+
+  // Merge determinístico: percorre `orderedIds` na ordem original.
+  for (const o of outcomes) {
+    result.doctorsEvaluated += 1;
+    if (o.ok) {
+      const out = o.value;
+      result.payoutsCreated += out.payoutsCreated;
+      result.payoutsSkippedExisting += out.payoutsSkippedExisting;
+      result.payoutsSkippedMissingPix += out.payoutsSkippedMissingPix;
+      result.earningsLinked += out.earningsLinked;
+      result.totalCentsDrafted += out.totalCentsDrafted;
+      result.warnings.push(...out.warnings);
+      result.errors += out.errorDetails.length;
+      result.errorDetails.push(...out.errorDetails);
+    } else {
+      // Exceção não capturada dentro de `processSingleDoctor` —
+      // teoricamente impossível (a função tem try/catch interno),
+      // mas defensivo: evita perder o erro silenciosamente.
       result.errors += 1;
       result.errorDetails.push(
-        `insert payout ${doctorId}: ${insertRes.error.message}`
+        `unhandled exception ${o.item}: ${o.error.message}`
       );
-      continue;
+      log.error("monthly-payouts: unhandled doctor exception", {
+        doctor_id: o.item,
+        err: o.error.message,
+      });
+    }
+  }
+
+  return result;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Helpers de paralelização (PR-049 · D-098)
+// ──────────────────────────────────────────────────────────────────────
+
+type ProcessDoctorCtx = {
+  referencePeriod: string;
+  monthStart: string;
+  doctorsById: Map<string, DoctorRow>;
+  pmByDoctor: Map<string, PaymentMethodRow>;
+};
+
+function clampConcurrency(c: number): number {
+  if (!Number.isFinite(c)) return DEFAULT_CONCURRENCY;
+  const n = Math.floor(c);
+  if (n < MIN_CONCURRENCY) return MIN_CONCURRENCY;
+  if (n > MAX_CONCURRENCY) return MAX_CONCURRENCY;
+  return n;
+}
+
+/**
+ * Processa UMA médica completa (validações + criar payout + vincular
+ * earnings + reconciliação + cancelamento se clawback dominante).
+ *
+ * Retorna `DoctorOutcome` com deltas — caller mergeia no result global
+ * preservando ordem. Captura erros internamente em `errorDetails`
+ * pra que `processInBatches` SEMPRE veja sucesso (`ok=true`) — assim
+ * a contabilidade `result.errors` fica precisa, sem mistura entre
+ * "exceção JS" e "erro de query Supabase".
+ */
+async function processSingleDoctor(
+  supabase: SupabaseClient,
+  ctx: ProcessDoctorCtx,
+  doctorId: string,
+  agg: { total: number; count: number; earningIds: string[] }
+): Promise<DoctorOutcome> {
+  const { referencePeriod, monthStart, doctorsById, pmByDoctor } = ctx;
+  const doctor = doctorsById.get(doctorId);
+  const doctorName = doctor?.display_name || doctor?.full_name || null;
+  const out = emptyOutcome(doctorId, doctorName);
+
+  if (!doctor) {
+    out.warnings.push({
+      doctorId,
+      doctorName,
+      amountCents: agg.total,
+      earningsCount: agg.count,
+      reason: "doctor_not_found",
+    });
+    out.payoutsSkippedMissingPix += 1;
+    return out;
+  }
+  if (doctor.status !== "active") {
+    out.warnings.push({
+      doctorId,
+      doctorName,
+      amountCents: agg.total,
+      earningsCount: agg.count,
+      reason: "doctor_inactive",
+    });
+    out.payoutsSkippedMissingPix += 1;
+    return out;
+  }
+
+  const pm = pmByDoctor.get(doctorId);
+  if (!pm || !pm.pix_key || !pm.pix_key.trim()) {
+    out.warnings.push({
+      doctorId,
+      doctorName,
+      amountCents: agg.total,
+      earningsCount: agg.count,
+      reason: pm ? "pix_key_empty" : "missing_pix_active",
+    });
+    out.payoutsSkippedMissingPix += 1;
+    return out;
+  }
+
+  // 4a) Insere o payout — se bater UNIQUE, trata como existing
+  const insertRes = await supabase
+    .from("doctor_payouts")
+    .insert({
+      doctor_id: doctorId,
+      reference_period: referencePeriod,
+      amount_cents: agg.total,
+      earnings_count: agg.count,
+      pix_key_snapshot: pm.pix_key,
+      pix_key_type_snapshot: pm.pix_key_type,
+      pix_key_holder_snapshot: pm.pix_key_holder,
+      status: "draft",
+      auto_generated: true,
+    })
+    .select("id")
+    .single();
+
+  if (insertRes.error) {
+    const code = (insertRes.error as unknown as { code?: string }).code;
+    if (code === "23505") {
+      out.payoutsSkippedExisting += 1;
+      out.warnings.push({
+        doctorId,
+        doctorName,
+        amountCents: agg.total,
+        earningsCount: agg.count,
+        reason: "existing_payout",
+      });
+      return out;
+    }
+    out.errorDetails.push(
+      `insert payout ${doctorId}: ${insertRes.error.message}`
+    );
+    return out;
+  }
+
+  const newPayoutId = (insertRes.data as { id: string }).id;
+
+  // 4b) Vincula earnings — guard por status
+  const { data: linked, error: linkErr } = await supabase
+    .from("doctor_earnings")
+    .update({
+      payout_id: newPayoutId,
+      status: "in_payout",
+      updated_at: new Date().toISOString(),
+    })
+    .in("id", agg.earningIds)
+    .eq("status", "available")
+    .is("payout_id", null)
+    .select("id");
+
+  if (linkErr) {
+    out.errorDetails.push(`link earnings ${doctorId}: ${linkErr.message}`);
+    return out;
+  }
+
+  const linkedRows = (linked ?? []) as Array<{ id: string }>;
+  const linkedCount = linkedRows.length;
+  out.earningsLinked += linkedCount;
+  out.payoutsCreated += 1;
+  out.totalCentsDrafted += agg.total;
+
+  if (linkedCount === 0) {
+    out.warnings.push({
+      doctorId,
+      doctorName,
+      amountCents: 0,
+      earningsCount: 0,
+      reason: "existing_payout",
+    });
+  }
+
+  // 4c) Reconciliação pós-link (D-062 · PR-051 · finding 5.5)
+  let extraSum = 0;
+  let extraCount = 0;
+  let iter = 0;
+  let converged = true;
+
+  while (iter < RECONCILE_MAX_ITERATIONS) {
+    iter += 1;
+
+    const { data: extras, error: extrasErr } = await supabase
+      .from("doctor_earnings")
+      .select("id, amount_cents")
+      .eq("doctor_id", doctorId)
+      .eq("status", "available")
+      .is("payout_id", null)
+      .lt("available_at", monthStart);
+
+    if (extrasErr) {
+      out.errorDetails.push(
+        `reconcile select ${doctorId}: ${extrasErr.message}`
+      );
+      converged = false;
+      break;
     }
 
-    const newPayoutId = (insertRes.data as { id: string }).id;
+    const extraRows = (extras ?? []) as Array<{
+      id: string;
+      amount_cents: number;
+    }>;
+    if (extraRows.length === 0) break;
 
-    // 4b) Vincula earnings — guard por status garante que só pega as
-    // que continuam 'available' (defesa contra corrida com clawback).
-    const { data: linked, error: linkErr } = await supabase
+    const extraIds = extraRows.map((e) => e.id);
+
+    const { data: extraLinked, error: linkExtraErr } = await supabase
       .from("doctor_earnings")
       .update({
         payout_id: newPayoutId,
         status: "in_payout",
         updated_at: new Date().toISOString(),
       })
-      .in("id", agg.earningIds)
+      .in("id", extraIds)
       .eq("status", "available")
       .is("payout_id", null)
-      .select("id");
+      .select("id, amount_cents");
 
-    if (linkErr) {
-      result.errors += 1;
-      result.errorDetails.push(
-        `link earnings ${doctorId}: ${linkErr.message}`
+    if (linkExtraErr) {
+      out.errorDetails.push(
+        `reconcile link ${doctorId}: ${linkExtraErr.message}`
       );
-      continue;
+      converged = false;
+      break;
     }
 
-    const linkedRows = (linked ?? []) as Array<{ id: string }>;
-    const linkedCount = linkedRows.length;
-    result.earningsLinked += linkedCount;
-    result.payoutsCreated += 1;
-    result.totalCentsDrafted += agg.total;
+    const actualLinked = (extraLinked ?? []) as Array<{
+      id: string;
+      amount_cents: number;
+    }>;
 
-    // Edge-case raro: payout foi criado mas 0 earnings vinculadas
-    // (todas viraram cancelled entre o select e o update).
-    if (linkedCount === 0) {
-      result.warnings.push({
+    if (actualLinked.length === 0) break;
+
+    extraSum += actualLinked.reduce((a, r) => a + r.amount_cents, 0);
+    extraCount += actualLinked.length;
+  }
+
+  if (!converged) {
+    // erro já registrado
+  } else if (iter >= RECONCILE_MAX_ITERATIONS) {
+    const { data: stillExtras } = await supabase
+      .from("doctor_earnings")
+      .select("id")
+      .eq("doctor_id", doctorId)
+      .eq("status", "available")
+      .is("payout_id", null)
+      .lt("available_at", monthStart)
+      .limit(1);
+    if ((stillExtras ?? []).length > 0) {
+      log.warn("reconcile not converged", {
+        doctor_id: doctorId,
+        payout_id: newPayoutId,
+        iterations: iter,
+      });
+      out.warnings.push({
         doctorId,
         doctorName,
         amountCents: 0,
         earningsCount: 0,
-        reason: "existing_payout",
+        reason: "reconcile_incomplete",
       });
-    }
-
-    // ────────────────────────────────────────────────────────────────
-    // 4c) Reconciliação pós-link (D-062 · PR-051 · finding 5.5).
-    //
-    // Captura earnings que chegaram ENTRE o SELECT inicial (passo 1)
-    // e o UPDATE de vínculo (passo 4b) — tipicamente, clawbacks
-    // criados por webhook PAYMENT_REFUNDED rodando em paralelo.
-    //
-    // Loop bounded: re-seleciona extras candidatos; tenta linkar ao
-    // payout recém-criado; se algum rolou, incorpora. Repete até
-    // esvaziar ou bater RECONCILE_MAX_ITERATIONS.
-    // ────────────────────────────────────────────────────────────────
-
-    let extraSum = 0;
-    let extraCount = 0;
-    let iter = 0;
-    let converged = true;
-
-    while (iter < RECONCILE_MAX_ITERATIONS) {
-      iter += 1;
-
-      const { data: extras, error: extrasErr } = await supabase
-        .from("doctor_earnings")
-        .select("id, amount_cents")
-        .eq("doctor_id", doctorId)
-        .eq("status", "available")
-        .is("payout_id", null)
-        .lt("available_at", monthStart);
-
-      if (extrasErr) {
-        // Falha na leitura: não sabemos se há extras. Registra error
-        // mas não bloqueia — o payout original segue válido com o sum
-        // capturado no SELECT inicial. Próximo ciclo reprocessa se
-        // sobrar earning.
-        result.errors += 1;
-        result.errorDetails.push(
-          `reconcile select ${doctorId}: ${extrasErr.message}`
-        );
-        converged = false;
-        break;
-      }
-
-      const extraRows = (extras ?? []) as Array<{
-        id: string;
-        amount_cents: number;
-      }>;
-      if (extraRows.length === 0) break; // convergiu
-
-      const extraIds = extraRows.map((e) => e.id);
-
-      const { data: extraLinked, error: linkExtraErr } = await supabase
-        .from("doctor_earnings")
-        .update({
-          payout_id: newPayoutId,
-          status: "in_payout",
-          updated_at: new Date().toISOString(),
-        })
-        .in("id", extraIds)
-        .eq("status", "available")
-        .is("payout_id", null)
-        .select("id, amount_cents");
-
-      if (linkExtraErr) {
-        result.errors += 1;
-        result.errorDetails.push(
-          `reconcile link ${doctorId}: ${linkExtraErr.message}`
-        );
-        converged = false;
-        break;
-      }
-
-      // Soma só do que EFETIVAMENTE foi linkado (concorrência pode ter
-      // roubado parte pra outro payout — teoricamente impossível hoje,
-      // mas o guard cobre de graça).
-      const actualLinked = (extraLinked ?? []) as Array<{
-        id: string;
-        amount_cents: number;
-      }>;
-
-      if (actualLinked.length === 0) {
-        // Vimos extras no SELECT mas nada foi linked — alguém mais rápido
-        // pegou. Sai pra não loopar à toa; se ainda restarem, próximo
-        // ciclo pega.
-        break;
-      }
-
-      extraSum += actualLinked.reduce((a, r) => a + r.amount_cents, 0);
-      extraCount += actualLinked.length;
-
-      // Se o UPDATE linkou MENOS do que o SELECT viu, provavelmente há
-      // mais chegando — próxima iter re-scaneia. Se linkou TUDO, próxima
-      // iter confirma ausência e sai.
-    }
-
-    if (!converged) {
-      // `reconcile select/link` error já foi registrado acima.
-    } else if (iter >= RECONCILE_MAX_ITERATIONS) {
-      // Potencialmente não convergiu — verifica de novo (barato).
-      const { data: stillExtras } = await supabase
-        .from("doctor_earnings")
-        .select("id")
-        .eq("doctor_id", doctorId)
-        .eq("status", "available")
-        .is("payout_id", null)
-        .lt("available_at", monthStart)
-        .limit(1);
-      if ((stillExtras ?? []).length > 0) {
-        log.warn("reconcile not converged", {
-          doctor_id: doctorId,
-          payout_id: newPayoutId,
-          iterations: iter,
-        });
-        result.warnings.push({
-          doctorId,
-          doctorName,
-          amountCents: 0,
-          earningsCount: 0,
-          reason: "reconcile_incomplete",
-        });
-      }
-    }
-
-    // ────────────────────────────────────────────────────────────────
-    // 4d) Se houve extras, ajusta amount_cents + earnings_count do
-    // payout. Guard `.eq("status", "draft")` evita sobrescrever um
-    // payout que o admin tenha aprovado no meio tempo (cenário extremo
-    // de corrida humana × cron — não deveria acontecer, mas cinto +
-    // suspensório).
-    // ────────────────────────────────────────────────────────────────
-
-    if (extraCount > 0) {
-      const finalAmount = agg.total + extraSum;
-      const finalCount = linkedCount + extraCount;
-
-      const { error: adjErr } = await supabase
-        .from("doctor_payouts")
-        .update({
-          amount_cents: finalAmount,
-          earnings_count: finalCount,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", newPayoutId)
-        .eq("status", "draft");
-
-      if (adjErr) {
-        log.warn("payout amount adjust failed", {
-          payout_id: newPayoutId,
-          err: adjErr.message,
-        });
-        result.errors += 1;
-        result.errorDetails.push(
-          `reconcile adjust ${doctorId}: ${adjErr.message}`
-        );
-      } else {
-        result.earningsLinked += extraCount;
-        result.totalCentsDrafted += extraSum;
-        result.warnings.push({
-          doctorId,
-          doctorName,
-          amountCents: finalAmount,
-          earningsCount: finalCount,
-          reason: "clawback_reconciled",
-        });
-        log.info("payout reconciled", {
-          payout_id: newPayoutId,
-          initial_amount_cents: agg.total,
-          final_amount_cents: finalAmount,
-          extra_count: extraCount,
-        });
-      }
-    }
-
-    // ────────────────────────────────────────────────────────────────
-    // 4e) Se a soma final ficou ≤ 0 (clawback dominante), cancela o
-    // payout automaticamente e libera os earnings pro próximo ciclo.
-    //
-    // Cenário: médica teve +300 em earnings elegíveis, mas um
-    // chargeback gerou um clawback de -400 que foi reconciliado. Payout
-    // de -100 não faz sentido (médica não "deve" dinheiro pra nós via
-    // PIX); o certo é deixar o saldo negativo acumular pro próximo mês
-    // quando ela tiver earnings novas pra compensar.
-    // ────────────────────────────────────────────────────────────────
-
-    const finalAmountCheck = agg.total + extraSum;
-    if (finalAmountCheck <= 0) {
-      const { error: cancelErr } = await supabase
-        .from("doctor_payouts")
-        .update({
-          status: "cancelled",
-          cancelled_reason:
-            "Auto-cancelado: soma final dos earnings vinculados ≤ 0 (clawback ≥ earnings positivos). Earnings liberados pra fila do próximo ciclo.",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", newPayoutId)
-        .eq("status", "draft");
-
-      if (cancelErr) {
-        log.error("payout auto-cancel failed", {
-          payout_id: newPayoutId,
-          err: cancelErr.message,
-        });
-        result.errors += 1;
-        result.errorDetails.push(
-          `reconcile cancel ${doctorId}: ${cancelErr.message}`
-        );
-      } else {
-        // Libera earnings: voltam pra available, unlinked.
-        const { error: releaseErr } = await supabase
-          .from("doctor_earnings")
-          .update({
-            payout_id: null,
-            status: "available",
-            updated_at: new Date().toISOString(),
-          })
-          .eq("payout_id", newPayoutId);
-
-        if (releaseErr) {
-          log.error("earnings release failed", {
-            payout_id: newPayoutId,
-            err: releaseErr.message,
-          });
-          result.errors += 1;
-          result.errorDetails.push(
-            `reconcile release ${doctorId}: ${releaseErr.message}`
-          );
-        }
-
-        // Reverte stats: esse payout "não conta".
-        result.payoutsCreated -= 1;
-        result.totalCentsDrafted -= agg.total + extraSum;
-        result.earningsLinked -= linkedCount + extraCount;
-
-        // Substitui o warning `clawback_reconciled` (se houve) pelo
-        // estado final `clawback_dominant_cancelled`.
-        const lastIdx = result.warnings.findIndex(
-          (w) =>
-            w.doctorId === doctorId && w.reason === "clawback_reconciled"
-        );
-        if (lastIdx >= 0) result.warnings.splice(lastIdx, 1);
-
-        result.warnings.push({
-          doctorId,
-          doctorName,
-          amountCents: finalAmountCheck,
-          earningsCount: linkedCount + extraCount,
-          reason: "clawback_dominant_cancelled",
-        });
-
-        log.warn("payout auto-cancelled (clawback dominant)", {
-          payout_id: newPayoutId,
-          doctor_id: doctorId,
-          final_amount_cents: finalAmountCheck,
-        });
-      }
     }
   }
 
-  return result;
+  // 4d) Ajusta amount_cents + earnings_count se houve extras
+  if (extraCount > 0) {
+    const finalAmount = agg.total + extraSum;
+    const finalCount = linkedCount + extraCount;
+
+    const { error: adjErr } = await supabase
+      .from("doctor_payouts")
+      .update({
+        amount_cents: finalAmount,
+        earnings_count: finalCount,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", newPayoutId)
+      .eq("status", "draft");
+
+    if (adjErr) {
+      log.warn("payout amount adjust failed", {
+        payout_id: newPayoutId,
+        err: adjErr.message,
+      });
+      out.errorDetails.push(
+        `reconcile adjust ${doctorId}: ${adjErr.message}`
+      );
+    } else {
+      out.earningsLinked += extraCount;
+      out.totalCentsDrafted += extraSum;
+      out.warnings.push({
+        doctorId,
+        doctorName,
+        amountCents: finalAmount,
+        earningsCount: finalCount,
+        reason: "clawback_reconciled",
+      });
+      log.info("payout reconciled", {
+        payout_id: newPayoutId,
+        initial_amount_cents: agg.total,
+        final_amount_cents: finalAmount,
+        extra_count: extraCount,
+      });
+    }
+  }
+
+  // 4e) Cancela payout se sum final ≤ 0
+  const finalAmountCheck = agg.total + extraSum;
+  if (finalAmountCheck <= 0) {
+    const { error: cancelErr } = await supabase
+      .from("doctor_payouts")
+      .update({
+        status: "cancelled",
+        cancelled_reason:
+          "Auto-cancelado: soma final dos earnings vinculados ≤ 0 (clawback ≥ earnings positivos). Earnings liberados pra fila do próximo ciclo.",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", newPayoutId)
+      .eq("status", "draft");
+
+    if (cancelErr) {
+      log.error("payout auto-cancel failed", {
+        payout_id: newPayoutId,
+        err: cancelErr.message,
+      });
+      out.errorDetails.push(
+        `reconcile cancel ${doctorId}: ${cancelErr.message}`
+      );
+    } else {
+      const { error: releaseErr } = await supabase
+        .from("doctor_earnings")
+        .update({
+          payout_id: null,
+          status: "available",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("payout_id", newPayoutId);
+
+      if (releaseErr) {
+        log.error("earnings release failed", {
+          payout_id: newPayoutId,
+          err: releaseErr.message,
+        });
+        out.errorDetails.push(
+          `reconcile release ${doctorId}: ${releaseErr.message}`
+        );
+      }
+
+      // Reverte stats: esse payout "não conta".
+      out.payoutsCreated -= 1;
+      out.totalCentsDrafted -= agg.total + extraSum;
+      out.earningsLinked -= linkedCount + extraCount;
+
+      // Substitui o warning `clawback_reconciled` (se houve) pelo
+      // estado final `clawback_dominant_cancelled`.
+      const lastIdx = out.warnings.findIndex(
+        (w) =>
+          w.doctorId === doctorId && w.reason === "clawback_reconciled"
+      );
+      if (lastIdx >= 0) out.warnings.splice(lastIdx, 1);
+
+      out.warnings.push({
+        doctorId,
+        doctorName,
+        amountCents: finalAmountCheck,
+        earningsCount: linkedCount + extraCount,
+        reason: "clawback_dominant_cancelled",
+      });
+
+      log.warn("payout auto-cancelled (clawback dominant)", {
+        payout_id: newPayoutId,
+        doctor_id: doctorId,
+        final_amount_cents: finalAmountCheck,
+      });
+    }
+  }
+
+  return out;
 }

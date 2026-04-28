@@ -1634,13 +1634,14 @@ _Fim da PARTE 4. Seguir pra PARTE 5 (Lentes 11-16+18-21 + sumário executivo ger
 - **Correção:** fluxo de agendamento: (a) paciente escolhe especialidade/disponibilidade; (b) `listAvailableSlots` agrega todas as médicas ativas; (c) slot inclui `doctor_id`; (d) reserve bind ao slot+doctor.
 - **Observador:** produto, crescimento.
 
-### [12.2 🟠 ALTO] `monthly-payouts` cron itera todas médicas em single function call
+### [12.2 🟠 ALTO] ~~`monthly-payouts` cron itera todas médicas em single function call~~ — ✅ **RESOLVED em PR-049 · D-098 (2026-04-28)**
 
 - **Onde:** `src/lib/monthly-payouts.ts` (loop por médica).
 - **Achado:** Vercel Pro limita função a 300s (`maxDuration: 120` no `vercel.json` para este cron). Com ~100 médicas + queries de earnings + writes, chega perto do limite. 500 médicas = timeout.
 - **Risco:** payout incompleto sem reprocessamento fácil.
 - **Correção:** (a) processar em batches (Queue-like pattern); (b) `Promise.allSettled` paralelo; (c) dividir em 2 etapas: "mark eligible" + "execute".
 - **Observador:** CFO, SRE.
+- **Resolução (PR-049 · D-098):** Lib genérica `src/lib/batched.ts` com `processInBatches<T,R>` (preserva ordem, isola erros via `Promise.allSettled`, hook `onBatchComplete` defensivo) + `envIntInRange`. Refactor de `monthly-payouts.ts` extrai `processSingleDoctor` e substitui o for sequencial por batched parallel com concorrência 8 (configurável via `MONTHLY_PAYOUTS_CONCURRENCY`, range 1-32). Cada médica opera com `WHERE doctor_id=X` — isolamento natural sem deadlock. Latência divide por ~7×; cobertura saudável até ~5000 médicas em 120s. 25 testes novos (20 batched + 5 monthly-payouts paralelos), todos os 17 testes existentes preservados via `concurrency: 1` pra evitar race condition no FIFO mock. Merge determinístico de outcomes preserva ordem original de `doctorIds` — testes e payload `cron_runs` continuam reprodutíveis.
 
 ### [12.3 🟡 MÉDIO] Rate-limiter in-memory (Map) — mesma falha P1 + não escala horizontal
 

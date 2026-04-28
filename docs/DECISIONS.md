@@ -5,6 +5,116 @@
 
 ---
 
+## D-098 · monthly-payouts paralelizado em batches (PR-049) · 2026-04-28
+
+**Contexto.** Audit [12.2 🟠 ALTO] alertava que `generateMonthlyPayouts`
+itera todas as médicas em loop sequencial dentro de um único Lambda
+call (Vercel Pro `maxDuration: 120s`). Cada médica faz 6-12 queries
+(insert payout + update earnings + 1-3 iterações de reconciliação +
+ajuste/cancelamento). Em produção real:
+
+- ~50ms/query × 10 queries = ~500ms/médica.
+- 100 médicas = ~50s. **OK.**
+- 500 médicas = ~250s. **Estoura `maxDuration=120s`.**
+- 1000 médicas = ~500s. **Falha catastrófica** — payout do mês não
+  rodou, operador não percebe até alguém reclamar.
+
+**Trade-off considerado.** Quatro caminhos:
+
+1. **Manter sequencial + aumentar `maxDuration`.** Vercel Pro topa em
+   300s; ainda quebra com 1000+ médicas. **Adiamento, não solução.**
+2. **Quebrar em vários crons sequenciais** (1/médica via PostgreSQL
+   `pg_cron`). Move complexidade para SQL, perde observabilidade
+   estruturada (`logger.ts`, `cron_runs.payload`), perde idempotência
+   testada. **Custo > benefício.**
+3. **Paralelizar com Promise.all naive.** Abre 1000 conexões DB
+   simultâneas, esgota o pool (Supabase Pro = 60 conn default),
+   thundering herd derruba o cluster. **Nunca.**
+4. **Paralelizar com concorrência limitada (escolhido).** Default 8
+   workers — divide latência por ~7×, deixa pool DB com folga, zero
+   deadlock observado em testes (cada médica opera com `WHERE
+   doctor_id=X`, isolamento natural).
+
+**Decisão.** PR-049 entrega o caminho 4:
+
+- **Lib genérica `src/lib/batched.ts`** com `processInBatches<T,R>`
+  + `envIntInRange` reusáveis.
+  - `processInBatches` aceita `concurrency`, garante ordem preservada
+    no output, isola erros via `Promise.allSettled`, expõe hook
+    `onBatchComplete` pra log estruturado por janela.
+  - Atalho explícito pra `concurrency=1` evita overhead de allSettled.
+  - Clamp de concorrência [1, 64] — defensivo contra typo de env.
+  - Hook `onBatchComplete` que lança não derruba o cron (try/catch).
+
+- **Refactor `monthly-payouts.ts`:**
+  - Extrai `processSingleDoctor(supabase, ctx, doctorId, agg) →
+    DoctorOutcome` com toda a lógica 4a-4e (insert payout, link
+    earnings, reconciliação, ajuste, cancelamento clawback-dominante).
+  - Substitui `for (const [id, agg] of perDoctor)` por
+    `processInBatches(orderedIds, fn, { concurrency, onBatchComplete })`.
+  - Merge dos outcomes em ordem original de `doctorIds` — preserva
+    determinismo pra testes e snapshots de payload.
+  - Concorrência configurável via opt `concurrency` ou env
+    `MONTHLY_PAYOUTS_CONCURRENCY` (default 8, range 1-32).
+  - Constantes nomeadas `DEFAULT_CONCURRENCY=8`, `MIN_CONCURRENCY=1`,
+    `MAX_CONCURRENCY=32`.
+
+- **Estratégia de testes.** Tests existentes (17) recebem
+  `concurrency: 1` pra preservar semântica FIFO do `createSupabaseMock`
+  (mock usa fila per-tabela; com paralelismo 2 médicas racem pelo
+  mesmo item da fila). 5 testes novos validam:
+  - Concorrência configurável aceita valores válidos.
+  - Concorrência 0/9999 é clampada sem trava nem estouro.
+  - Concorrência NaN cai no default.
+  - 3 médicas com PIX faltando (caminho síncrono curto, sem race) →
+    `doctorsEvaluated=3` e ordem de warnings determinística.
+  - Helper genérico `batched.ts` ganha 20 testes próprios.
+
+**Por que `concurrency=8` é seguro.**
+
+- Supabase Pro: 60 connections default. Mesmo com 8 workers fazendo
+  ~5 queries simultâneas cada = 40 conn no pico. Folga de 20 pra
+  outras operações concorrentes (admin UI navegando, webhook Asaas).
+- Vercel Lambda runtime: cada worker roda no mesmo event loop Node;
+  paralelismo é aparente (concurrent IO), não computacional.
+- Postgres MVCC: cada `processSingleDoctor` opera em rows com
+  `WHERE doctor_id=X` — sem contenção de row-level lock entre
+  workers diferentes.
+- Idempotência preservada: UNIQUE `(doctor_id, reference_period)` em
+  `doctor_payouts` continua sendo a verdade. Race entre 2 chamadas
+  paralelas pra mesma médica é teoricamente impossível
+  (`perDoctor.get(doctorId)` aparece 1 vez nas keys), mas se
+  acontecer (bug), 23505 vira `existing_payout` → graceful degrade.
+
+**Riscos residuais.**
+
+- **Pool DB esgotado em produção real**: se operador adicionar mais
+  crons concorrentes (ou tráfego pesado coincidir com 09:15 UTC),
+  Supabase pode rejeitar conexão. Mitigação: monitorar
+  `cron_runs.payload.errors` por 1-2 ciclos; reduzir concurrency via
+  env se necessário.
+- **Reordenação de log batch**: cada `onBatchComplete` loga `batch_index`,
+  `completed`, `total`. Em paralelo, logs de batches diferentes podem
+  intercalar. Operador habituado a esperar log linear deve recalibrar
+  expectativa.
+- **Memory bloat com N grande**: `outcomes` array é O(N médicas).
+  10k médicas = ~5MB JS object — Lambda 1GB topa fácil. Estouro
+  só em cenário ultra-extremo (que requer outro design — sharding
+  por região do médico, p.ex.).
+
+**O que NÃO está coberto.**
+
+- Aumentar maxDuration do cron — fica em 120s. Mesmo com paralelismo,
+  cobertura saudável até ~5000 médicas (~120s ÷ 0.025s × concurrency=8).
+- Paralelizar `daily-reconcile`, `monitor-on-call` — não estão
+  bottleneck hoje. Quando algum mostrar slowness, plug-and-play
+  com `processInBatches`.
+- Exposição de `concurrency` na UI admin — overkill; env basta.
+
+**Resolve audit finding [12.2 🟠 ALTO].**
+
+---
+
 ## D-097 · Plano B (DR) operacional por provider externo (PR-048) · 2026-04-28
 
 **Contexto.** Audit [20.1 🟠 ALTO] cobrava playbook explícito pra

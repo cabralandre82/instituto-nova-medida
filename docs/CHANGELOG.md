@@ -6,6 +6,101 @@
 
 ---
 
+## 2026-04-28 · monthly-payouts paralelizado em batches (PR-049 · D-098) · IA
+
+**Por quê:** finding [12.2 🟠 ALTO] do audit alertava que
+`generateMonthlyPayouts` iterava todas as médicas em loop sequencial
+dentro de single Lambda call. Com ~50ms × 10 queries × N médicas:
+500 médicas estouravam o `maxDuration=120s` do Vercel cron mensal,
+1000+ era falha catastrófica silenciosa (payout não rodaria, operador
+só descobriria via reclamação).
+
+**Estratégia.** Em vez de aumentar maxDuration (adia o problema),
+quebrar em vários crons (perde observabilidade), ou Promise.all naive
+(thundering herd → esgota pool DB), escolhemos paralelismo com
+**concorrência limitada (default 8)** — divide latência por ~7×,
+deixa pool DB com folga, isolamento natural por `WHERE doctor_id=X`
+elimina deadlock entre workers.
+
+**Entregue:**
+
+- **Lib genérica `src/lib/batched.ts`:**
+  - `processInBatches<T,R>(items, fn, { concurrency, onBatchComplete })`
+    com ordem preservada, isolamento de erros via `Promise.allSettled`,
+    clamp [1, 64], atalho explícito pra `concurrency=1`, hook
+    `onBatchComplete` defensivo (try/catch, não derruba o cron).
+  - `envIntInRange(name, fallback, min, max)` reusável pra outros
+    crons configurarem batching via env var sem repetir parsing.
+  - 20 testes unitários cobrindo array vazio, ordem, isolamento,
+    concorrência respeitada, clamp 0/9999, hook lançante, erro
+    não-Error string-coerced, BatchedOutcome type-level smoke.
+
+- **Refactor `src/lib/monthly-payouts.ts`:**
+  - Extrai `processSingleDoctor(supabase, ctx, doctorId, agg) →
+    DoctorOutcome` com toda a lógica 4a-4e (insert payout + link
+    earnings + reconciliação ≤ 3 iters + ajuste/cancelamento
+    clawback-dominante). Captura erros internamente em `errorDetails`
+    pra que `processInBatches` veja sempre `ok=true` (separa "erro
+    de query" de "exceção JS não capturada").
+  - Substitui for sequencial por
+    `processInBatches(orderedIds, fn, { concurrency, onBatchComplete })`.
+  - Merge determinístico de outcomes em ordem original de `doctorIds`
+    — testes e snapshots de `cron_runs.payload` continuam reprodutíveis.
+  - Concorrência configurável via opt `concurrency` ou env
+    `MONTHLY_PAYOUTS_CONCURRENCY` (default 8, range 1-32).
+  - Hook `onBatchComplete` loga progresso estruturado por janela
+    (`batch_index`, `completed`, `total`, `ok`, `errors`) — operador
+    vê fluxo em `/admin/crons` mesmo durante execução longa.
+
+- **Estratégia de testes.** Os 17 testes existentes recebem
+  `concurrency: 1` no opts pra preservar a semântica FIFO do
+  `createSupabaseMock` (mock usa fila per-tabela; com paralelismo
+  duas médicas racem pelo mesmo item da fila, gerando flakiness).
+  Em produção, default permanece 8.
+
+  5 testes novos validam o caminho concorrente:
+  - Concurrency configurável aceita valores válidos sem crash.
+  - Concurrency=0 é clampado a 1 (não trava).
+  - Concurrency > MAX é clampado (não estoura pool).
+  - Concurrency=NaN cai no default (não NaN-poisoned).
+  - 3 médicas com PIX faltando → `doctorsEvaluated=3` e ordem
+    determinística de warnings (`["d1","d2","d3"]`).
+
+**Por que `concurrency=8` é seguro (documentado em D-098):**
+
+- Supabase Pro: 60 conn default. 8 workers × 5 queries simultâneas =
+  40 conn no pico. Folga de 20 pra outras operações.
+- Vercel Lambda: paralelismo é IO-concurrent (não computacional),
+  Node event loop multiplexa naturalmente.
+- Postgres MVCC: rows com `WHERE doctor_id=X` — sem contenção
+  row-level entre workers diferentes.
+- Idempotência preservada: UNIQUE `(doctor_id, reference_period)`
+  vira graceful degrade (`existing_payout`) caso bug crie race
+  improvável.
+
+**Verificação:** TSC clean, ESLint clean, Vitest 1695 → **1720
+(85 arquivos, +25 testes)**, `next build` clean.
+
+**Resolve audit finding [12.2 🟠 ALTO].**
+
+**Riscos residuais documentados em D-098:**
+- Pool DB esgotado se operador adicionar mais crons concorrentes
+  ou tráfego pesado coincidir com 09:15 UTC — operador reduz
+  concurrency via env se necessário.
+- Logs de batches paralelos podem intercalar — operador deve
+  recalibrar expectativa (não-linear em paralelo).
+- Memory bloat com 10k+ médicas — só estoura em cenário extremo,
+  exige sharding (out-of-scope).
+
+**Próximo:** Estado pós-PR-049: **todos os ALTOs que IA pode fechar
+sozinha estão fechados** ([7.1 PR-023], [3.X PR-038/PR-047], [6.6
+PR-033-B], [21.1] continuam bloqueados em operator-input). Recomendação:
+seguir com MÉDIOS reativos (PR-049-B Daily.co room cleanup, PR-049-C
+WA quota alert) ou pausar pra operador validar PR-045/PR-048 em
+produção.
+
+---
+
 ## 2026-04-28 · Plano B (DR) operacional por provider externo (PR-048 · D-097) · IA
 
 **Por quê:** finding [20.1 🟠 ALTO] do audit indicava ausência de
