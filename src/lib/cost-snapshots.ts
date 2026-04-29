@@ -32,6 +32,44 @@ import { logger } from "./logger";
 
 const log = logger.with({ mod: "cost-snapshots" });
 
+/**
+ * Extrai uma string-mensagem útil de QUALQUER coisa que pode ser
+ * lançada — Error, PostgrestError ({code, message, details, hint}),
+ * objeto plano, string crua, ou primitivo. PR-045-B fix: o catch
+ * antigo `e instanceof Error ? e.message : String(e)` produzia
+ * `"[object Object]"` pra erros do Supabase (não são instâncias
+ * de Error nativo) — esse stub literal foi gravado em
+ * `cost_snapshots.metadata.error_message` no primeiro dry-run e
+ * inutiliza forensics.
+ *
+ * Estratégia (em ordem de preferência):
+ *   1. Error nativo → `e.message`.
+ *   2. String crua → ela mesma.
+ *   3. Objeto com `.message` string → essa propriedade.
+ *   4. Objeto serializável → `JSON.stringify(e)`.
+ *   5. Tudo o mais → `String(e)`.
+ */
+export function extractErrorMessage(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  if (e && typeof e === "object") {
+    const obj = e as Record<string, unknown>;
+    if (typeof obj.message === "string" && obj.message.length > 0) {
+      // PostgrestError: anexa code se disponível pra forensics
+      if (typeof obj.code === "string" && obj.code.length > 0) {
+        return `${obj.message} [${obj.code}]`;
+      }
+      return obj.message;
+    }
+    try {
+      return JSON.stringify(e);
+    } catch {
+      return "[unserializable error]";
+    }
+  }
+  return String(e);
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Tipos públicos
 // ──────────────────────────────────────────────────────────────────────────
@@ -427,7 +465,7 @@ export async function computeDailySnapshot(
     waDoctorCount = d.count ?? 0;
     waOnDemandCount = o.count ?? 0;
   } catch (e) {
-    waError = e instanceof Error ? e.message : String(e);
+    waError = extractErrorMessage(e);
     log.warn("wa snapshot query failed", { date, err: waError });
   }
   const wa = estimateWaCostCents({
@@ -480,7 +518,7 @@ export async function computeDailySnapshot(
       }
     }
   } catch (e) {
-    asaasError = e instanceof Error ? e.message : String(e);
+    asaasError = extractErrorMessage(e);
     log.warn("asaas snapshot query failed", { date, err: asaasError });
   }
   const asaas = estimateAsaasCostCents({
@@ -505,27 +543,40 @@ export async function computeDailySnapshot(
   // ── Daily ──────────────────────────────────────────────────────────
   // Conta appointments concluídas no dia × duração (proxy de
   // minutos consumidos em sala Daily).
+  //
+  // PR-045-B fix: `appointments` NÃO tem `consultation_minutes`
+  // (essa coluna está em `doctors`). Usamos `duration_seconds`
+  // (preenchido pelo webhook `meeting.ended` do Daily — sempre
+  // existe quando status='completed'); fallback de 30 min quando
+  // duration_seconds é null (raro).
   let dailyRooms = 0;
   let dailyTotalMinutes = 0;
   let dailyError: string | null = null;
   try {
     const { data, error } = await supabase
       .from("appointments")
-      .select("consultation_minutes,status,scheduled_at")
+      .select("duration_seconds,status,scheduled_at")
       .gte("scheduled_at", fromIso)
       .lt("scheduled_at", toIso)
       .eq("status", "completed");
     if (error) throw error;
     const rows = (data ?? []) as Array<{
-      consultation_minutes: number | null;
+      duration_seconds: number | null;
     }>;
     dailyRooms = rows.length;
     for (const r of rows) {
-      const mins = Number(r.consultation_minutes);
-      dailyTotalMinutes += Number.isFinite(mins) && mins > 0 ? mins : 30;
+      const seconds = Number(r.duration_seconds);
+      // Default conservador: consulta padrão de 30 min quando
+      // duration_seconds não foi preenchido (improvável em status
+      // 'completed' mas defensivo).
+      const mins =
+        Number.isFinite(seconds) && seconds > 0
+          ? Math.round(seconds / 60)
+          : 30;
+      dailyTotalMinutes += mins;
     }
   } catch (e) {
-    dailyError = e instanceof Error ? e.message : String(e);
+    dailyError = extractErrorMessage(e);
     log.warn("daily snapshot query failed", { date, err: dailyError });
   }
   const daily = estimateDailyCostCents({

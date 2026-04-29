@@ -22,6 +22,7 @@ import {
   estimateWaCostCents,
   estimateDailyCostCents,
   detectCostAnomaly,
+  extractErrorMessage,
 } from "./cost-snapshots";
 
 describe("centsToBRL", () => {
@@ -269,6 +270,74 @@ describe("estimateDailyCostCents", () => {
       rates,
     });
     expect(r.breakdown.avgMinutesPerRoom).toBe(33);
+  });
+});
+
+describe("extractErrorMessage (PR-045-B)", () => {
+  it("Error nativo → e.message", () => {
+    expect(extractErrorMessage(new Error("oops"))).toBe("oops");
+  });
+
+  it("string crua → ela mesma", () => {
+    expect(extractErrorMessage("plain string error")).toBe(
+      "plain string error"
+    );
+  });
+
+  it("PostgrestError com message + code → 'message [code]'", () => {
+    const pgErr = {
+      message: "column does not exist",
+      code: "42703",
+      details: null,
+      hint: null,
+    };
+    expect(extractErrorMessage(pgErr)).toBe(
+      "column does not exist [42703]"
+    );
+  });
+
+  it("Objeto com message string mas sem code → só a message", () => {
+    expect(extractErrorMessage({ message: "boom" })).toBe("boom");
+  });
+
+  it("Objeto serializável sem message → JSON.stringify", () => {
+    const result = extractErrorMessage({ status: 500, body: "x" });
+    expect(result).toContain('"status":500');
+  });
+
+  it("Objeto com message vazia cai no JSON.stringify", () => {
+    const result = extractErrorMessage({ message: "" });
+    expect(result).toBe('{"message":""}');
+  });
+
+  it("null → 'null'", () => {
+    expect(extractErrorMessage(null)).toBe("null");
+  });
+
+  it("undefined → 'undefined'", () => {
+    expect(extractErrorMessage(undefined)).toBe("undefined");
+  });
+
+  it("number → toString", () => {
+    expect(extractErrorMessage(42)).toBe("42");
+  });
+
+  it("objeto com referência circular → '[unserializable error]'", () => {
+    const obj: Record<string, unknown> = { a: 1 };
+    obj.self = obj;
+    expect(extractErrorMessage(obj)).toBe("[unserializable error]");
+  });
+
+  it("nunca retorna '[object Object]' (regression PR-045-B)", () => {
+    const cases: unknown[] = [
+      { message: "x", code: "y" },
+      { detail: "raw", hint: "use foo" },
+      Object.create(null),
+      { toString: () => "should-not-be-used" },
+    ];
+    for (const c of cases) {
+      expect(extractErrorMessage(c)).not.toBe("[object Object]");
+    }
   });
 });
 
